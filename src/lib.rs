@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::io::{self, Read, Write};
-// Removed unused serde derives; index persistence moved to CLI text/binary format
+use std::fs::File;
+use std::path::Path;
+use memmap2::Mmap;
 
 /// A node in the trie.
 #[derive(Default, Debug)]
@@ -14,6 +16,14 @@ struct TrieNode {
 pub struct Trie {
     root: TrieNode,
 }
+/// Internal result of prefix lookup: exact node or mid-edge child + label remainder
+enum FindResult<'a> {
+    /// `prefix` ended exactly at this node
+    Node(&'a TrieNode),
+    /// `prefix` fell in the middle of an edge: child node and the rest of its label
+    EdgeMid(&'a TrieNode, &'a str),
+}
+
 /// Statistics collected during trie traversal.
 #[derive(Default, Debug, Clone)]
 pub struct TraverseStats {
@@ -24,6 +34,7 @@ pub struct TraverseStats {
     /// Number of keys (terminal nodes) collected.
     pub keys_collected: usize,
 }
+
 /// Iterator over entries in the compressed radix trie with on-the-fly grouping.
 #[derive(Clone, Debug)]
 pub struct TrieGroupIter<'a> {
@@ -38,12 +49,12 @@ impl<'a> TrieGroupIter<'a> {
     pub(crate) fn empty(prefix: String, delimiter: Option<char>) -> Self {
         TrieGroupIter { stack: Vec::new(), prefix, delimiter, seen: HashSet::new() }
     }
-}
 
-impl<'a> TrieGroupIter<'a> {
     /// Create a new iterator that groups at the first `delimiter` for each prefix.
     pub(crate) fn new(root: &'a TrieNode, prefix: String, delimiter: Option<char>) -> Self {
-        TrieGroupIter { stack: vec![(root, String::new())], prefix, delimiter, seen: HashSet::new() }
+        // Initialize stack with the full prefix as starting path
+        let init_path = prefix.clone();
+        TrieGroupIter { stack: vec![(root, init_path)], prefix, delimiter, seen: HashSet::new() }
     }
 }
 
@@ -54,16 +65,15 @@ impl<'a> Iterator for TrieGroupIter<'a> {
             if let Some(d) = self.delimiter {
                 if path.starts_with(&self.prefix) {
                     let suffix = &path[self.prefix.len()..];
-                if let Some(pos) = suffix.find(d) {
-                    let group = path[..self.prefix.len() + pos + 1].to_string();
-                    if self.seen.insert(group.clone()) {
-                        // yield this CommonPrefix and prune subtree
-                        return Some(Entry::CommonPrefix(group));
+                    if let Some(pos) = suffix.find(d) {
+                        let group = path[..self.prefix.len() + pos + 1].to_string();
+                        if self.seen.insert(group.clone()) {
+                            return Some(Entry::CommonPrefix(group));
+                        }
+                        continue;
                     }
-                    // already yielded, skip this subtree
-                    continue;
-                }
-                    if path.ends_with(d) && self.seen.insert(path.clone()) {
+                    // For descendant paths with trailing delimiter, yield grouping
+                    if !suffix.is_empty() && path.ends_with(d) && self.seen.insert(path.clone()) {
                         return Some(Entry::CommonPrefix(path.clone()));
                     }
                 }
@@ -80,6 +90,12 @@ impl<'a> Iterator for TrieGroupIter<'a> {
             }
             // after queuing children, yield key if terminal
             if node.is_end && path.starts_with(&self.prefix) {
+                // If the key ends with the delimiter, present it as a common prefix
+                if let Some(d) = self.delimiter {
+                    if path.ends_with(d) {
+                        return Some(Entry::CommonPrefix(path.clone()));
+                    }
+                }
                 return Some(Entry::Key(path.clone()));
             }
         }
@@ -111,7 +127,6 @@ impl Trie {
                     matched = true;
                     break;
                 } else if label.starts_with(rem) {
-                    // prefix ends in middle of this edge
                     return Some(node);
                 }
             }
@@ -120,6 +135,34 @@ impl Trie {
             }
         }
         Some(node)
+    }
+    /// Extended prefix lookup: if `prefix` ends inside an edge label, return child and remainder.
+    fn find_node_extra<'a>(&'a self, prefix: &str) -> Option<FindResult<'a>> {
+        let mut node = &self.root;
+        let mut rem = prefix;
+        if rem.is_empty() {
+            return Some(FindResult::Node(node));
+        }
+        while !rem.is_empty() {
+            let mut matched = false;
+            for (label, child) in &node.children {
+                if rem.starts_with(label) {
+                    // consume full edge label and descend
+                    rem = &rem[label.len()..];
+                    node = child.as_ref();
+                    matched = true;
+                    break;
+                } else if label.starts_with(rem) {
+                    // prefix ends mid-edge; prepare child partial match
+                    let tail = &label[rem.len()..];
+                    return Some(FindResult::EdgeMid(child.as_ref(), tail));
+                }
+            }
+            if !matched {
+                return None;
+            }
+        }
+        Some(FindResult::Node(node))
     }
     /// Create a new, empty Trie.
     pub fn new() -> Self {
@@ -138,15 +181,11 @@ impl Trie {
                 if lcp == 0 {
                     continue;
                 }
-                // Remove the matching child to modify it
                 let (orig_label, orig_child) = node.children.remove(i);
                 if lcp < orig_label.len() {
-                    // Partial match -> split the edge
                     let mut intermediate = TrieNode::default();
-                    // Remainder of the original label
                     let label_rem = &orig_label[lcp..];
                     intermediate.children.push((label_rem.to_string(), orig_child));
-                    // Remainder of the new key
                     let key_rem = &suffix[lcp..];
                     if key_rem.is_empty() {
                         intermediate.is_end = true;
@@ -155,28 +194,22 @@ impl Trie {
                         leaf.is_end = true;
                         intermediate.children.push((key_rem.to_string(), Box::new(leaf)));
                     }
-                    // Insert the new split edge
                     let prefix_label = &orig_label[..lcp];
                     node.children.insert(i, (prefix_label.to_string(), Box::new(intermediate)));
                     return;
                 } else {
-                    // Edge fully matches prefix of suffix -> descend
                     suffix = &suffix[lcp..];
-                    // Re-insert without modification
                     node.children.insert(i, (orig_label, orig_child));
                     if suffix.is_empty() {
-                        // Exact key end: mark this node
                         node.children[i].1.is_end = true;
                         return;
                     }
-                    // Descend into child node
                     node = &mut node.children[i].1;
                     matched = true;
                     break;
                 }
             }
             if !matched {
-                // No matching edge -> add new leaf
                 let mut leaf = TrieNode::default();
                 leaf.is_end = true;
                 node.children.push((suffix.to_string(), Box::new(leaf)));
@@ -186,11 +219,20 @@ impl Trie {
     }
 
     /// Streaming iterator over entries under `prefix`, grouping at the first `delimiter`.
+    /// Supports prefixes that fall mid-edge by routing into the single matching subtree.
     pub fn list_iter<'a>(&'a self, prefix: &str, delimiter: Option<char>) -> TrieGroupIter<'a> {
-        if let Some(node) = self.find_node(prefix) {
-            TrieGroupIter::new(node, prefix.to_string(), delimiter)
-        } else {
-            TrieGroupIter::empty(prefix.to_string(), delimiter)
+        // Find either an exact node or a mid-edge match
+        let pref = prefix.to_string();
+        match self.find_node_extra(prefix) {
+            Some(FindResult::Node(node)) => {
+                TrieGroupIter::new(node, pref, delimiter)
+            }
+            Some(FindResult::EdgeMid(child, rem_label)) => {
+                // Start directly at the partial-match child, seeding full path = prefix + rem_label
+                let mut init = pref.clone(); init.push_str(rem_label);
+                TrieGroupIter { stack: vec![(child, init)], prefix: pref, delimiter, seen: HashSet::new() }
+            }
+            None => TrieGroupIter::empty(pref, delimiter),
         }
     }
     /// List entries under `prefix` into a Vec<Entry>, grouping at the first `delimiter`.
@@ -213,18 +255,16 @@ impl Trie {
         }
         prefix_len
     }
+
     /// Serialize the compressed radix trie (pre-order with edge labels).
     pub fn write_radix<W: Write>(&self, w: &mut W) -> io::Result<()> {
         Self::write_node(&self.root, w)
     }
 
     fn write_node<W: Write>(node: &TrieNode, w: &mut W) -> io::Result<()> {
-        // Write end-of-key flag
         w.write_all(&[node.is_end as u8])?;
-        // Write number of children
         let count = node.children.len() as u16;
         w.write_all(&count.to_le_bytes())?;
-        // Write each child: [label_len][label_bytes][child_subtree]
         for (label, child) in &node.children {
             let len = label.len() as u16;
             w.write_all(&len.to_le_bytes())?;
@@ -234,12 +274,11 @@ impl Trie {
         Ok(())
     }
 
-    /// Deserialize a radix trie from a pre-order serialized form.
+    /// Deserialize a radix trie from any `Read`.
     pub fn read_radix<R: Read>(r: &mut R) -> io::Result<Self> {
         let root = Self::read_node(r)?;
         Ok(Trie { root })
     }
-
 
     fn read_node<R: Read>(r: &mut R) -> io::Result<TrieNode> {
         let mut flag = [0u8; 1];
@@ -261,8 +300,46 @@ impl Trie {
         }
         Ok(TrieNode { children, is_end })
     }
-} // end impl Trie
 
+    /// Load a trie by memory-mapping the serialized file.
+    pub fn load_mmap<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        let file = File::open(path)?;
+        // SAFETY: we won't modify the file
+        let mmap = unsafe { Mmap::map(&file)? };
+        let buf = &mmap[..];
+        let mut pos = 0;
+        let root = Self::read_node_from_buf(buf, &mut pos)?;
+        Ok(Trie { root })
+    }
+
+    fn read_node_from_buf(buf: &[u8], pos: &mut usize) -> io::Result<TrieNode> {
+        if *pos + 3 > buf.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated header"));
+        }
+        let is_end = buf[*pos] != 0;
+        *pos += 1;
+        let count = u16::from_le_bytes([buf[*pos], buf[*pos + 1]]) as usize;
+        *pos += 2;
+        let mut children = Vec::with_capacity(count);
+        for _ in 0..count {
+            if *pos + 2 > buf.len() {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated label len"));
+            }
+            let label_len = u16::from_le_bytes([buf[*pos], buf[*pos + 1]]) as usize;
+            *pos += 2;
+            if *pos + label_len > buf.len() {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated label"));
+            }
+            let label = std::str::from_utf8(&buf[*pos..*pos + label_len])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                .to_string();
+            *pos += label_len;
+            let child = Self::read_node_from_buf(buf, pos)?;
+            children.push((label, Box::new(child)));
+        }
+        Ok(TrieNode { children, is_end })
+    }
+} // end impl Trie
 
 /// A listing entry returned by `Trie::list`: either a full key or a grouped prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,13 +351,11 @@ pub enum Entry {
 }
 
 impl Entry {
-    /// Get the inner string slice.
     pub fn as_str(&self) -> &str {
         match self {
             Entry::Key(s) | Entry::CommonPrefix(s) => s,
         }
     }
-    /// Return the entry type as a string: "Key" or "CommonPrefix".
     pub fn kind(&self) -> &'static str {
         match self {
             Entry::Key(_) => "Key",
@@ -289,13 +364,13 @@ impl Entry {
     }
 }
 
-impl PartialOrd for Entry {
+impl std::cmp::PartialOrd for Entry {
     fn partial_cmp(&self, other: &Entry) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for Entry {
+impl std::cmp::Ord for Entry {
     fn cmp(&self, other: &Entry) -> std::cmp::Ordering {
         self.as_str().cmp(other.as_str())
     }
