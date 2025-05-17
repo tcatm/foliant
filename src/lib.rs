@@ -1,12 +1,9 @@
-use std::collections::BTreeSet;
-use std::io::{self, Read, Write, Cursor};
-use std::fs::File;
-use std::path::Path;
-use memmap2::Mmap;
+use std::collections::HashSet;
+use std::io::{self, Read, Write};
 // Removed unused serde derives; index persistence moved to CLI text/binary format
 
 /// A node in the trie.
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct TrieNode {
     // Each edge is labeled by a (possibly multi-character) string
     children: Vec<(String, Box<TrieNode>)>,
@@ -27,8 +24,103 @@ pub struct TraverseStats {
     /// Number of keys (terminal nodes) collected.
     pub keys_collected: usize,
 }
+/// Iterator over entries in the compressed radix trie with on-the-fly grouping.
+#[derive(Clone, Debug)]
+pub struct TrieGroupIter<'a> {
+    stack: Vec<(&'a TrieNode, String)>,
+    prefix: String,
+    delimiter: Option<char>,
+    seen: HashSet<String>,
+}
+
+impl<'a> TrieGroupIter<'a> {
+    /// Create an empty iterator (no entries) for nonexistent prefix
+    pub(crate) fn empty(prefix: String, delimiter: Option<char>) -> Self {
+        TrieGroupIter { stack: Vec::new(), prefix, delimiter, seen: HashSet::new() }
+    }
+}
+
+impl<'a> TrieGroupIter<'a> {
+    /// Create a new iterator that groups at the first `delimiter` for each prefix.
+    pub(crate) fn new(root: &'a TrieNode, prefix: String, delimiter: Option<char>) -> Self {
+        TrieGroupIter { stack: vec![(root, String::new())], prefix, delimiter, seen: HashSet::new() }
+    }
+}
+
+impl<'a> Iterator for TrieGroupIter<'a> {
+    type Item = Entry;
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some((node, path)) = self.stack.pop() {
+            if let Some(d) = self.delimiter {
+                if path.starts_with(&self.prefix) {
+                    let suffix = &path[self.prefix.len()..];
+                if let Some(pos) = suffix.find(d) {
+                    let group = path[..self.prefix.len() + pos + 1].to_string();
+                    if self.seen.insert(group.clone()) {
+                        // yield this CommonPrefix and prune subtree
+                        return Some(Entry::CommonPrefix(group));
+                    }
+                    // already yielded, skip this subtree
+                    continue;
+                }
+                    if path.ends_with(d) && self.seen.insert(path.clone()) {
+                        return Some(Entry::CommonPrefix(path.clone()));
+                    }
+                }
+            }
+            // descend children in reverse lex order for correct ordering
+            {
+                let mut children: Vec<_> = node.children.iter().collect();
+                children.sort_by(|a, b| b.0.cmp(&a.0));
+                for (label, child) in children {
+                    let mut new_path = path.clone();
+                    new_path.push_str(label);
+                    self.stack.push((child, new_path));
+                }
+            }
+            // after queuing children, yield key if terminal
+            if node.is_end && path.starts_with(&self.prefix) {
+                return Some(Entry::Key(path.clone()));
+            }
+        }
+        None
+    }
+}
+
+// Allow comparing iterator directly to Vec<Entry> in tests
+impl<'a> PartialEq<Vec<Entry>> for TrieGroupIter<'a> {
+    fn eq(&self, other: &Vec<Entry>) -> bool {
+        self.clone().collect::<Vec<_>>() == *other
+    }
+}
 
 impl Trie {
+    /// Locate the node corresponding to the end of `prefix` in the compressed trie.
+    fn find_node<'a>(&'a self, prefix: &str) -> Option<&'a TrieNode> {
+        let mut node = &self.root;
+        let mut rem = prefix;
+        if rem.is_empty() {
+            return Some(node);
+        }
+        while !rem.is_empty() {
+            let mut matched = false;
+            for (label, child) in &node.children {
+                if rem.starts_with(label) {
+                    rem = &rem[label.len()..];
+                    node = &*child;
+                    matched = true;
+                    break;
+                } else if label.starts_with(rem) {
+                    // prefix ends in middle of this edge
+                    return Some(node);
+                }
+            }
+            if !matched {
+                return None;
+            }
+        }
+        Some(node)
+    }
     /// Create a new, empty Trie.
     pub fn new() -> Self {
         Trie { root: TrieNode::default() }
@@ -93,112 +185,17 @@ impl Trie {
         }
     }
 
-    /// List entries under `prefix`. If `delimiter` is None, returns all full keys
-    /// starting with `prefix`. If `Some(d)`, groups by the first `d` after the prefix.
+    /// Streaming iterator over entries under `prefix`, grouping at the first `delimiter`.
+    pub fn list_iter<'a>(&'a self, prefix: &str, delimiter: Option<char>) -> TrieGroupIter<'a> {
+        if let Some(node) = self.find_node(prefix) {
+            TrieGroupIter::new(node, prefix.to_string(), delimiter)
+        } else {
+            TrieGroupIter::empty(prefix.to_string(), delimiter)
+        }
+    }
+    /// List entries under `prefix` into a Vec<Entry>, grouping at the first `delimiter`.
     pub fn list(&self, prefix: &str, delimiter: Option<char>) -> Vec<Entry> {
-        let mut buckets = BTreeSet::new();
-        for key in self.collect_keys() {
-            if !key.starts_with(prefix) {
-                continue;
-            }
-            if let Some(d) = delimiter {
-                let suffix = &key[prefix.len()..];
-                if let Some(pos) = suffix.find(d) {
-                    let group = &key[..prefix.len() + pos + 1];
-                    buckets.insert(group.to_string());
-                    continue;
-                }
-            }
-            buckets.insert(key);
-        }
-        // Map into Entry enums
-        let delim = delimiter;
-        buckets.into_iter().map(|s| {
-            if let Some(d) = delim {
-                if s.ends_with(d) {
-                    return Entry::CommonPrefix(s);
-                }
-            }
-            Entry::Key(s)
-        }).collect()
-    }
-    /// Same as `list`, but also returns traversal statistics.
-    pub fn list_traced(&self, prefix: &str, delimiter: Option<char>) -> (Vec<Entry>, TraverseStats) {
-        let mut stats = TraverseStats::default();
-        let keys = self.collect_keys_traced(&mut stats);
-        let mut buckets = BTreeSet::new();
-        for key in keys {
-            if !key.starts_with(prefix) {
-                continue;
-            }
-            if let Some(d) = delimiter {
-                let suffix = &key[prefix.len()..];
-                if let Some(pos) = suffix.find(d) {
-                    stats.edges_traversed += 1; // grouping step counts as edge traversal
-                    let group = &key[..prefix.len() + pos + 1];
-                    buckets.insert(group.to_string());
-                    continue;
-                }
-            }
-            buckets.insert(key);
-        }
-        // Map into Entry enums
-        let delim = delimiter;
-        let entries: Vec<_> = buckets.into_iter().map(|s| {
-            if let Some(d) = delim {
-                if s.ends_with(d) {
-                    return Entry::CommonPrefix(s);
-                }
-            }
-            Entry::Key(s)
-        }).collect();
-        (entries, stats)
-    }
-
-    /// Gather all keys in the trie by DFS.
-    fn collect_keys(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        let mut path = String::new();
-        Trie::collect_all(&self.root, &mut path, &mut out);
-        out
-    }
-    /// Gather all keys, updating stats during traversal.
-    fn collect_keys_traced(&self, stats: &mut TraverseStats) -> Vec<String> {
-        let mut out = Vec::new();
-        let mut path = String::new();
-        Trie::collect_all_traced(&self.root, &mut path, &mut out, stats);
-        out
-    }
-
-    fn collect_all(node: &TrieNode, path: &mut String, out: &mut Vec<String>) {
-        if node.is_end {
-            out.push(path.clone());
-        }
-        for (label, child) in &node.children {
-            let orig_len = path.len();
-            path.push_str(label);
-            Trie::collect_all(child, path, out);
-            path.truncate(orig_len);
-        }
-    }
-    fn collect_all_traced(
-        node: &TrieNode,
-        path: &mut String,
-        out: &mut Vec<String>,
-        stats: &mut TraverseStats,
-    ) {
-        stats.nodes_visited += 1;
-        if node.is_end {
-            stats.keys_collected += 1;
-            out.push(path.clone());
-        }
-        for (label, child) in &node.children {
-            stats.edges_traversed += 1;
-            let orig_len = path.len();
-            path.push_str(label);
-            Trie::collect_all_traced(child, path, out, stats);
-            path.truncate(orig_len);
-        }
+        self.list_iter(prefix, delimiter).collect()
     }
 
     /// Compute the byte-length of the common prefix of `a` and `b`.
@@ -243,13 +240,6 @@ impl Trie {
         Ok(Trie { root })
     }
 
-    /// Load a radix trie from an on-disk serialized file via mmap.
-    pub fn load_radix<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        let file = File::open(path)?;
-        let mmap = unsafe { Mmap::map(&file)? };
-        let mut cursor = Cursor::new(&mmap[..]);
-        Self::read_radix(&mut cursor)
-    }
 
     fn read_node<R: Read>(r: &mut R) -> io::Result<TrieNode> {
         let mut flag = [0u8; 1];
@@ -272,6 +262,7 @@ impl Trie {
         Ok(TrieNode { children, is_end })
     }
 } // end impl Trie
+
 
 /// A listing entry returned by `Trie::list`: either a full key or a grouped prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]

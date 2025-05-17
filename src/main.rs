@@ -4,9 +4,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::time::{Instant, Duration};
 // On-disk index support moved to library
-
-use index::{Entry, Trie};
-use index::TraverseStats;
+use index::{Trie, Entry};
 
 /// A simple CLI for building and querying a Trie index.
 #[derive(Parser)]
@@ -38,9 +36,6 @@ enum Commands {
         /// Optional delimiter character for grouping
         #[arg(short, long, value_name = "DELIM")]
         delimiter: Option<char>,
-        /// Print traversal statistics
-        #[arg(short, long)]
-        stats: bool,
     },
 }
 
@@ -117,43 +112,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 write_duration.as_secs_f64() * 1000.0
             );
         }
-        Commands::List { index, prefix, delimiter, stats } => {
-            // Load compressed radix trie from disk via mmap
+        Commands::List { index, prefix, delimiter } => {
+            // Load compressed radix trie from disk
             let load_start = Instant::now();
-            let trie = Trie::load_radix(&index)?;
+            let mut reader = BufReader::new(File::open(&index)?);
+            let trie = Trie::read_radix(&mut reader)?;
             let load_duration = load_start.elapsed();
-            // Listing timing
+            eprint!("Loaded index in {:.3} ms\n", load_duration.as_secs_f64() * 1000.0);
+            // Stream and print entries with realtime progress
+            let mut iter = trie.list(&prefix, delimiter);
+            let mut printed = 0usize;
             let list_start = Instant::now();
-            // Choose traced or normal list
-            let (entries, trace_stats) = if stats {
-                trie.list_traced(&prefix, delimiter)
-            } else {
-                (trie.list(&prefix, delimiter), TraverseStats::default())
-            };
-            let list_duration = list_start.elapsed();
-            // Print entries
-            for entry in &entries {
+            let mut last_report = list_start;
+            let report_interval = Duration::from_millis(100);
+            for entry in &mut iter {
                 match entry {
                     Entry::Key(s) => println!("📄 {}", s),
                     Entry::CommonPrefix(s) => println!("📁 {}", s),
                 }
+                printed += 1;
+                // progress report
+                let now = Instant::now();
+                if now.duration_since(last_report) >= report_interval {
+                    let secs = now.duration_since(list_start).as_secs_f64();
+                    let rate = if secs > 0.0 { printed as f64 / secs } else { 0.0 };
+                    eprint!(
+                        "\rProgress: {} entries, elapsed {:.1} ms, {:.0} entries/s",
+                        printed,
+                        secs * 1000.0,
+                        rate
+                    );
+                    io::stderr().flush()?;
+                    last_report = now;
+                }
             }
+            // finish progress line
+            eprintln!();
+            let list_duration = list_start.elapsed();
             // Output metrics
             let idx_size = std::fs::metadata(&index)?.len();
             eprintln!("Index size: {} bytes", idx_size);
             eprintln!(
-                "Load time: {:.3} ms, List time: {:.3} ms",
+                "Load time: {:.3} ms, List time: {:.3} ms, Printed {} entries",
                 load_duration.as_secs_f64() * 1000.0,
-                list_duration.as_secs_f64() * 1000.0
+                list_duration.as_secs_f64() * 1000.0,
+                printed
             );
-            if stats {
-                eprintln!(
-                    "Nodes visited: {}, Edges traversed: {}, Keys collected: {}",
-                    trace_stats.nodes_visited,
-                    trace_stats.edges_traversed,
-                    trace_stats.keys_collected
-                );
-            }
         }
     }
 

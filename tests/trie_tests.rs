@@ -1,4 +1,6 @@
 use index::{Trie, Entry};
+mod common;
+use common::collect_sorted;
 
 #[test]
 fn insert_and_list_no_delimiter() {
@@ -7,8 +9,7 @@ fn insert_and_list_no_delimiter() {
     for &w in &words {
         trie.insert(w);
     }
-    let mut result = trie.list("", None);
-    result.sort();
+    let result = collect_sorted(trie.list("", None));
     let mut expected: Vec<Entry> = words
         .iter()
         .map(|&s| Entry::Key(s.to_string()))
@@ -16,8 +17,7 @@ fn insert_and_list_no_delimiter() {
     expected.sort();
     assert_eq!(result, expected);
 
-    let mut app_list = trie.list("app", None);
-    app_list.sort();
+    let app_list = collect_sorted(trie.list("app", None));
     let mut expected_app: Vec<Entry> = ["app", "apple", "appetite"]
         .iter()
         .map(|&s| Entry::Key(s.to_string()))
@@ -33,8 +33,7 @@ fn list_with_delimiter() {
     trie.insert("foo/bar/2");
     trie.insert("foo/baz/1");
     trie.insert("foobar");
-    let mut list_all = trie.list("foo", None);
-    list_all.sort();
+    let list_all = collect_sorted(trie.list("foo", None));
     let expected_all: Vec<Entry> = vec![
         Entry::Key("foo/bar/1".to_string()),
         Entry::Key("foo/bar/2".to_string()),
@@ -43,8 +42,7 @@ fn list_with_delimiter() {
     ];
     assert_eq!(list_all, expected_all);
 
-    let mut list_grp = trie.list("foo", Some('/'));
-    list_grp.sort();
+    let list_grp = collect_sorted(trie.list("foo", Some('/')));
     let expected_grp: Vec<Entry> = vec![
         Entry::CommonPrefix("foo/".to_string()),
         Entry::Key("foobar".to_string()),
@@ -56,7 +54,8 @@ fn list_with_delimiter() {
 fn nonexistent_prefix() {
     let mut trie = Trie::new();
     trie.insert("hello");
-    assert!(trie.list("world", None).is_empty());
+    let result = collect_sorted(trie.list("world", None));
+    assert!(result.is_empty());
 }
 
 #[test]
@@ -71,8 +70,7 @@ fn sample_path_delimiter_query() {
     for &p in &paths {
         trie.insert(p);
     }
-    let mut top = trie.list("", Some('/'));
-    top.sort();
+    let top = collect_sorted(trie.list("", Some('/')));
     let expected_top: Vec<Entry> = vec![
         Entry::CommonPrefix("dir1/".to_string()),
         Entry::CommonPrefix("dir2/".to_string()),
@@ -80,16 +78,14 @@ fn sample_path_delimiter_query() {
     ];
     assert_eq!(top, expected_top);
 
-    let mut dir1 = trie.list("dir1/", Some('/'));
-    dir1.sort();
+    let dir1 = collect_sorted(trie.list("dir1/", Some('/')));
     let expected_dir1: Vec<Entry> = vec![
         Entry::Key("dir1/file1.txt".to_string()),
         Entry::CommonPrefix("dir1/subdir/".to_string()),
     ];
     assert_eq!(dir1, expected_dir1);
 
-    let mut subdir = trie.list("dir1/subdir/", Some('/'));
-    subdir.sort();
+    let subdir = collect_sorted(trie.list("dir1/subdir/", Some('/')));
     let expected_subdir: Vec<Entry> = vec![
         Entry::Key("dir1/subdir/file2.txt".to_string()),
     ];
