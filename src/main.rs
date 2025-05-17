@@ -125,28 +125,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("Iterator creation time: {:.3} ms", iter_duration.as_secs_f64() * 1000.0);
             let mut printed = 0usize;
             let list_start = Instant::now();
-            let mut last_report = list_start;
-            let report_interval = Duration::from_millis(100);
             for entry in &mut iter {
                 match entry {
                     Entry::Key(s) => println!("📄 {}", s),
                     Entry::CommonPrefix(s) => println!("📁 {}", s),
                 }
                 printed += 1;
-                // progress report
-                let now = Instant::now();
-                if now.duration_since(last_report) >= report_interval {
-                    let secs = now.duration_since(list_start).as_secs_f64();
-                    let rate = if secs > 0.0 { printed as f64 / secs } else { 0.0 };
-                    eprint!(
-                        "\rProgress: {} entries, elapsed {:.1} ms, {:.0} entries/s",
-                        printed,
-                        secs * 1000.0,
-                        rate
-                    );
-                    io::stderr().flush()?;
-                    last_report = now;
-                }
             }
             // finish progress line
             eprintln!();
@@ -155,8 +139,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let idx_size = std::fs::metadata(&index)?.len();
             eprintln!("Index size: {} bytes", idx_size);
             eprintln!(
-                "Load time: {:.3} ms, List time: {:.3} ms, Printed {} entries",
+                "Load time: {:.3} ms, Iterator creation time: {:.3} ms, List time: {:.3} ms, Printed {} entries",
                 load_duration.as_secs_f64() * 1000.0,
+                iter_duration.as_secs_f64() * 1000.0,
                 list_duration.as_secs_f64() * 1000.0,
                 printed
             );
