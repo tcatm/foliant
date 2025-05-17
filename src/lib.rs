@@ -17,6 +17,16 @@ struct TrieNode {
 pub struct Trie {
     root: TrieNode,
 }
+/// Statistics collected during trie traversal.
+#[derive(Default, Debug, Clone)]
+pub struct TraverseStats {
+    /// Number of trie nodes visited during traversal.
+    pub nodes_visited: usize,
+    /// Number of edges (child links) traversed.
+    pub edges_traversed: usize,
+    /// Number of keys (terminal nodes) collected.
+    pub keys_collected: usize,
+}
 
 impl Trie {
     /// Create a new, empty Trie.
@@ -112,12 +122,51 @@ impl Trie {
             Entry::Key(s)
         }).collect()
     }
+    /// Same as `list`, but also returns traversal statistics.
+    pub fn list_traced(&self, prefix: &str, delimiter: Option<char>) -> (Vec<Entry>, TraverseStats) {
+        let mut stats = TraverseStats::default();
+        let keys = self.collect_keys_traced(&mut stats);
+        let mut buckets = BTreeSet::new();
+        for key in keys {
+            if !key.starts_with(prefix) {
+                continue;
+            }
+            if let Some(d) = delimiter {
+                let suffix = &key[prefix.len()..];
+                if let Some(pos) = suffix.find(d) {
+                    stats.edges_traversed += 1; // grouping step counts as edge traversal
+                    let group = &key[..prefix.len() + pos + 1];
+                    buckets.insert(group.to_string());
+                    continue;
+                }
+            }
+            buckets.insert(key);
+        }
+        // Map into Entry enums
+        let delim = delimiter;
+        let entries: Vec<_> = buckets.into_iter().map(|s| {
+            if let Some(d) = delim {
+                if s.ends_with(d) {
+                    return Entry::CommonPrefix(s);
+                }
+            }
+            Entry::Key(s)
+        }).collect();
+        (entries, stats)
+    }
 
     /// Gather all keys in the trie by DFS.
     fn collect_keys(&self) -> Vec<String> {
         let mut out = Vec::new();
         let mut path = String::new();
         Trie::collect_all(&self.root, &mut path, &mut out);
+        out
+    }
+    /// Gather all keys, updating stats during traversal.
+    fn collect_keys_traced(&self, stats: &mut TraverseStats) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut path = String::new();
+        Trie::collect_all_traced(&self.root, &mut path, &mut out, stats);
         out
     }
 
@@ -129,6 +178,25 @@ impl Trie {
             let orig_len = path.len();
             path.push_str(label);
             Trie::collect_all(child, path, out);
+            path.truncate(orig_len);
+        }
+    }
+    fn collect_all_traced(
+        node: &TrieNode,
+        path: &mut String,
+        out: &mut Vec<String>,
+        stats: &mut TraverseStats,
+    ) {
+        stats.nodes_visited += 1;
+        if node.is_end {
+            stats.keys_collected += 1;
+            out.push(path.clone());
+        }
+        for (label, child) in &node.children {
+            stats.edges_traversed += 1;
+            let orig_len = path.len();
+            path.push_str(label);
+            Trie::collect_all_traced(child, path, out, stats);
             path.truncate(orig_len);
         }
     }

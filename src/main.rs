@@ -6,6 +6,7 @@ use std::time::{Instant, Duration};
 // On-disk index support moved to library
 
 use index::{Entry, Trie};
+use index::TraverseStats;
 
 /// A simple CLI for building and querying a Trie index.
 #[derive(Parser)]
@@ -37,6 +38,9 @@ enum Commands {
         /// Optional delimiter character for grouping
         #[arg(short, long, value_name = "DELIM")]
         delimiter: Option<char>,
+        /// Print traversal statistics
+        #[arg(short, long)]
+        stats: bool,
     },
 }
 
@@ -113,21 +117,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 write_duration.as_secs_f64() * 1000.0
             );
         }
-        Commands::List {
-            index,
-            prefix,
-            delimiter,
-        } => {
+        Commands::List { index, prefix, delimiter, stats } => {
             // Load compressed radix trie from disk via mmap
             let load_start = Instant::now();
             let trie = Trie::load_radix(&index)?;
             let load_duration = load_start.elapsed();
             // Listing timing
             let list_start = Instant::now();
-            let entries = trie.list(&prefix, delimiter);
+            // Choose traced or normal list
+            let (entries, trace_stats) = if stats {
+                trie.list_traced(&prefix, delimiter)
+            } else {
+                (trie.list(&prefix, delimiter), TraverseStats::default())
+            };
             let list_duration = list_start.elapsed();
             // Print entries
-            for entry in entries {
+            for entry in &entries {
                 match entry {
                     Entry::Key(s) => println!("📄 {}", s),
                     Entry::CommonPrefix(s) => println!("📁 {}", s),
@@ -141,6 +146,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 load_duration.as_secs_f64() * 1000.0,
                 list_duration.as_secs_f64() * 1000.0
             );
+            if stats {
+                eprintln!(
+                    "Nodes visited: {}, Edges traversed: {}, Keys collected: {}",
+                    trace_stats.nodes_visited,
+                    trace_stats.edges_traversed,
+                    trace_stats.keys_collected
+                );
+            }
         }
     }
 
