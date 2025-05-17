@@ -118,10 +118,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             prefix,
             delimiter,
         } => {
-            // Load compressed radix trie from disk
+            // Load compressed radix trie from disk via mmap
             let load_start = Instant::now();
-            let mut reader = BufReader::new(File::open(&index)?);
-            let trie = Trie::read_radix(&mut reader)?;
+            let trie = Trie::load_radix(&index)?;
             let load_duration = load_start.elapsed();
             // Listing timing
             let list_start = Instant::now();

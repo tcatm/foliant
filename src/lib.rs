@@ -1,5 +1,8 @@
 use std::collections::BTreeSet;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Write, Cursor};
+use std::fs::File;
+use std::path::Path;
+use memmap2::Mmap;
 // Removed unused serde derives; index persistence moved to CLI text/binary format
 
 /// A node in the trie.
@@ -170,6 +173,14 @@ impl Trie {
     pub fn read_radix<R: Read>(r: &mut R) -> io::Result<Self> {
         let root = Self::read_node(r)?;
         Ok(Trie { root })
+    }
+
+    /// Load a radix trie from an on-disk serialized file via mmap.
+    pub fn load_radix<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        let file = File::open(path)?;
+        let mmap = unsafe { Mmap::map(&file)? };
+        let mut cursor = Cursor::new(&mmap[..]);
+        Self::read_radix(&mut cursor)
     }
 
     fn read_node<R: Read>(r: &mut R) -> io::Result<TrieNode> {
