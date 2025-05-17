@@ -16,6 +16,185 @@ struct TrieNode {
 pub struct Trie {
     root: TrieNode,
 }
+
+/// A lazily‐loaded trie over a memmapped index file, without building the full in-memory structure.
+pub struct MmapTrie {
+    buf: Mmap,
+}
+
+impl MmapTrie {
+    /// Memory-map and open a serialized radix trie for lazy iteration.
+    pub fn load<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        let file = File::open(path)?;
+        // SAFETY: we do not modify the file
+        let mmap = unsafe { Mmap::map(&file)? };
+        Ok(MmapTrie { buf: mmap })
+    }
+
+    /// Lazily iterate over entries under `prefix`, grouping at the first `delimiter`.
+    pub fn list_iter<'a>(&'a self, prefix: &str, delimiter: Option<char>) -> MmapTrieGroupIter<'a> {
+        let pref = prefix.to_string();
+        match find_node_extra_buf(&self.buf, prefix) {
+            Some(FindResultBuf::Node(pos)) => {
+                MmapTrieGroupIter::new(&self.buf, pref.clone(), delimiter, pos)
+            }
+            Some(FindResultBuf::EdgeMid(pos, tail)) => {
+                let mut init = pref.clone(); init.push_str(&tail);
+                MmapTrieGroupIter::with_init(&self.buf, pref.clone(), delimiter, vec![(pos, init)])
+            }
+            None => MmapTrieGroupIter::empty(pref, delimiter),
+        }
+    }
+
+    /// Collect all entries under `prefix` into a Vec, grouping at `delimiter`.
+    pub fn list(&self, prefix: &str, delimiter: Option<char>) -> Vec<Entry> {
+        self.list_iter(prefix, delimiter).collect()
+    }
+}
+
+// Internal helper for buffer-based prefix lookup
+enum FindResultBuf {
+    Node(usize),
+    EdgeMid(usize, String),
+}
+
+// Skip over one node (and its subtree) in the serialized buffer
+fn skip_node(buf: &[u8], pos: &mut usize) {
+    // read is_end + child count
+    *pos += 1;
+    let count = u16::from_le_bytes([buf[*pos], buf[*pos + 1]]) as usize;
+    *pos += 2;
+    // skip each child: label + subtree
+    for _ in 0..count {
+        let label_len = u16::from_le_bytes([buf[*pos], buf[*pos + 1]]) as usize;
+        *pos += 2 + label_len;
+        skip_node(buf, pos);
+    }
+}
+
+// Find the node or mid-edge position for `prefix` in the mapped buffer
+fn find_node_extra_buf(buf: &[u8], prefix: &str) -> Option<FindResultBuf> {
+    let mut pos = 0;
+    let mut rem = prefix;
+    if rem.is_empty() {
+        return Some(FindResultBuf::Node(pos));
+    }
+    while pos < buf.len() {
+        // read header
+        let count = u16::from_le_bytes([buf[pos + 1], buf[pos + 2]]) as usize;
+        pos += 3;
+        // gather children info
+        let mut children = Vec::with_capacity(count);
+        for _ in 0..count {
+            let label_len = u16::from_le_bytes([buf[pos], buf[pos + 1]]) as usize;
+            pos += 2;
+            let label = std::str::from_utf8(&buf[pos..pos + label_len]).unwrap().to_string();
+            pos += label_len;
+            let child_pos = pos;
+            skip_node(buf, &mut pos);
+            children.push((label, child_pos));
+        }
+        // match rem against each edge label
+        let mut matched = false;
+        for (label, child_pos) in &children {
+            if rem.starts_with(label) {
+                rem = &rem[label.len()..];
+                pos = *child_pos;
+                matched = true;
+                break;
+            } else if label.starts_with(rem) {
+                let tail = label[rem.len()..].to_string();
+                return Some(FindResultBuf::EdgeMid(*child_pos, tail));
+            }
+        }
+        if !matched {
+            return None;
+        }
+        if rem.is_empty() {
+            return Some(FindResultBuf::Node(pos));
+        }
+    }
+    None
+}
+
+/// Iterator over a memmapped radix trie without full deserialization.
+pub struct MmapTrieGroupIter<'a> {
+    buf: &'a [u8],
+    stack: Vec<(usize, String)>,
+    prefix: String,
+    delimiter: Option<char>,
+    seen: HashSet<String>,
+}
+
+impl<'a> MmapTrieGroupIter<'a> {
+    fn empty(prefix: String, delimiter: Option<char>) -> Self {
+        MmapTrieGroupIter { buf: &[], stack: Vec::new(), prefix, delimiter, seen: HashSet::new() }
+    }
+    fn new(buf: &'a [u8], prefix: String, delimiter: Option<char>, pos: usize) -> Self {
+        MmapTrieGroupIter { buf, stack: vec![(pos, prefix.clone())], prefix, delimiter, seen: HashSet::new() }
+    }
+    fn with_init(buf: &'a [u8], prefix: String, delimiter: Option<char>, init: Vec<(usize, String)>) -> Self {
+        MmapTrieGroupIter { buf, stack: init, prefix, delimiter, seen: HashSet::new() }
+    }
+}
+
+impl<'a> Iterator for MmapTrieGroupIter<'a> {
+    type Item = Entry;
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some((pos, path)) = self.stack.pop() {
+            // grouping logic
+            if let Some(d) = self.delimiter {
+                if path.starts_with(&self.prefix) {
+                    let suffix = &path[self.prefix.len()..];
+                    if let Some(i) = suffix.find(d) {
+                        let group = path[..self.prefix.len() + i + 1].to_string();
+                        if self.seen.insert(group.clone()) {
+                            return Some(Entry::CommonPrefix(group));
+                        }
+                        continue;
+                    }
+                    if !suffix.is_empty() && path.ends_with(d) && self.seen.insert(path.clone()) {
+                        return Some(Entry::CommonPrefix(path.clone()));
+                    }
+                }
+            }
+            // parse node at pos
+            let mut cpos = pos;
+            let is_end = self.buf[cpos] != 0;
+            cpos += 1;
+            let count = u16::from_le_bytes([self.buf[cpos], self.buf[cpos + 1]]) as usize;
+            cpos += 2;
+            // collect children
+            let mut children = Vec::with_capacity(count);
+            for _ in 0..count {
+                let label_len = u16::from_le_bytes([self.buf[cpos], self.buf[cpos + 1]]) as usize;
+                cpos += 2;
+                let label = std::str::from_utf8(&self.buf[cpos..cpos + label_len]).unwrap().to_string();
+                cpos += label_len;
+                let child_pos = cpos;
+                skip_node(self.buf, &mut cpos);
+                children.push((label, child_pos));
+            }
+            // descend children in reverse lex order
+            children.sort_by(|a, b| b.0.cmp(&a.0));
+            for (label, child_pos) in children {
+                let mut new_path = path.clone();
+                new_path.push_str(&label);
+                self.stack.push((child_pos, new_path));
+            }
+            // yield key if terminal
+            if is_end && path.starts_with(&self.prefix) {
+                if let Some(d) = self.delimiter {
+                    if path.ends_with(d) {
+                        return Some(Entry::CommonPrefix(path.clone()));
+                    }
+                }
+                return Some(Entry::Key(path.clone()));
+            }
+        }
+        None
+    }
+}
 /// Internal result of prefix lookup: exact node or mid-edge child + label remainder
 enum FindResult<'a> {
     /// `prefix` ended exactly at this node

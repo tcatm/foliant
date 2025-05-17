@@ -4,7 +4,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::time::{Instant, Duration};
 // On-disk index support moved to library
-use index::{Trie, Entry};
+use index::{Trie, Entry, MmapTrie};
 
 /// A simple CLI for building and querying a Trie index.
 #[derive(Parser)]
@@ -113,14 +113,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Commands::List { index, prefix, delimiter } => {
-            // Load compressed radix trie from disk
+            // Memory-map and lazily open the index
             let load_start = Instant::now();
-            let mut reader = BufReader::new(File::open(&index)?);
-            let trie = Trie::read_radix(&mut reader)?;
+            let mmap_trie = MmapTrie::load(&index)?;
             let load_duration = load_start.elapsed();
             eprint!("Loaded index in {:.3} ms\n", load_duration.as_secs_f64() * 1000.0);
             // Stream and print entries with realtime progress
-            let mut iter = trie.list(&prefix, delimiter);
+            let iter_start = Instant::now();
+            let mut iter = mmap_trie.list_iter(&prefix, delimiter);
+            let iter_duration = iter_start.elapsed();
+            eprintln!("Iterator creation time: {:.3} ms", iter_duration.as_secs_f64() * 1000.0);
             let mut printed = 0usize;
             let list_start = Instant::now();
             let mut last_report = list_start;
