@@ -23,7 +23,7 @@ fn mid_edge_prefix_mmap() {
     let mtrie = MmapTrie::load(&path).expect("mmap load failed");
 
     // Expected results for prefix "abc"
-    let mut expected = vec![
+    let expected = vec![
         Entry::Key("abcde".to_string()),
         Entry::Key("abcdx".to_string()),
     ];

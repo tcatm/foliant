@@ -6,6 +6,11 @@ use memmap2::Mmap;
 
 // Magic header for the new indexed format: 4 bytes, 'I','D','X','1'
 const MAGIC: [u8; 4] = *b"IDX1";
+// Named length constants for header parsing
+const HEADER_LEN: usize = MAGIC.len();            // 4
+const NODE_HEADER_LEN: usize = 1 + 2;             // is_end + child_count (u16)
+const INDEX_ENTRY_LEN: usize = 1 + 8;             // first_byte (u8) + child_offset (u64)
+const LABEL_LEN_LEN: usize = 2;                   // u16 label length
 
 /// A node in the trie.
 #[derive(Default, Debug)]
@@ -33,7 +38,7 @@ impl MmapTrie {
         // SAFETY: we do not modify the file
         let mmap = unsafe { Mmap::map(&file)? };
         // verify magic header
-        if mmap.len() < MAGIC.len() || &mmap[..MAGIC.len()] != &MAGIC {
+        if mmap.len() < HEADER_LEN || &mmap[..HEADER_LEN] != &MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid index format"));
         }
         Ok(MmapTrie { buf: mmap })
@@ -78,34 +83,38 @@ enum FindResultBuf {
 
 // Find the node or mid-edge position for `prefix` in the mapped buffer
 fn find_node_extra_buf(buf: &[u8], prefix: &str) -> Option<FindResultBuf> {
-    // skip magic header if present
-    let mut pos = if buf.len() >= MAGIC.len() && &buf[..MAGIC.len()] == &MAGIC {
-        MAGIC.len()
-    } else {
-        0
-    };
+    // require and skip magic header
+    if buf.len() < HEADER_LEN || &buf[..HEADER_LEN] != &MAGIC {
+        return None;
+    }
+    let mut pos = HEADER_LEN;
     let mut rem = prefix;
     if rem.is_empty() {
         return Some(FindResultBuf::Node(pos));
     }
     loop {
-        // read header: is_end + child_count
-        if pos + 3 > buf.len() {
+        // read node header: is_end (1 byte) + child_count (2 bytes)
+        if pos + NODE_HEADER_LEN > buf.len() {
             return None;
         }
         let _is_end = buf[pos];
-        let count = u16::from_le_bytes([buf[pos + 1], buf[pos + 2]]) as usize;
-        pos += 3;
+        let count = u16::from_le_bytes([
+            buf[pos + 1], buf[pos + 2]
+        ]) as usize;
+        pos += NODE_HEADER_LEN;
         // read index table: (first_byte, child_offset)
         let mut table = Vec::with_capacity(count);
+        // read index table entries
         for _ in 0..count {
-            if pos + 9 > buf.len() {
+            if pos + INDEX_ENTRY_LEN > buf.len() {
                 return None;
             }
             let first_byte = buf[pos];
-            let child_offset = u64::from_le_bytes(buf[pos + 1..pos + 9].try_into().unwrap()) as usize;
+            let child_offset = u64::from_le_bytes(
+                buf[pos + 1..pos + INDEX_ENTRY_LEN].try_into().unwrap()
+            ) as usize;
             table.push((first_byte, child_offset));
-            pos += 9;
+            pos += INDEX_ENTRY_LEN;
         }
         // match on the first byte of the remaining prefix
         let b0 = rem.as_bytes()[0];
@@ -114,15 +123,22 @@ fn find_node_extra_buf(buf: &[u8], prefix: &str) -> Option<FindResultBuf> {
                 let (_fb, child_pos) = table[i];
                 // read the edge label at child_pos
                 let mut cpos = child_pos;
-                if cpos + 2 > buf.len() {
+                // read edge label length
+                if cpos + LABEL_LEN_LEN > buf.len() {
                     return None;
                 }
-                let label_len = u16::from_le_bytes([buf[cpos], buf[cpos + 1]]) as usize;
-                cpos += 2;
+                let label_len = u16::from_le_bytes([
+                    buf[cpos], buf[cpos + 1]
+                ]) as usize;
+                cpos += LABEL_LEN_LEN;
                 if cpos + label_len > buf.len() {
                     return None;
                 }
-                let label = std::str::from_utf8(&buf[cpos..cpos + label_len]).unwrap();
+                // read label
+                let label = match std::str::from_utf8(&buf[cpos..cpos + label_len]) {
+                    Ok(s) => s,
+                    Err(_) => return None,
+                };
                 // full-edge match?
                 if rem.starts_with(label) {
                     rem = &rem[label_len..];
@@ -187,31 +203,49 @@ impl<'a> Iterator for MmapTrieGroupIter<'a> {
             }
             // parse node at pos (indexed on-disk format)
             let mut cpos = pos;
+            // node header: is_end + child_count
+            if cpos + NODE_HEADER_LEN > self.buf.len() {
+                continue;
+            }
             let is_end = self.buf[cpos] != 0;
-            cpos += 1;
-            let count = u16::from_le_bytes([self.buf[cpos], self.buf[cpos + 1]]) as usize;
-            cpos += 2;
-            // read the index table: count entries of (first_byte, child_offset)
+            let count = u16::from_le_bytes([
+                self.buf[cpos + 1], self.buf[cpos + 2]
+            ]) as usize;
+            cpos += NODE_HEADER_LEN;
+            // read index table entries
             let mut offsets = Vec::with_capacity(count);
             for _ in 0..count {
+                if cpos + INDEX_ENTRY_LEN > self.buf.len() {
+                    offsets.clear(); break;
+                }
                 let _fb = self.buf[cpos];
                 let off = u64::from_le_bytes(
-                    self.buf[cpos + 1..cpos + 9].try_into().unwrap()
+                    self.buf[cpos + 1..cpos + INDEX_ENTRY_LEN].try_into().unwrap()
                 ) as usize;
                 offsets.push(off);
-                cpos += 9;
+                cpos += INDEX_ENTRY_LEN;
             }
             // collect children by parsing each label at its offset
             let mut children = Vec::with_capacity(count);
+            // collect children by parsing each label at its offset
             for &child_pos in &offsets {
                 let mut lpos = child_pos;
+                if lpos + LABEL_LEN_LEN > self.buf.len() {
+                    continue;
+                }
                 let label_len = u16::from_le_bytes([
                     self.buf[lpos], self.buf[lpos + 1]
                 ]) as usize;
-                lpos += 2;
-                let label = std::str::from_utf8(
+                lpos += LABEL_LEN_LEN;
+                if lpos + label_len > self.buf.len() {
+                    continue;
+                }
+                let label = match std::str::from_utf8(
                     &self.buf[lpos..lpos + label_len]
-                ).unwrap().to_string();
+                ) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => continue,
+                };
                 let desc_pos = lpos + label_len;
                 children.push((label, desc_pos));
             }
@@ -451,7 +485,11 @@ impl Trie {
         prefix_len
     }
 
-    /// Serialize the compressed radix trie to any `Write`, using a binary-searchable index internally.
+    /// Serialize the compressed radix trie in the new indexed on-disk format:
+    /// - 4-byte MAGIC header ("IDX1")
+    /// - pre-order nodes with 1-byte is_end, 2-byte LE child_count
+    /// - fixed-size index table (count × [1-byte first_byte, 8-byte offset])
+    /// - child blobs: 2-byte label_len + label + subtree
     pub fn write_radix<W: Write>(&self, w: &mut W) -> io::Result<()> {
         // write magic header + node data into a cursor, then dump to w
         let mut buf = Cursor::new(Vec::new());
@@ -504,17 +542,17 @@ impl Trie {
     }
 
 
-    /// Deserialize using the new indexed format (reads in-memory buffer).
+    /// Deserialize the indexed on-disk format: expects a 4-byte MAGIC header,
+    /// then nodes with index tables and child blobs.
     pub fn read_radix<R: Read>(r: &mut R) -> io::Result<Self> {
         // read entire stream into memory buffer
         let mut buf = Vec::new();
         r.read_to_end(&mut buf)?;
-        // skip magic header if present
-        let mut pos = if buf.len() >= MAGIC.len() && &buf[..MAGIC.len()] == &MAGIC {
-            MAGIC.len()
-        } else {
-            0
-        };
+        // require and skip magic header
+        if buf.len() < HEADER_LEN || &buf[..HEADER_LEN] != &MAGIC {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid index format"));
+        }
+        let mut pos = HEADER_LEN;
         let root = Self::read_node_from_buf(&buf, &mut pos)?;
         Ok(Trie { root })
     }
