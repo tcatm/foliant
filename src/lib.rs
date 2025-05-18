@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Write, Seek, SeekFrom, Cursor};
 use std::fs::File;
 use std::path::Path;
 use memmap2::Mmap;
@@ -17,32 +17,86 @@ pub struct Trie {
     root: TrieNode,
 }
 
-/// A lazily‐loaded trie over a memmapped index file, without building the full in-memory structure.
+/// A lazily-loaded trie over an index file: either an on-disk index or an in-memory trie.
 pub struct MmapTrie {
-    buf: Mmap,
+    inner: MmapTrieInner,
+}
+enum MmapTrieInner {
+    Indexed(Mmap),
+    Legacy(Trie),
 }
 
 impl MmapTrie {
-    /// Memory-map and open a serialized radix trie for lazy iteration.
+    /// Load a serialized radix trie from disk.  Uses indexed mmap when possible;
+    /// falls back to in-memory deserialize if the file is old-format.
     pub fn load<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        let file = File::open(path)?;
+        let file = File::open(&path)?;
         // SAFETY: we do not modify the file
         let mmap = unsafe { Mmap::map(&file)? };
-        Ok(MmapTrie { buf: mmap })
+        let buf = &mmap[..];
+        // detect indexed format: header + count*9 bytes must fit in file
+        // heuristics to detect new indexed format:
+        let is_indexed = if buf.len() >= 3 {
+            let count = u16::from_le_bytes([buf[1], buf[2]]) as usize;
+            let header_end = 3;
+            let idx_bytes = count.saturating_mul(9);
+            if buf.len() < header_end + idx_bytes {
+                false
+            } else if count == 0 {
+                true
+            } else {
+                // check first offset lands right after index table
+                let base = header_end;
+                let off0 = u64::from_le_bytes(
+                    buf[base + 1.. base + 9].try_into().unwrap()
+                ) as usize;
+                off0 >= header_end + idx_bytes && off0 < buf.len()
+            }
+        } else {
+            false
+        };
+        if is_indexed {
+            Ok(MmapTrie { inner: MmapTrieInner::Indexed(mmap) })
+        } else {
+            // fallback: deserialize old-format radix trie into memory
+            let mut reader: &[u8] = buf;
+            let trie = Trie::read_radix_legacy(&mut reader)?;
+            Ok(MmapTrie { inner: MmapTrieInner::Legacy(trie) })
+        }
     }
 
-    /// Lazily iterate over entries under `prefix`, grouping at the first `delimiter`.
-    pub fn list_iter<'a>(&'a self, prefix: &str, delimiter: Option<char>) -> MmapTrieGroupIter<'a> {
-        let pref = prefix.to_string();
-        match find_node_extra_buf(&self.buf, prefix) {
-            Some(FindResultBuf::Node(pos)) => {
-                MmapTrieGroupIter::new(&self.buf, pref.clone(), delimiter, pos)
+    /// Iterate over entries under `prefix`, grouping at the first `delimiter`.
+    pub fn list_iter<'a>(
+        &'a self,
+        prefix: &str,
+        delimiter: Option<char>
+    ) -> Box<dyn Iterator<Item = Entry> + 'a> {
+        match &self.inner {
+            MmapTrieInner::Indexed(mmap) => {
+                let pref = prefix.to_string();
+                let buf = &mmap[..];
+                match find_node_extra_buf(buf, prefix) {
+                    Some(FindResultBuf::Node(pos)) =>
+                        Box::new(MmapTrieGroupIter::new(buf, pref.clone(), delimiter, pos)),
+                    Some(FindResultBuf::EdgeMid(label_pos, tail)) => {
+                        // prefix ended mid-edge: compute subtree header offset
+                        // label_pos points at the u16 label_len
+                        let label_len = u16::from_le_bytes([
+                            buf[label_pos], buf[label_pos + 1]
+                        ]) as usize;
+                        let subtree_pos = label_pos + 2 + label_len;
+                        let mut init = pref.clone();
+                        init.push_str(&tail);
+                        Box::new(MmapTrieGroupIter::with_init(
+                            buf, pref.clone(), delimiter,
+                            vec![(subtree_pos, init)]
+                        ))
+                    }
+                    None => Box::new(MmapTrieGroupIter::empty(pref, delimiter)),
+                }
             }
-            Some(FindResultBuf::EdgeMid(pos, tail)) => {
-                let mut init = pref.clone(); init.push_str(&tail);
-                MmapTrieGroupIter::with_init(&self.buf, pref.clone(), delimiter, vec![(pos, init)])
-            }
-            None => MmapTrieGroupIter::empty(pref, delimiter),
+            MmapTrieInner::Legacy(trie) =>
+                Box::new(trie.list_iter(prefix, delimiter)),
         }
     }
 
@@ -58,19 +112,6 @@ enum FindResultBuf {
     EdgeMid(usize, String),
 }
 
-// Skip over one node (and its subtree) in the serialized buffer
-fn skip_node(buf: &[u8], pos: &mut usize) {
-    // read is_end + child count
-    *pos += 1;
-    let count = u16::from_le_bytes([buf[*pos], buf[*pos + 1]]) as usize;
-    *pos += 2;
-    // skip each child: label + subtree
-    for _ in 0..count {
-        let label_len = u16::from_le_bytes([buf[*pos], buf[*pos + 1]]) as usize;
-        *pos += 2 + label_len;
-        skip_node(buf, pos);
-    }
-}
 
 // Find the node or mid-edge position for `prefix` in the mapped buffer
 fn find_node_extra_buf(buf: &[u8], prefix: &str) -> Option<FindResultBuf> {
@@ -79,42 +120,60 @@ fn find_node_extra_buf(buf: &[u8], prefix: &str) -> Option<FindResultBuf> {
     if rem.is_empty() {
         return Some(FindResultBuf::Node(pos));
     }
-    while pos < buf.len() {
-        // read header
-        let count = u16::from_le_bytes([buf[pos + 1], buf[pos + 2]]) as usize;
-        pos += 3;
-        // gather children info
-        let mut children = Vec::with_capacity(count);
-        for _ in 0..count {
-            let label_len = u16::from_le_bytes([buf[pos], buf[pos + 1]]) as usize;
-            pos += 2;
-            let label = std::str::from_utf8(&buf[pos..pos + label_len]).unwrap().to_string();
-            pos += label_len;
-            let child_pos = pos;
-            skip_node(buf, &mut pos);
-            children.push((label, child_pos));
-        }
-        // match rem against each edge label
-        let mut matched = false;
-        for (label, child_pos) in &children {
-            if rem.starts_with(label) {
-                rem = &rem[label.len()..];
-                pos = *child_pos;
-                matched = true;
-                break;
-            } else if label.starts_with(rem) {
-                let tail = label[rem.len()..].to_string();
-                return Some(FindResultBuf::EdgeMid(*child_pos, tail));
-            }
-        }
-        if !matched {
+    loop {
+        // read header: is_end + child_count
+        if pos + 3 > buf.len() {
             return None;
         }
-        if rem.is_empty() {
-            return Some(FindResultBuf::Node(pos));
+        let _is_end = buf[pos];
+        let count = u16::from_le_bytes([buf[pos + 1], buf[pos + 2]]) as usize;
+        pos += 3;
+        // read index table: (first_byte, child_offset)
+        let mut table = Vec::with_capacity(count);
+        for _ in 0..count {
+            if pos + 9 > buf.len() {
+                return None;
+            }
+            let first_byte = buf[pos];
+            let child_offset = u64::from_le_bytes(buf[pos + 1..pos + 9].try_into().unwrap()) as usize;
+            table.push((first_byte, child_offset));
+            pos += 9;
+        }
+        // match on the first byte of the remaining prefix
+        let b0 = rem.as_bytes()[0];
+        match table.binary_search_by_key(&b0, |(fb, _)| *fb) {
+            Ok(i) => {
+                let (_fb, child_pos) = table[i];
+                // read the edge label at child_pos
+                let mut cpos = child_pos;
+                if cpos + 2 > buf.len() {
+                    return None;
+                }
+                let label_len = u16::from_le_bytes([buf[cpos], buf[cpos + 1]]) as usize;
+                cpos += 2;
+                if cpos + label_len > buf.len() {
+                    return None;
+                }
+                let label = std::str::from_utf8(&buf[cpos..cpos + label_len]).unwrap();
+                // full-edge match?
+                if rem.starts_with(label) {
+                    rem = &rem[label_len..];
+                    pos = cpos + label_len;
+                    if rem.is_empty() {
+                        return Some(FindResultBuf::Node(pos));
+                    }
+                    continue;
+                }
+                // mid-edge match?
+                if label.starts_with(rem) {
+                    let tail = label[rem.len()..].to_string();
+                    return Some(FindResultBuf::EdgeMid(child_pos, tail));
+                }
+                return None;
+            }
+            Err(_) => return None,
         }
     }
-    None
 }
 
 /// Iterator over a memmapped radix trie without full deserialization.
@@ -158,22 +217,35 @@ impl<'a> Iterator for MmapTrieGroupIter<'a> {
                     }
                 }
             }
-            // parse node at pos
+            // parse node at pos (indexed on-disk format)
             let mut cpos = pos;
             let is_end = self.buf[cpos] != 0;
             cpos += 1;
             let count = u16::from_le_bytes([self.buf[cpos], self.buf[cpos + 1]]) as usize;
             cpos += 2;
-            // collect children
-            let mut children = Vec::with_capacity(count);
+            // read the index table: count entries of (first_byte, child_offset)
+            let mut offsets = Vec::with_capacity(count);
             for _ in 0..count {
-                let label_len = u16::from_le_bytes([self.buf[cpos], self.buf[cpos + 1]]) as usize;
-                cpos += 2;
-                let label = std::str::from_utf8(&self.buf[cpos..cpos + label_len]).unwrap().to_string();
-                cpos += label_len;
-                let child_pos = cpos;
-                skip_node(self.buf, &mut cpos);
-                children.push((label, child_pos));
+                let _fb = self.buf[cpos];
+                let off = u64::from_le_bytes(
+                    self.buf[cpos + 1..cpos + 9].try_into().unwrap()
+                ) as usize;
+                offsets.push(off);
+                cpos += 9;
+            }
+            // collect children by parsing each label at its offset
+            let mut children = Vec::with_capacity(count);
+            for &child_pos in &offsets {
+                let mut lpos = child_pos;
+                let label_len = u16::from_le_bytes([
+                    self.buf[lpos], self.buf[lpos + 1]
+                ]) as usize;
+                lpos += 2;
+                let label = std::str::from_utf8(
+                    &self.buf[lpos..lpos + label_len]
+                ).unwrap().to_string();
+                let desc_pos = lpos + label_len;
+                children.push((label, desc_pos));
             }
             // descend children in reverse lex order
             children.sort_by(|a, b| b.0.cmp(&a.0));
@@ -290,31 +362,7 @@ impl<'a> PartialEq<Vec<Entry>> for TrieGroupIter<'a> {
 }
 
 impl Trie {
-    /// Locate the node corresponding to the end of `prefix` in the compressed trie.
-    fn find_node<'a>(&'a self, prefix: &str) -> Option<&'a TrieNode> {
-        let mut node = &self.root;
-        let mut rem = prefix;
-        if rem.is_empty() {
-            return Some(node);
-        }
-        while !rem.is_empty() {
-            let mut matched = false;
-            for (label, child) in &node.children {
-                if rem.starts_with(label) {
-                    rem = &rem[label.len()..];
-                    node = &*child;
-                    matched = true;
-                    break;
-                } else if label.starts_with(rem) {
-                    return Some(node);
-                }
-            }
-            if !matched {
-                return None;
-            }
-        }
-        Some(node)
-    }
+    // The in-memory find_node helper is unused; use find_node_extra for lookups.
     /// Extended prefix lookup: if `prefix` ends inside an edge label, return child and remainder.
     fn find_node_extra<'a>(&'a self, prefix: &str) -> Option<FindResult<'a>> {
         let mut node = &self.root;
@@ -435,31 +483,64 @@ impl Trie {
         prefix_len
     }
 
-    /// Serialize the compressed radix trie (pre-order with edge labels).
+    /// Serialize the compressed radix trie to any `Write`, using a binary-searchable index internally.
     pub fn write_radix<W: Write>(&self, w: &mut W) -> io::Result<()> {
-        Self::write_node(&self.root, w)
-    }
-
-    fn write_node<W: Write>(node: &TrieNode, w: &mut W) -> io::Result<()> {
-        w.write_all(&[node.is_end as u8])?;
-        let count = node.children.len() as u16;
-        w.write_all(&count.to_le_bytes())?;
-        for (label, child) in &node.children {
-            let len = label.len() as u16;
-            w.write_all(&len.to_le_bytes())?;
-            w.write_all(label.as_bytes())?;
-            Self::write_node(child, w)?;
-        }
+        // write to a cursor (Vec<u8>) which supports Seek, then dump to w
+        let mut buf = Cursor::new(Vec::new());
+        Self::write_node(&self.root, &mut buf)?;
+        w.write_all(&buf.into_inner())?;
         Ok(())
     }
 
-    /// Deserialize a radix trie from any `Read`.
-    pub fn read_radix<R: Read>(r: &mut R) -> io::Result<Self> {
-        let root = Self::read_node(r)?;
+    fn write_node<W: Write + Seek>(node: &TrieNode, w: &mut W) -> io::Result<()> {
+        // header: is_end (1 byte) + child_count (2 bytes LE)
+        w.write_all(&[node.is_end as u8])?;
+        let count = node.children.len() as usize;
+        w.write_all(&(count as u16).to_le_bytes())?;
+        // reserve space for index table (count × (1 byte + 8 bytes))
+        let index_pos = w.stream_position()?;
+        for _ in 0..count {
+            // first_byte placeholder + child_offset placeholder
+            w.write_all(&[0u8])?;
+            w.write_all(&0u64.to_le_bytes())?;
+        }
+        // sort children by first byte for binary-searchable index
+        let mut children: Vec<_> = node.children.iter().collect();
+        // sort by first byte (empty label => 0) for binary-searchable index
+        children.sort_by_key(|(label, _)| label.as_bytes().first().cloned().unwrap_or(0));
+        // write each child blob and record its offset
+        let mut entries: Vec<(u8, u64)> = Vec::with_capacity(count);
+        for (label, child) in children {
+            // determine first_byte (empty label => 0)
+            let first_byte = label.as_bytes().first().cloned().unwrap_or(0);
+            let child_offset = w.stream_position()?;
+            // write label
+            let len = label.len() as u16;
+            w.write_all(&len.to_le_bytes())?;
+            w.write_all(label.as_bytes())?;
+            // write subtree
+            Self::write_node(&*child, w)?;
+            entries.push((first_byte, child_offset));
+        }
+        // go back and fill in the index table
+        let after_pos = w.stream_position()?;
+        w.seek(SeekFrom::Start(index_pos))?;
+        for (first_byte, offset) in entries {
+            w.write_all(&[first_byte])?;
+            w.write_all(&offset.to_le_bytes())?;
+        }
+        // rewind to after child blobs
+        w.seek(SeekFrom::Start(after_pos))?;
+        Ok(())
+    }
+
+    /// Legacy (old-format) deserializer: pre-indexed, pure label-recursive format.
+    pub fn read_radix_legacy<R: Read>(r: &mut R) -> io::Result<Self> {
+        let root = Self::read_node_legacy(r)?;
         Ok(Trie { root })
     }
 
-    fn read_node<R: Read>(r: &mut R) -> io::Result<TrieNode> {
+    fn read_node_legacy<R: Read>(r: &mut R) -> io::Result<TrieNode> {
         let mut flag = [0u8; 1];
         r.read_exact(&mut flag)?;
         let is_end = flag[0] != 0;
@@ -474,10 +555,20 @@ impl Trie {
             r.read_exact(&mut lb)?;
             let label = String::from_utf8(lb)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            let child = Self::read_node(r)?;
+            let child = Self::read_node_legacy(r)?;
             children.push((label, Box::new(child)));
         }
         Ok(TrieNode { children, is_end })
+    }
+
+    /// Deserialize using the new indexed format (reads in-memory buffer).
+    pub fn read_radix<R: Read>(r: &mut R) -> io::Result<Self> {
+        // read entire stream into memory buffer
+        let mut buf = Vec::new();
+        r.read_to_end(&mut buf)?;
+        let mut pos = 0;
+        let root = Self::read_node_from_buf(&buf, &mut pos)?;
+        Ok(Trie { root })
     }
 
     /// Load a trie by memory-mapping the serialized file.
@@ -492,6 +583,7 @@ impl Trie {
     }
 
     fn read_node_from_buf(buf: &[u8], pos: &mut usize) -> io::Result<TrieNode> {
+        // header: is_end (1 byte) + child_count (2 bytes LE)
         if *pos + 3 > buf.len() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated header"));
         }
@@ -499,22 +591,39 @@ impl Trie {
         *pos += 1;
         let count = u16::from_le_bytes([buf[*pos], buf[*pos + 1]]) as usize;
         *pos += 2;
-        let mut children = Vec::with_capacity(count);
+        // read index table entries
+        let mut index = Vec::with_capacity(count);
         for _ in 0..count {
-            if *pos + 2 > buf.len() {
+            if *pos + 9 > buf.len() {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated index entry"));
+            }
+            let first_byte = buf[*pos];
+            let child_offset = u64::from_le_bytes(
+                buf[*pos + 1..*pos + 9].try_into().unwrap()
+            ) as usize;
+            *pos += 9;
+            index.push((first_byte, child_offset));
+        }
+        // deserialize each child from its blob
+        let mut children = Vec::with_capacity(count);
+        for &(_fb, child_pos) in &index {
+            let mut cpos = child_pos;
+            // label_len + label bytes
+            if cpos + 2 > buf.len() {
                 return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated label len"));
             }
-            let label_len = u16::from_le_bytes([buf[*pos], buf[*pos + 1]]) as usize;
-            *pos += 2;
-            if *pos + label_len > buf.len() {
+            let label_len = u16::from_le_bytes([buf[cpos], buf[cpos + 1]]) as usize;
+            cpos += 2;
+            if cpos + label_len > buf.len() {
                 return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated label"));
             }
-            let label = std::str::from_utf8(&buf[*pos..*pos + label_len])
+            let label = std::str::from_utf8(&buf[cpos..cpos + label_len])
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
                 .to_string();
-            *pos += label_len;
-            let child = Self::read_node_from_buf(buf, pos)?;
-            children.push((label, Box::new(child)));
+            cpos += label_len;
+            // recurse into child node
+            let child_node = Self::read_node_from_buf(buf, &mut cpos)?;
+            children.push((label, Box::new(child_node)));
         }
         Ok(TrieNode { children, is_end })
     }

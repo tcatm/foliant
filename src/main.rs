@@ -145,6 +145,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 list_duration.as_secs_f64() * 1000.0,
                 printed
             );
+            
+            let total_duration = load_start.elapsed();
+            eprintln!(
+                "Total time: {:.3} ms",
+                total_duration.as_secs_f64() * 1000.0
+            );
         }
     }
 
