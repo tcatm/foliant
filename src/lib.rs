@@ -4,6 +4,9 @@ use std::fs::File;
 use std::path::Path;
 use memmap2::Mmap;
 
+// Magic header for the new indexed format: 4 bytes, 'I','D','X','1'
+const MAGIC: [u8; 4] = *b"IDX1";
+
 /// A node in the trie.
 #[derive(Default, Debug)]
 struct TrieNode {
@@ -17,52 +20,23 @@ pub struct Trie {
     root: TrieNode,
 }
 
-/// A lazily-loaded trie over an index file: either an on-disk index or an in-memory trie.
+/// A lazily-loaded radix trie over a memory-mapped index file.
 pub struct MmapTrie {
-    inner: MmapTrieInner,
-}
-enum MmapTrieInner {
-    Indexed(Mmap),
-    Legacy(Trie),
+    buf: Mmap,
 }
 
 impl MmapTrie {
-    /// Load a serialized radix trie from disk.  Uses indexed mmap when possible;
-    /// falls back to in-memory deserialize if the file is old-format.
+    /// Load a serialized indexed radix trie from disk via mmap.
+    /// Expects the file to begin with the 4-byte MAGIC header "IDX1".
     pub fn load<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        let file = File::open(&path)?;
+        let file = File::open(path)?;
         // SAFETY: we do not modify the file
         let mmap = unsafe { Mmap::map(&file)? };
-        let buf = &mmap[..];
-        // detect indexed format: header + count*9 bytes must fit in file
-        // heuristics to detect new indexed format:
-        let is_indexed = if buf.len() >= 3 {
-            let count = u16::from_le_bytes([buf[1], buf[2]]) as usize;
-            let header_end = 3;
-            let idx_bytes = count.saturating_mul(9);
-            if buf.len() < header_end + idx_bytes {
-                false
-            } else if count == 0 {
-                true
-            } else {
-                // check first offset lands right after index table
-                let base = header_end;
-                let off0 = u64::from_le_bytes(
-                    buf[base + 1.. base + 9].try_into().unwrap()
-                ) as usize;
-                off0 >= header_end + idx_bytes && off0 < buf.len()
-            }
-        } else {
-            false
-        };
-        if is_indexed {
-            Ok(MmapTrie { inner: MmapTrieInner::Indexed(mmap) })
-        } else {
-            // fallback: deserialize old-format radix trie into memory
-            let mut reader: &[u8] = buf;
-            let trie = Trie::read_radix_legacy(&mut reader)?;
-            Ok(MmapTrie { inner: MmapTrieInner::Legacy(trie) })
+        // verify magic header
+        if mmap.len() < MAGIC.len() || &mmap[..MAGIC.len()] != &MAGIC {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid index format"));
         }
+        Ok(MmapTrie { buf: mmap })
     }
 
     /// Iterate over entries under `prefix`, grouping at the first `delimiter`.
@@ -70,33 +44,22 @@ impl MmapTrie {
         &'a self,
         prefix: &str,
         delimiter: Option<char>
-    ) -> Box<dyn Iterator<Item = Entry> + 'a> {
-        match &self.inner {
-            MmapTrieInner::Indexed(mmap) => {
-                let pref = prefix.to_string();
-                let buf = &mmap[..];
-                match find_node_extra_buf(buf, prefix) {
-                    Some(FindResultBuf::Node(pos)) =>
-                        Box::new(MmapTrieGroupIter::new(buf, pref.clone(), delimiter, pos)),
-                    Some(FindResultBuf::EdgeMid(label_pos, tail)) => {
-                        // prefix ended mid-edge: compute subtree header offset
-                        // label_pos points at the u16 label_len
-                        let label_len = u16::from_le_bytes([
-                            buf[label_pos], buf[label_pos + 1]
-                        ]) as usize;
-                        let subtree_pos = label_pos + 2 + label_len;
-                        let mut init = pref.clone();
-                        init.push_str(&tail);
-                        Box::new(MmapTrieGroupIter::with_init(
-                            buf, pref.clone(), delimiter,
-                            vec![(subtree_pos, init)]
-                        ))
-                    }
-                    None => Box::new(MmapTrieGroupIter::empty(pref, delimiter)),
-                }
+    ) -> MmapTrieGroupIter<'a> {
+        let pref = prefix.to_string();
+        let buf = &self.buf;
+        match find_node_extra_buf(buf, prefix) {
+            Some(FindResultBuf::Node(pos)) =>
+                MmapTrieGroupIter::new(buf, pref.clone(), delimiter, pos),
+            Some(FindResultBuf::EdgeMid(label_pos, tail)) => {
+                let label_len = u16::from_le_bytes([
+                    buf[label_pos], buf[label_pos + 1]
+                ]) as usize;
+                let subtree_pos = label_pos + 2 + label_len;
+                let mut init = pref.clone(); init.push_str(&tail);
+                MmapTrieGroupIter::with_init(buf, pref.clone(), delimiter,
+                    vec![(subtree_pos, init)])
             }
-            MmapTrieInner::Legacy(trie) =>
-                Box::new(trie.list_iter(prefix, delimiter)),
+            None => MmapTrieGroupIter::empty(pref, delimiter),
         }
     }
 
@@ -115,7 +78,12 @@ enum FindResultBuf {
 
 // Find the node or mid-edge position for `prefix` in the mapped buffer
 fn find_node_extra_buf(buf: &[u8], prefix: &str) -> Option<FindResultBuf> {
-    let mut pos = 0;
+    // skip magic header if present
+    let mut pos = if buf.len() >= MAGIC.len() && &buf[..MAGIC.len()] == &MAGIC {
+        MAGIC.len()
+    } else {
+        0
+    };
     let mut rem = prefix;
     if rem.is_empty() {
         return Some(FindResultBuf::Node(pos));
@@ -485,8 +453,9 @@ impl Trie {
 
     /// Serialize the compressed radix trie to any `Write`, using a binary-searchable index internally.
     pub fn write_radix<W: Write>(&self, w: &mut W) -> io::Result<()> {
-        // write to a cursor (Vec<u8>) which supports Seek, then dump to w
+        // write magic header + node data into a cursor, then dump to w
         let mut buf = Cursor::new(Vec::new());
+        buf.write_all(&MAGIC)?;
         Self::write_node(&self.root, &mut buf)?;
         w.write_all(&buf.into_inner())?;
         Ok(())
@@ -534,39 +503,18 @@ impl Trie {
         Ok(())
     }
 
-    /// Legacy (old-format) deserializer: pre-indexed, pure label-recursive format.
-    pub fn read_radix_legacy<R: Read>(r: &mut R) -> io::Result<Self> {
-        let root = Self::read_node_legacy(r)?;
-        Ok(Trie { root })
-    }
-
-    fn read_node_legacy<R: Read>(r: &mut R) -> io::Result<TrieNode> {
-        let mut flag = [0u8; 1];
-        r.read_exact(&mut flag)?;
-        let is_end = flag[0] != 0;
-        let mut buf2 = [0u8; 2];
-        r.read_exact(&mut buf2)?;
-        let child_count = u16::from_le_bytes(buf2) as usize;
-        let mut children = Vec::with_capacity(child_count);
-        for _ in 0..child_count {
-            r.read_exact(&mut buf2)?;
-            let label_len = u16::from_le_bytes(buf2) as usize;
-            let mut lb = vec![0u8; label_len];
-            r.read_exact(&mut lb)?;
-            let label = String::from_utf8(lb)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            let child = Self::read_node_legacy(r)?;
-            children.push((label, Box::new(child)));
-        }
-        Ok(TrieNode { children, is_end })
-    }
 
     /// Deserialize using the new indexed format (reads in-memory buffer).
     pub fn read_radix<R: Read>(r: &mut R) -> io::Result<Self> {
         // read entire stream into memory buffer
         let mut buf = Vec::new();
         r.read_to_end(&mut buf)?;
-        let mut pos = 0;
+        // skip magic header if present
+        let mut pos = if buf.len() >= MAGIC.len() && &buf[..MAGIC.len()] == &MAGIC {
+            MAGIC.len()
+        } else {
+            0
+        };
         let root = Self::read_node_from_buf(&buf, &mut pos)?;
         Ok(Trie { root })
     }
