@@ -79,9 +79,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .ok_or_else(|| format!("key field '{}' is not a string", keyname))?;
                     // Serialize remaining object to CBOR bytes
                     let cbor = serde_cbor::to_vec(&jv)?;
-                    trie.insert_with_value(key_str, cbor);
+                    trie.insert(key_str, Some(cbor));
                 } else {
-                    trie.insert(&line);
+                    trie.insert(&line, None);
                 }
                 // periodic progress report
                 let now = Instant::now();

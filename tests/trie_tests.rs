@@ -7,7 +7,7 @@ fn insert_and_list_no_delimiter() {
     let mut trie = Index::new();
     let words = ["app", "apple", "appetite", "banana", "band", "bandage", "bandana"];
     for &w in &words {
-        trie.insert(w);
+        trie.insert(w, None);
     }
     let result = collect_sorted(trie.list("", None));
     let mut expected: Vec<Entry> = words
@@ -29,10 +29,10 @@ fn insert_and_list_no_delimiter() {
 #[test]
 fn list_with_delimiter() {
     let mut trie = Index::new();
-    trie.insert("foo/bar/1");
-    trie.insert("foo/bar/2");
-    trie.insert("foo/baz/1");
-    trie.insert("foobar");
+    trie.insert("foo/bar/1", None);
+    trie.insert("foo/bar/2", None);
+    trie.insert("foo/baz/1", None);
+    trie.insert("foobar", None);
     let list_all = collect_sorted(trie.list("foo", None));
     let expected_all: Vec<Entry> = vec![
         Entry::Key("foo/bar/1".to_string()),
@@ -53,7 +53,7 @@ fn list_with_delimiter() {
 #[test]
 fn nonexistent_prefix() {
     let mut trie = Index::new();
-    trie.insert("hello");
+    trie.insert("hello", None);
     let result = collect_sorted(trie.list("world", None));
     assert!(result.is_empty());
 }
@@ -68,7 +68,7 @@ fn sample_path_delimiter_query() {
         "readme.md",
     ];
     for &p in &paths {
-        trie.insert(p);
+        trie.insert(p, None);
     }
     let top = collect_sorted(trie.list("", Some('/')));
     let expected_top: Vec<Entry> = vec![

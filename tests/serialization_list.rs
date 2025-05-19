@@ -16,7 +16,7 @@ fn serialize_and_mmap_list() {
         "gamma/epsilon",
     ];
     for &k in &keys {
-        trie.insert(k);
+        trie.insert(k, None);
     }
 
     // Serialize into an in-memory buffer
@@ -52,7 +52,7 @@ fn serialize_and_mmap_list_prefix_a() {
     let mut trie = Index::new();
     let keys = ["a1", "a2", "a3", "b1"];
     for &k in &keys {
-        trie.insert(k);
+        trie.insert(k, None);
     }
 
     // Serialize into an in-memory buffer

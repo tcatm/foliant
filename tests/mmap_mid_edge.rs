@@ -8,8 +8,8 @@ use tempfile::NamedTempFile;
 fn mid_edge_prefix_mmap() {
     // Build a small trie with a compressed edge "abcd"
     let mut trie = Index::new();
-    trie.insert("abcdx");
-    trie.insert("abcde");
+    trie.insert("abcdx", None);
+    trie.insert("abcde", None);
 
     // Serialize to a buffer
     let mut buf = Vec::new();

@@ -318,25 +318,8 @@ impl TrieBackend for Index {
     }
 }
 
-// buffer-based prefix lookup logic removed; use generic_find_prefix instead
-
-
-/// Statistics collected during trie traversal.
-#[derive(Default, Debug, Clone)]
-pub struct TraverseStats {
-    /// Number of trie nodes visited during traversal.
-    pub nodes_visited: usize,
-    /// Number of edges (child links) traversed.
-    pub edges_traversed: usize,
-    /// Number of keys (terminal nodes) collected.
-    pub keys_collected: usize,
-}
 // Inherent implementation of Index methods
 impl Index {
-
-
-    /// Create a new, empty Trie.
-    /// Create a new, empty in-memory Trie.
     /// Create a new, empty in-memory Trie.
     pub fn new() -> Self {
         Index::InMemory { root: TrieNode::default() }
@@ -363,10 +346,14 @@ impl Index {
         <Self as TrieBackend>::list(self, prefix, delimiter)
     }
 
-    /// Insert a string into the radix trie, splitting edges on partial matches.
-    pub fn insert(&mut self, key: &str) {
+    /// Insert a key with an optional CBOR payload into the radix trie, splitting edges on partial matches.
+    pub fn insert(&mut self, key: &str, value: Option<Vec<u8>>) {
+        // Prepare payload and insertion pointers
+        let mut payload = value;
         match self {
             Index::InMemory { root } => {
+                // raw pointer to root for payload attachment
+                let root_ptr: *mut TrieNode = root;
                 let mut node = root;
                 let mut suffix = key;
                 loop {
@@ -379,6 +366,7 @@ impl Index {
                         }
                         let (orig_label, orig_child) = node.children.remove(i);
                         if lcp < orig_label.len() {
+                            // Split edge into intermediate node
                             let mut intermediate = TrieNode::default();
                             let label_rem = &orig_label[lcp..];
                             intermediate.children.push((label_rem.to_string(), orig_child));
@@ -392,12 +380,29 @@ impl Index {
                             }
                             let prefix_label = &orig_label[..lcp];
                             node.children.insert(i, (prefix_label.to_string(), Box::new(intermediate)));
+                            // attach payload if provided
+                            if let Some(val) = payload.take() {
+                                unsafe {
+                                    if let Some(n) = Self::find_node_mut(&mut *root_ptr, key) {
+                                        n.value = Some(val);
+                                    }
+                                }
+                            }
                             return;
                         } else {
+                            // Consume full edge label
                             suffix = &suffix[lcp..];
                             node.children.insert(i, (orig_label, orig_child));
                             if suffix.is_empty() {
                                 node.children[i].1.is_end = true;
+                                // attach payload if provided
+                                if let Some(val) = payload.take() {
+                                    unsafe {
+                                        if let Some(n) = Self::find_node_mut(&mut *root_ptr, key) {
+                                            n.value = Some(val);
+                                        }
+                                    }
+                                }
                                 return;
                             }
                             node = &mut node.children[i].1;
@@ -406,25 +411,20 @@ impl Index {
                         }
                     }
                     if !matched {
+                        // No matching edge; append new leaf
                         let mut leaf = TrieNode::default();
                         leaf.is_end = true;
                         node.children.push((suffix.to_string(), Box::new(leaf)));
+                        // attach payload if provided
+                        if let Some(val) = payload.take() {
+                            unsafe {
+                                if let Some(n) = Self::find_node_mut(&mut *root_ptr, key) {
+                                    n.value = Some(val);
+                                }
+                            }
+                        }
                         return;
                     }
-                }
-            }
-            Index::Mmap { .. } => panic!("cannot insert into a memory-mapped trie"),
-        }
-    }
-    /// Insert a key with an attached CBOR value (raw bytes).
-    pub fn insert_with_value(&mut self, key: &str, value: Vec<u8>) {
-        // Standard insert (marks is_end and potentially splits edges)
-        self.insert(key);
-        // Locate the leaf node and set its payload in in-memory trie
-        match self {
-            Index::InMemory { root } => {
-                if let Some(node) = Self::find_node_mut(root, key) {
-                    node.value = Some(value);
                 }
             }
             Index::Mmap { .. } => panic!("cannot insert into a memory-mapped trie"),
