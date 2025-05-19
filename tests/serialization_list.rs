@@ -1,6 +1,6 @@
 use index::{Trie, MmapTrie, Entry};
-use std::fs;
-use std::env;
+use std::io::Write;
+use tempfile::NamedTempFile;
 
 /// This test builds a small trie of file-like paths, serializes it to disk,
 /// then memory-maps the file and verifies that both the in-memory and
@@ -23,13 +23,12 @@ fn serialize_and_mmap_list() {
     let mut buf = Vec::new();
     trie.write_radix(&mut buf).unwrap();
 
-    // Write to a temp file
-    let mut path = env::temp_dir();
-    path.push(format!("index_test_{}.idx", std::process::id()));
-    fs::write(&path, &buf).unwrap();
+    // Write to a NamedTempFile
+    let mut tmp = NamedTempFile::new().expect("temp file");
+    tmp.as_file_mut().write_all(&buf).unwrap();
 
     // Load via memory-mapped trie
-    let mtrie = MmapTrie::load(&path).unwrap();
+    let mtrie = MmapTrie::load(tmp.path()).unwrap();
 
     // Compare listings without delimiter
     let mut list_mem = trie.list("", None);
@@ -45,8 +44,6 @@ fn serialize_and_mmap_list() {
     grp_mmap.sort();
     assert_eq!(grp_mem, grp_mmap);
 
-    // Clean up the temp file (ignore errors)
-    let _ = fs::remove_file(path);
 }
 
 #[test]
@@ -62,13 +59,12 @@ fn serialize_and_mmap_list_prefix_a() {
     let mut buf = Vec::new();
     trie.write_radix(&mut buf).unwrap();
 
-    // Write to a temp file
-    let mut path = env::temp_dir();
-    path.push(format!("index_test_prefix_a_{}.idx", std::process::id()));
-    fs::write(&path, &buf).unwrap();
+    // Write to a NamedTempFile
+    let mut tmp = NamedTempFile::new().expect("temp file");
+    tmp.as_file_mut().write_all(&buf).unwrap();
 
     // Load via memory-mapped trie
-    let mtrie = MmapTrie::load(&path).unwrap();
+    let mtrie = MmapTrie::load(tmp.path()).unwrap();
 
     // List entries with prefix "a"
     let mut list_mem = trie.list("a", None);
@@ -87,6 +83,4 @@ fn serialize_and_mmap_list_prefix_a() {
         ]
     );
 
-    // Clean up
-    let _ = fs::remove_file(path);
 }
