@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::io::{self, Read, Write, Seek, SeekFrom, Cursor};
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 use memmap2::Mmap;
 
 // Magic header for the new indexed format: 4 bytes, 'I','D','X','1'
@@ -13,21 +14,157 @@ const INDEX_ENTRY_LEN: usize = 1 + 8;             // first_byte (u8) + child_off
 const LABEL_LEN_LEN: usize = 2;                   // u16 label length
 
 /// A node in the trie.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 struct TrieNode {
     // Each edge is labeled by a (possibly multi-character) string
     children: Vec<(String, Box<TrieNode>)>,
     is_end: bool,
+} // end fn find_node_extra_buf
+
+// --- Generic trie backend abstraction to unify both in-memory and mmap implementations ---
+/// Result of finding a prefix in a trie backend.
+enum GenericFindResult<H> {
+    Node(H),
+    EdgeMid(H, String),
+}
+
+/// Trait for a trie backend that can find prefixes, check terminal nodes, and list children.
+/// Backend abstraction for generic trie traversal and grouping.
+trait TrieBackend: Clone {
+    type Handle: Clone;
+    fn find_prefix(&self, prefix: &str) -> Option<GenericFindResult<Self::Handle>>;
+    fn is_end(&self, handle: &Self::Handle) -> bool;
+    fn children(&self, handle: &Self::Handle) -> Vec<(String, Self::Handle)>;
+
+    /// Streaming iterator over entries under `prefix`, grouping at the first `delimiter`.
+    fn list_iter(&self, prefix: &str, delimiter: Option<char>) -> GenericTrieIter<Self>
+    where Self: Sized
+    {
+        let pref = prefix.to_string();
+        match self.find_prefix(prefix) {
+            Some(GenericFindResult::Node(h)) =>
+                GenericTrieIter::new(self.clone(), pref.clone(), delimiter, h),
+            Some(GenericFindResult::EdgeMid(h, tail)) => {
+                let mut init = pref.clone(); init.push_str(&tail);
+                GenericTrieIter::with_init(self.clone(), pref.clone(), delimiter,
+                    vec![(h, init)])
+            }
+            None =>
+                GenericTrieIter::empty(self.clone(), pref.clone(), delimiter),
+        }
+    }
+
+    /// Collect all entries under `prefix` into a Vec, grouping at `delimiter`.
+    fn list(&self, prefix: &str, delimiter: Option<char>) -> Vec<Entry>
+    where Self: Sized
+    {
+        self.list_iter(prefix, delimiter).collect()
+    }
+}
+
+
+/// A generic grouped-iterator over a trie backend.
+#[derive(Clone)]
+struct GenericTrieIter<B: TrieBackend> {
+    backend: B,
+    stack: Vec<(B::Handle, String)>,
+    prefix: String,
+    delimiter: Option<char>,
+    seen: HashSet<String>,
+}
+impl<B: TrieBackend> GenericTrieIter<B> {
+    fn new(backend: B, prefix: String, delimiter: Option<char>, handle: B::Handle) -> Self {
+        GenericTrieIter {
+            backend,
+            stack: vec![(handle, prefix.clone())],
+            prefix,
+            delimiter,
+            seen: HashSet::new(),
+        }
+    }
+    fn with_init(
+        backend: B,
+        prefix: String,
+        delimiter: Option<char>,
+        init: Vec<(B::Handle, String)>,
+    ) -> Self {
+        GenericTrieIter {
+            backend,
+            stack: init,
+            prefix,
+            delimiter,
+            seen: HashSet::new(),
+        }
+    }
+    fn empty(backend: B, prefix: String, delimiter: Option<char>) -> Self {
+        GenericTrieIter {
+            backend,
+            stack: Vec::new(),
+            prefix,
+            delimiter,
+            seen: HashSet::new(),
+        }
+    }
+}
+impl<B: TrieBackend> Iterator for GenericTrieIter<B> {
+    type Item = Entry;
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some((h, path)) = self.stack.pop() {
+            if let Some(d) = self.delimiter {
+                if path.starts_with(&self.prefix) {
+                    let suffix = &path[self.prefix.len()..];
+                    if let Some(i) = suffix.find(d) {
+                        let group = path[..self.prefix.len() + i + 1].to_string();
+                        if self.seen.insert(group.clone()) {
+                            return Some(Entry::CommonPrefix(group));
+                        }
+                        continue;
+                    }
+                    if !suffix.is_empty() && path.ends_with(d)
+                        && self.seen.insert(path.clone())
+                    {
+                        return Some(Entry::CommonPrefix(path.clone()));
+                    }
+                }
+            }
+            let is_term = self.backend.is_end(&h);
+            let mut children = self.backend.children(&h);
+            children.sort_by(|a, b| b.0.cmp(&a.0));
+            for (lbl, child) in children {
+                let mut np = path.clone();
+                np.push_str(&lbl);
+                self.stack.push((child, np));
+            }
+            if is_term && path.starts_with(&self.prefix) {
+                if let Some(d) = self.delimiter {
+                    if path.ends_with(d) {
+                        return Some(Entry::CommonPrefix(path.clone()));
+                    }
+                }
+                return Some(Entry::Key(path.clone()));
+            }
+        }
+        None
+    }
+}
+impl<B: TrieBackend> PartialEq<Vec<Entry>> for GenericTrieIter<B> {
+    fn eq(&self, other: &Vec<Entry>) -> bool {
+        let got = self.clone().collect::<Vec<_>>();
+        let want = other.clone();
+        got == want
+    }
 }
 
 /// A prefix trie for indexing strings.
+#[derive(Clone)]
 pub struct Trie {
     root: TrieNode,
 }
 
 /// A lazily-loaded radix trie over a memory-mapped index file.
+#[derive(Clone)]
 pub struct MmapTrie {
-    buf: Mmap,
+    buf: Arc<Mmap>,
 }
 
 impl MmapTrie {
@@ -41,36 +178,98 @@ impl MmapTrie {
         if mmap.len() < HEADER_LEN || &mmap[..HEADER_LEN] != &MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid index format"));
         }
-        Ok(MmapTrie { buf: mmap })
+        let buf = Arc::new(mmap);
+        Ok(MmapTrie { buf })
     }
 
-    /// Iterate over entries under `prefix`, grouping at the first `delimiter`.
-    pub fn list_iter<'a>(
-        &'a self,
-        prefix: &str,
-        delimiter: Option<char>
-    ) -> MmapTrieGroupIter<'a> {
-        let pref = prefix.to_string();
-        let buf = &self.buf;
-        match find_node_extra_buf(buf, prefix) {
-            Some(FindResultBuf::Node(pos)) =>
-                MmapTrieGroupIter::new(buf, pref.clone(), delimiter, pos),
-            Some(FindResultBuf::EdgeMid(label_pos, tail)) => {
-                let label_len = u16::from_le_bytes([
-                    buf[label_pos], buf[label_pos + 1]
-                ]) as usize;
-                let subtree_pos = label_pos + 2 + label_len;
-                let mut init = pref.clone(); init.push_str(&tail);
-                MmapTrieGroupIter::with_init(buf, pref.clone(), delimiter,
-                    vec![(subtree_pos, init)])
-            }
-            None => MmapTrieGroupIter::empty(pref, delimiter),
-        }
+    /// Streaming iterator over entries under `prefix`, grouping at the first `delimiter`.
+    pub fn list_iter<'a>(&'a self, prefix: &str, delimiter: Option<char>) -> impl Iterator<Item = Entry> + 'a {
+        <Self as TrieBackend>::list_iter(self, prefix, delimiter)
     }
-
     /// Collect all entries under `prefix` into a Vec, grouping at `delimiter`.
     pub fn list(&self, prefix: &str, delimiter: Option<char>) -> Vec<Entry> {
-        self.list_iter(prefix, delimiter).collect()
+        <Self as TrieBackend>::list(self, prefix, delimiter)
+    }
+}
+
+// Implement the generic TrieBackend trait for the in-memory Trie
+impl TrieBackend for Trie {
+    type Handle = usize;
+    fn find_prefix(&self, prefix: &str) -> Option<GenericFindResult<Self::Handle>> {
+        match self.find_node_extra(prefix) {
+            Some(FindResult::Node(node)) => {
+                let handle = node as *const TrieNode as usize;
+                Some(GenericFindResult::Node(handle))
+            }
+            Some(FindResult::EdgeMid(child, tail)) => {
+                let handle = child as *const TrieNode as usize;
+                Some(GenericFindResult::EdgeMid(handle, tail.to_string()))
+            }
+            None => None,
+        }
+    }
+    fn is_end(&self, handle: &Self::Handle) -> bool {
+        let addr = *handle;
+        let ptr = addr as *const TrieNode;
+        unsafe { (*ptr).is_end }
+    }
+    fn children(&self, handle: &Self::Handle) -> Vec<(String, Self::Handle)> {
+        let addr = *handle;
+        let ptr = addr as *const TrieNode;
+        let node = unsafe { &*ptr };
+        node.children.iter()
+            .map(|(l, c)| {
+                let child_handle = c.as_ref() as *const TrieNode as usize;
+                (l.clone(), child_handle)
+            })
+            .collect()
+    }
+}
+
+// Implement the generic TrieBackend trait for the memory-mapped Trie
+impl TrieBackend for MmapTrie {
+    type Handle = usize;
+    fn find_prefix(&self, prefix: &str) -> Option<GenericFindResult<Self::Handle>> {
+        match find_node_extra_buf(&self.buf, prefix) {
+            Some(FindResultBuf::Node(pos)) => Some(GenericFindResult::Node(pos)),
+            Some(FindResultBuf::EdgeMid(label_pos, tail)) => {
+                let len = u16::from_le_bytes([self.buf[label_pos], self.buf[label_pos+1]]) as usize;
+                let subtree = label_pos + 2 + len;
+                Some(GenericFindResult::EdgeMid(subtree, tail))
+            }
+            None => None,
+        }
+    }
+    fn is_end(&self, handle: &Self::Handle) -> bool {
+        self.buf.get(*handle).copied().unwrap_or(0) != 0
+    }
+    fn children(&self, handle: &Self::Handle) -> Vec<(String, Self::Handle)> {
+        let mut pos = *handle;
+        if pos + NODE_HEADER_LEN > self.buf.len() {
+            return Vec::new();
+        }
+        let count = u16::from_le_bytes([self.buf[pos+1], self.buf[pos+2]]) as usize;
+        pos += NODE_HEADER_LEN;
+        let mut offsets = Vec::with_capacity(count);
+        for i in 0..count {
+            let ent = pos + i * INDEX_ENTRY_LEN;
+            if ent + INDEX_ENTRY_LEN > self.buf.len() { break; }
+            let off = u64::from_le_bytes(self.buf[ent+1..ent+9].try_into().unwrap()) as usize;
+            offsets.push(off);
+        }
+        let mut out = Vec::with_capacity(count);
+        for &lp in &offsets {
+            let mut p = lp;
+            if p + LABEL_LEN_LEN > self.buf.len() { continue; }
+            let l = u16::from_le_bytes([self.buf[p], self.buf[p+1]]) as usize;
+            p += LABEL_LEN_LEN;
+            if p + l > self.buf.len() { continue; }
+            if let Ok(lbl) = std::str::from_utf8(&self.buf[p..p+l]) {
+                let child_pos = p + l;
+                out.push((lbl.to_string(), child_pos));
+            }
+        }
+        out
     }
 }
 
@@ -160,115 +359,6 @@ fn find_node_extra_buf(buf: &[u8], prefix: &str) -> Option<FindResultBuf> {
     }
 }
 
-/// Iterator over a memmapped radix trie without full deserialization.
-pub struct MmapTrieGroupIter<'a> {
-    buf: &'a [u8],
-    stack: Vec<(usize, String)>,
-    prefix: String,
-    delimiter: Option<char>,
-    seen: HashSet<String>,
-}
-
-impl<'a> MmapTrieGroupIter<'a> {
-    fn empty(prefix: String, delimiter: Option<char>) -> Self {
-        MmapTrieGroupIter { buf: &[], stack: Vec::new(), prefix, delimiter, seen: HashSet::new() }
-    }
-    fn new(buf: &'a [u8], prefix: String, delimiter: Option<char>, pos: usize) -> Self {
-        MmapTrieGroupIter { buf, stack: vec![(pos, prefix.clone())], prefix, delimiter, seen: HashSet::new() }
-    }
-    fn with_init(buf: &'a [u8], prefix: String, delimiter: Option<char>, init: Vec<(usize, String)>) -> Self {
-        MmapTrieGroupIter { buf, stack: init, prefix, delimiter, seen: HashSet::new() }
-    }
-}
-
-impl<'a> Iterator for MmapTrieGroupIter<'a> {
-    type Item = Entry;
-    fn next(&mut self) -> Option<Self::Item> {
-        while let Some((pos, path)) = self.stack.pop() {
-            // grouping logic
-            if let Some(d) = self.delimiter {
-                if path.starts_with(&self.prefix) {
-                    let suffix = &path[self.prefix.len()..];
-                    if let Some(i) = suffix.find(d) {
-                        let group = path[..self.prefix.len() + i + 1].to_string();
-                        if self.seen.insert(group.clone()) {
-                            return Some(Entry::CommonPrefix(group));
-                        }
-                        continue;
-                    }
-                    if !suffix.is_empty() && path.ends_with(d) && self.seen.insert(path.clone()) {
-                        return Some(Entry::CommonPrefix(path.clone()));
-                    }
-                }
-            }
-            // parse node at pos (indexed on-disk format)
-            let mut cpos = pos;
-            // node header: is_end + child_count
-            if cpos + NODE_HEADER_LEN > self.buf.len() {
-                continue;
-            }
-            let is_end = self.buf[cpos] != 0;
-            let count = u16::from_le_bytes([
-                self.buf[cpos + 1], self.buf[cpos + 2]
-            ]) as usize;
-            cpos += NODE_HEADER_LEN;
-            // read index table entries
-            let mut offsets = Vec::with_capacity(count);
-            for _ in 0..count {
-                if cpos + INDEX_ENTRY_LEN > self.buf.len() {
-                    offsets.clear(); break;
-                }
-                let _fb = self.buf[cpos];
-                let off = u64::from_le_bytes(
-                    self.buf[cpos + 1..cpos + INDEX_ENTRY_LEN].try_into().unwrap()
-                ) as usize;
-                offsets.push(off);
-                cpos += INDEX_ENTRY_LEN;
-            }
-            // collect children by parsing each label at its offset
-            let mut children = Vec::with_capacity(count);
-            // collect children by parsing each label at its offset
-            for &child_pos in &offsets {
-                let mut lpos = child_pos;
-                if lpos + LABEL_LEN_LEN > self.buf.len() {
-                    continue;
-                }
-                let label_len = u16::from_le_bytes([
-                    self.buf[lpos], self.buf[lpos + 1]
-                ]) as usize;
-                lpos += LABEL_LEN_LEN;
-                if lpos + label_len > self.buf.len() {
-                    continue;
-                }
-                let label = match std::str::from_utf8(
-                    &self.buf[lpos..lpos + label_len]
-                ) {
-                    Ok(s) => s.to_string(),
-                    Err(_) => continue,
-                };
-                let desc_pos = lpos + label_len;
-                children.push((label, desc_pos));
-            }
-            // descend children in reverse lex order
-            children.sort_by(|a, b| b.0.cmp(&a.0));
-            for (label, child_pos) in children {
-                let mut new_path = path.clone();
-                new_path.push_str(&label);
-                self.stack.push((child_pos, new_path));
-            }
-            // yield key if terminal
-            if is_end && path.starts_with(&self.prefix) {
-                if let Some(d) = self.delimiter {
-                    if path.ends_with(d) {
-                        return Some(Entry::CommonPrefix(path.clone()));
-                    }
-                }
-                return Some(Entry::Key(path.clone()));
-            }
-        }
-        None
-    }
-}
 /// Internal result of prefix lookup: exact node or mid-edge child + label remainder
 enum FindResult<'a> {
     /// `prefix` ended exactly at this node
@@ -288,80 +378,6 @@ pub struct TraverseStats {
     pub keys_collected: usize,
 }
 
-/// Iterator over entries in the compressed radix trie with on-the-fly grouping.
-#[derive(Clone, Debug)]
-pub struct TrieGroupIter<'a> {
-    stack: Vec<(&'a TrieNode, String)>,
-    prefix: String,
-    delimiter: Option<char>,
-    seen: HashSet<String>,
-}
-
-impl<'a> TrieGroupIter<'a> {
-    /// Create an empty iterator (no entries) for nonexistent prefix
-    pub(crate) fn empty(prefix: String, delimiter: Option<char>) -> Self {
-        TrieGroupIter { stack: Vec::new(), prefix, delimiter, seen: HashSet::new() }
-    }
-
-    /// Create a new iterator that groups at the first `delimiter` for each prefix.
-    pub(crate) fn new(root: &'a TrieNode, prefix: String, delimiter: Option<char>) -> Self {
-        // Initialize stack with the full prefix as starting path
-        let init_path = prefix.clone();
-        TrieGroupIter { stack: vec![(root, init_path)], prefix, delimiter, seen: HashSet::new() }
-    }
-}
-
-impl<'a> Iterator for TrieGroupIter<'a> {
-    type Item = Entry;
-    fn next(&mut self) -> Option<Self::Item> {
-        while let Some((node, path)) = self.stack.pop() {
-            if let Some(d) = self.delimiter {
-                if path.starts_with(&self.prefix) {
-                    let suffix = &path[self.prefix.len()..];
-                    if let Some(pos) = suffix.find(d) {
-                        let group = path[..self.prefix.len() + pos + 1].to_string();
-                        if self.seen.insert(group.clone()) {
-                            return Some(Entry::CommonPrefix(group));
-                        }
-                        continue;
-                    }
-                    // For descendant paths with trailing delimiter, yield grouping
-                    if !suffix.is_empty() && path.ends_with(d) && self.seen.insert(path.clone()) {
-                        return Some(Entry::CommonPrefix(path.clone()));
-                    }
-                }
-            }
-            // descend children in reverse lex order for correct ordering
-            {
-                let mut children: Vec<_> = node.children.iter().collect();
-                children.sort_by(|a, b| b.0.cmp(&a.0));
-                for (label, child) in children {
-                    let mut new_path = path.clone();
-                    new_path.push_str(label);
-                    self.stack.push((child, new_path));
-                }
-            }
-            // after queuing children, yield key if terminal
-            if node.is_end && path.starts_with(&self.prefix) {
-                // If the key ends with the delimiter, present it as a common prefix
-                if let Some(d) = self.delimiter {
-                    if path.ends_with(d) {
-                        return Some(Entry::CommonPrefix(path.clone()));
-                    }
-                }
-                return Some(Entry::Key(path.clone()));
-            }
-        }
-        None
-    }
-}
-
-// Allow comparing iterator directly to Vec<Entry> in tests
-impl<'a> PartialEq<Vec<Entry>> for TrieGroupIter<'a> {
-    fn eq(&self, other: &Vec<Entry>) -> bool {
-        self.clone().collect::<Vec<_>>() == *other
-    }
-}
 
 impl Trie {
     // The in-memory find_node helper is unused; use find_node_extra for lookups.
@@ -396,6 +412,15 @@ impl Trie {
     /// Create a new, empty Trie.
     pub fn new() -> Self {
         Trie { root: TrieNode::default() }
+    }
+    
+    /// Streaming iterator over entries under `prefix`, grouping at the first `delimiter`.
+    pub fn list_iter<'a>(&'a self, prefix: &str, delimiter: Option<char>) -> impl Iterator<Item = Entry> + 'a {
+        <Self as TrieBackend>::list_iter(self, prefix, delimiter)
+    }
+    /// Collect all entries under `prefix` into a Vec, grouping at `delimiter`.
+    pub fn list(&self, prefix: &str, delimiter: Option<char>) -> Vec<Entry> {
+        <Self as TrieBackend>::list(self, prefix, delimiter)
     }
 
     /// Insert a string into the radix trie, splitting edges on partial matches.
@@ -447,27 +472,6 @@ impl Trie {
         }
     }
 
-    /// Streaming iterator over entries under `prefix`, grouping at the first `delimiter`.
-    /// Supports prefixes that fall mid-edge by routing into the single matching subtree.
-    pub fn list_iter<'a>(&'a self, prefix: &str, delimiter: Option<char>) -> TrieGroupIter<'a> {
-        // Find either an exact node or a mid-edge match
-        let pref = prefix.to_string();
-        match self.find_node_extra(prefix) {
-            Some(FindResult::Node(node)) => {
-                TrieGroupIter::new(node, pref, delimiter)
-            }
-            Some(FindResult::EdgeMid(child, rem_label)) => {
-                // Start directly at the partial-match child, seeding full path = prefix + rem_label
-                let mut init = pref.clone(); init.push_str(rem_label);
-                TrieGroupIter { stack: vec![(child, init)], prefix: pref, delimiter, seen: HashSet::new() }
-            }
-            None => TrieGroupIter::empty(pref, delimiter),
-        }
-    }
-    /// List entries under `prefix` into a Vec<Entry>, grouping at the first `delimiter`.
-    pub fn list(&self, prefix: &str, delimiter: Option<char>) -> Vec<Entry> {
-        self.list_iter(prefix, delimiter).collect()
-    }
 
     /// Compute the byte-length of the common prefix of `a` and `b`.
     fn common_prefix_len(a: &str, b: &str) -> usize {
@@ -557,16 +561,6 @@ impl Trie {
         Ok(Trie { root })
     }
 
-    /// Load a trie by memory-mapping the serialized file.
-    pub fn load_mmap<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        let file = File::open(path)?;
-        // SAFETY: we won't modify the file
-        let mmap = unsafe { Mmap::map(&file)? };
-        let buf = &mmap[..];
-        let mut pos = 0;
-        let root = Self::read_node_from_buf(buf, &mut pos)?;
-        Ok(Trie { root })
-    }
 
     fn read_node_from_buf(buf: &[u8], pos: &mut usize) -> io::Result<TrieNode> {
         // header: is_end (1 byte) + child_count (2 bytes LE)
