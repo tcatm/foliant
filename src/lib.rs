@@ -1,9 +1,11 @@
+#![allow(private_interfaces)]
 use std::collections::HashSet;
-use std::io::{self, Read, Write, Seek, SeekFrom, Cursor};
+use std::io::{self, Write, Seek, SeekFrom, Cursor};
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 use memmap2::Mmap;
+use std::convert::TryInto;
 use std::fmt;
 use serde_cbor;
 pub use serde_cbor::Value as Value;
@@ -15,6 +17,12 @@ pub enum IndexError {
     Io(io::Error),
     /// Data is not in the expected indexed format
     InvalidFormat(&'static str),
+}
+// Internal handle for unified NodeStorage across in-memory and mmap variants
+#[derive(Clone)]
+enum Handle {
+    Mem(*const TrieNode),
+    Mmap(usize),
 }
 
 impl fmt::Display for IndexError {
@@ -198,191 +206,107 @@ impl<B: TrieBackend> PartialEq<Vec<Entry>> for GenericTrieIter<B> {
 }
 
 /// A prefix trie for indexing strings.
+///
+/// Supports both in-memory construction and on-disk memory-mapped queries.
 #[derive(Clone)]
-pub struct Trie {
-    root: TrieNode,
+pub enum Trie {
+    /// In-memory trie built via `new()`, `insert()`, etc.
+    InMemory { root: TrieNode },
+    /// Memory-mapped trie loaded via `load()`, zero-copy listing.
+    Mmap { buf: Arc<Mmap> },
 }
 
-/// A lazily-loaded radix trie over a memory-mapped index file.
-#[derive(Clone)]
-pub struct MmapTrie {
-    buf: Arc<Mmap>,
-}
 
-impl MmapTrie {
-    /// Load a serialized indexed radix trie from disk via mmap.
-    /// Expects the file to begin with the 4-byte MAGIC header "IDX1".
-    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let file = File::open(path)?;
-        // SAFETY: we do not modify the file
-        let mmap = unsafe { Mmap::map(&file)? };
-        // verify magic header
-        if mmap.len() < HEADER_LEN || &mmap[..HEADER_LEN] != &MAGIC {
-            return Err(IndexError::InvalidFormat("missing or corrupt magic header"));
-        }
-        let buf = Arc::new(mmap);
-        Ok(MmapTrie { buf })
-    }
 
-    /// Streaming iterator over entries under `prefix`, grouping at the first `delimiter`.
-    pub fn list_iter<'a>(&'a self, prefix: &str, delimiter: Option<char>) -> impl Iterator<Item = Entry> + 'a {
-        <Self as TrieBackend>::list_iter(self, prefix, delimiter)
-    }
-    /// Collect all entries under `prefix` into a Vec, grouping at `delimiter`.
-    pub fn list(&self, prefix: &str, delimiter: Option<char>) -> Vec<Entry> {
-        <Self as TrieBackend>::list(self, prefix, delimiter)
-    }
-    /// Get the raw CBOR value bytes for an exact `key`, if present.
-    /// Get the raw CBOR-encoded bytes stored under `key`, if any.
-    fn get_value_raw(&self, key: &str) -> Result<Option<&[u8]>> {
-        // Find the node handle for this key
-        match <Self as TrieBackend>::find_prefix(self, key) {
-            Some(GenericFindResult::Node(handle)) => {
-                let mut pos = handle + NODE_HEADER_LEN;
-                // Read TLV tag and length
-                if pos + 5 > self.buf.len() {
-                    return Err(IndexError::InvalidFormat("truncated payload TLV"));
-                }
-                let tag = self.buf[pos]; pos += 1;
-                let len_bytes: [u8; 4] = self.buf[pos..pos+4]
-                    .try_into()
-                    .map_err(|_| IndexError::InvalidFormat("truncated payload length"))?;
-                let val_len = u32::from_le_bytes(len_bytes) as usize;
-                pos += 4;
-                if tag == 1 {
-                    if pos + val_len > self.buf.len() {
-                        return Err(IndexError::InvalidFormat("truncated payload data"));
-                    }
-                    Ok(Some(&self.buf[pos..pos+val_len]))
-                } else {
-                    Ok(None)
-                }
-            }
-            _ => Ok(None),
-        }
-    }
-    /// Get the CBOR-decoded Value stored under `key`, if any.
-    pub fn get_value(&self, key: &str) -> Result<Option<Value>> {
-        if let Some(bytes) = self.get_value_raw(key)? {
-            let v: Value = serde_cbor::from_slice(bytes)
-                .map_err(|_| IndexError::InvalidFormat("invalid CBOR payload"))?;
-            Ok(Some(v))
-        } else {
-            Ok(None)
-        }
-    }
-}
-
-// NodeStorage implementations for Trie and MmapTrie
+// Unified NodeStorage implementation for both in-memory and memory-mapped Trie
 impl NodeStorage for Trie {
-    /// Handle is a raw pointer to a TrieNode; heap-allocated Boxes ensure stability
-    type Handle = *const TrieNode;
+    type Handle = Handle;
     fn root_handle(&self) -> Self::Handle {
-        &self.root as *const TrieNode
+        match self {
+            Trie::InMemory { root } => Handle::Mem(root as *const TrieNode),
+            Trie::Mmap { .. } => Handle::Mmap(HEADER_LEN),
+        }
     }
     fn is_terminal(&self, handle: &Self::Handle) -> io::Result<bool> {
-        // SAFETY: handle is a valid pointer from root_handle or read_children
-        let node = unsafe { &**handle };
-        Ok(node.is_end)
+        match (self, handle) {
+            (Trie::InMemory { .. }, Handle::Mem(ptr)) => {
+                let node = unsafe { &**ptr };
+                Ok(node.is_end)
+            }
+            (Trie::Mmap { buf }, Handle::Mmap(offset)) => {
+                Ok(buf.get(*offset).copied().unwrap_or(0) != 0)
+            }
+            _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid handle")),
+        }
     }
     fn read_children(&self, handle: &Self::Handle) -> io::Result<Vec<(String, Self::Handle)>> {
-        // SAFETY: handle is a valid pointer to TrieNode
-        let node = unsafe { &**handle };
-        let mut out = Vec::with_capacity(node.children.len());
-        for (label, child) in &node.children {
-            let child_ptr: *const TrieNode = child.as_ref();
-            out.push((label.clone(), child_ptr));
+        match (self, handle) {
+            (Trie::InMemory { .. }, Handle::Mem(ptr)) => {
+                let node = unsafe { &**ptr };
+                let mut out = Vec::with_capacity(node.children.len());
+                for (label, child) in &node.children {
+                    let child_ptr: *const TrieNode = child.as_ref();
+                    out.push((label.clone(), Handle::Mem(child_ptr)));
+                }
+                out.sort_by(|a, b| b.0.cmp(&a.0));
+                Ok(out)
+            }
+            (Trie::Mmap { buf }, Handle::Mmap(mut pos)) => {
+                // ensure we can read node header
+                if pos + NODE_HEADER_LEN > buf.len() {
+                    return Ok(Vec::new());
+                }
+                let count = u16::from_le_bytes([buf[pos + 1], buf[pos + 2]]) as usize;
+                pos += NODE_HEADER_LEN;
+                // skip TLV payload: tag + length + data
+                if pos + 5 <= buf.len() {
+                    let _tag = buf[pos]; pos += 1;
+                    let len_bytes: [u8; 4] = buf[pos..pos + 4]
+                        .try_into()
+                        .unwrap_or([0, 0, 0, 0]);
+                    let val_len = u32::from_le_bytes(len_bytes) as usize;
+                    pos += 4;
+                    pos = pos.saturating_add(val_len);
+                }
+                let mut offsets = Vec::with_capacity(count);
+                for i in 0..count {
+                    let ent = pos + i * INDEX_ENTRY_LEN;
+                    if ent + INDEX_ENTRY_LEN > buf.len() {
+                        break;
+                    }
+                    let off = u64::from_le_bytes(
+                        buf[ent + 1..ent + 9]
+                            .try_into()
+                            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "truncated index entry"))?
+                    ) as usize;
+                    offsets.push(off);
+                }
+                let mut out = Vec::with_capacity(offsets.len());
+                for off in offsets {
+                    let mut p = off;
+                    if p + LABEL_LEN_LEN > buf.len() {
+                        continue;
+                    }
+                    let l = u16::from_le_bytes([buf[p], buf[p + 1]]) as usize;
+                    p += LABEL_LEN_LEN;
+                    if p + l > buf.len() {
+                        continue;
+                    }
+                    let label = std::str::from_utf8(&buf[p..p + l])
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                        .to_string();
+                    out.push((label, Handle::Mmap(p + l)));
+                }
+                out.sort_by(|a, b| b.0.cmp(&a.0));
+                Ok(out)
+            }
+            _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid handle")),
         }
-        // Ensure children are sorted descending by label for correct traversal order
-        out.sort_by(|a, b| b.0.cmp(&a.0));
-        Ok(out)
     }
 }
-
-impl NodeStorage for MmapTrie {
-    type Handle = usize;
-    fn root_handle(&self) -> Self::Handle {
-        // skip magic header
-        HEADER_LEN
-    }
-    fn is_terminal(&self, handle: &Self::Handle) -> io::Result<bool> {
-        Ok(self.buf.get(*handle).copied().unwrap_or(0) != 0)
-    }
-    fn read_children(&self, handle: &Self::Handle) -> io::Result<Vec<(String, Self::Handle)>> {
-        let mut pos = *handle;
-        // ensure we can read node header
-        if pos + NODE_HEADER_LEN > self.buf.len() {
-            return Ok(Vec::new());
-        }
-        // parse node header
-        let count = u16::from_le_bytes([self.buf[pos + 1], self.buf[pos + 2]]) as usize;
-        pos += NODE_HEADER_LEN;
-        // skip TLV payload: tag + length + data
-        if pos + 5 <= self.buf.len() {
-            let _tag = self.buf[pos];
-            pos += 1;
-            // read length (4 bytes LE)
-            let len_bytes: [u8; 4] = self.buf[pos..pos + 4]
-                .try_into()
-                .unwrap_or([0,0,0,0]);
-            let val_len = u32::from_le_bytes(len_bytes) as usize;
-            pos += 4;
-            // skip the payload data itself
-            pos = pos.saturating_add(val_len);
-        }
-        let mut offsets = Vec::with_capacity(count);
-        for i in 0..count {
-            let ent = pos + i * INDEX_ENTRY_LEN;
-            if ent + INDEX_ENTRY_LEN > self.buf.len() {
-                break;
-            }
-            let off = u64::from_le_bytes(
-                self.buf[ent + 1..ent + 9]
-                    .try_into()
-                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "truncated index entry"))?
-            ) as usize;
-            offsets.push(off);
-        }
-        let mut out = Vec::with_capacity(offsets.len());
-        for off in offsets {
-            let mut p = off;
-            if p + LABEL_LEN_LEN > self.buf.len() {
-                continue;
-            }
-            let l = u16::from_le_bytes([self.buf[p], self.buf[p + 1]]) as usize;
-            p += LABEL_LEN_LEN;
-            if p + l > self.buf.len() {
-                continue;
-            }
-            let label = std::str::from_utf8(&self.buf[p..p + l])
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-                .to_string();
-            let child_handle = p + l;
-            out.push((label, child_handle));
-        }
-        // Ensure children are sorted descending by label for traversal
-        out.sort_by(|a, b| b.0.cmp(&a.0));
-        Ok(out)
-    }
-}
-
-// Implement the generic TrieBackend trait for the in-memory Trie
+// Implement the generic TrieBackend trait for the unified Trie
 impl TrieBackend for Trie {
-    type Handle = *const TrieNode;
-    fn find_prefix(&self, prefix: &str) -> Option<GenericFindResult<Self::Handle>> {
-        generic_find_prefix(self, prefix).ok().flatten()
-    }
-    fn is_end(&self, handle: &Self::Handle) -> bool {
-        NodeStorage::is_terminal(self, handle).unwrap_or(false)
-    }
-    fn children(&self, handle: &Self::Handle) -> Vec<(String, Self::Handle)> {
-        generic_children(self, handle).unwrap_or_default()
-    }
-}
-
-// Implement the generic TrieBackend trait for the memory-mapped Trie
-impl TrieBackend for MmapTrie {
-    type Handle = usize;
+    type Handle = Handle;
     fn find_prefix(&self, prefix: &str) -> Option<GenericFindResult<Self::Handle>> {
         generic_find_prefix(self, prefix).ok().flatten()
     }
@@ -412,8 +336,22 @@ impl Trie {
 
 
     /// Create a new, empty Trie.
+    /// Create a new, empty in-memory Trie.
+    /// Create a new, empty in-memory Trie.
     pub fn new() -> Self {
-        Trie { root: TrieNode::default() }
+        Trie::InMemory { root: TrieNode::default() }
+    }
+    
+    /// Load a serialized indexed radix trie from disk via mmap.
+    /// Expects the file to begin with the 4-byte MAGIC header "IDX1".
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let file = File::open(path)?;
+        // SAFETY: file is not modified
+        let mmap = unsafe { Mmap::map(&file)? };
+        if mmap.len() < HEADER_LEN || &mmap[..HEADER_LEN] != &MAGIC {
+            return Err(IndexError::InvalidFormat("missing or corrupt magic header"));
+        }
+        Ok(Trie::Mmap { buf: Arc::new(mmap) })
     }
     
     /// Streaming iterator over entries under `prefix`, grouping at the first `delimiter`.
@@ -427,74 +365,117 @@ impl Trie {
 
     /// Insert a string into the radix trie, splitting edges on partial matches.
     pub fn insert(&mut self, key: &str) {
-        let mut node = &mut self.root;
-        let mut suffix = key;
-        loop {
-            let mut matched = false;
-            for i in 0..node.children.len() {
-                let (ref label, _) = node.children[i];
-                let lcp = Trie::common_prefix_len(label, suffix);
-                if lcp == 0 {
-                    continue;
-                }
-                let (orig_label, orig_child) = node.children.remove(i);
-                if lcp < orig_label.len() {
-                    let mut intermediate = TrieNode::default();
-                    let label_rem = &orig_label[lcp..];
-                    intermediate.children.push((label_rem.to_string(), orig_child));
-                    let key_rem = &suffix[lcp..];
-                    if key_rem.is_empty() {
-                        intermediate.is_end = true;
-                    } else {
+        match self {
+            Trie::InMemory { root } => {
+                let mut node = root;
+                let mut suffix = key;
+                loop {
+                    let mut matched = false;
+                    for i in 0..node.children.len() {
+                        let (ref label, _) = node.children[i];
+                        let lcp = Trie::common_prefix_len(label, suffix);
+                        if lcp == 0 {
+                            continue;
+                        }
+                        let (orig_label, orig_child) = node.children.remove(i);
+                        if lcp < orig_label.len() {
+                            let mut intermediate = TrieNode::default();
+                            let label_rem = &orig_label[lcp..];
+                            intermediate.children.push((label_rem.to_string(), orig_child));
+                            let key_rem = &suffix[lcp..];
+                            if key_rem.is_empty() {
+                                intermediate.is_end = true;
+                            } else {
+                                let mut leaf = TrieNode::default();
+                                leaf.is_end = true;
+                                intermediate.children.push((key_rem.to_string(), Box::new(leaf)));
+                            }
+                            let prefix_label = &orig_label[..lcp];
+                            node.children.insert(i, (prefix_label.to_string(), Box::new(intermediate)));
+                            return;
+                        } else {
+                            suffix = &suffix[lcp..];
+                            node.children.insert(i, (orig_label, orig_child));
+                            if suffix.is_empty() {
+                                node.children[i].1.is_end = true;
+                                return;
+                            }
+                            node = &mut node.children[i].1;
+                            matched = true;
+                            break;
+                        }
+                    }
+                    if !matched {
                         let mut leaf = TrieNode::default();
                         leaf.is_end = true;
-                        intermediate.children.push((key_rem.to_string(), Box::new(leaf)));
-                    }
-                    let prefix_label = &orig_label[..lcp];
-                    node.children.insert(i, (prefix_label.to_string(), Box::new(intermediate)));
-                    return;
-                } else {
-                    suffix = &suffix[lcp..];
-                    node.children.insert(i, (orig_label, orig_child));
-                    if suffix.is_empty() {
-                        node.children[i].1.is_end = true;
+                        node.children.push((suffix.to_string(), Box::new(leaf)));
                         return;
                     }
-                    node = &mut node.children[i].1;
-                    matched = true;
-                    break;
                 }
             }
-            if !matched {
-                let mut leaf = TrieNode::default();
-                leaf.is_end = true;
-                node.children.push((suffix.to_string(), Box::new(leaf)));
-                return;
-            }
+            Trie::Mmap { .. } => panic!("cannot insert into a memory-mapped trie"),
         }
     }
     /// Insert a key with an attached CBOR value (raw bytes).
     pub fn insert_with_value(&mut self, key: &str, value: Vec<u8>) {
         // Standard insert (marks is_end and potentially splits edges)
         self.insert(key);
-        // Locate the leaf node and set its payload
-        if let Some(node) = Self::find_node_mut(&mut self.root, key) {
-            node.value = Some(value);
+        // Locate the leaf node and set its payload in in-memory trie
+        match self {
+            Trie::InMemory { root } => {
+                if let Some(node) = Self::find_node_mut(root, key) {
+                    node.value = Some(value);
+                }
+            }
+            Trie::Mmap { .. } => panic!("cannot insert into a memory-mapped trie"),
         }
-    }
-    /// Get a reference to the raw value bytes for `key`, if any.
-    /// Get the raw CBOR-encoded bytes stored under `key`, if any.
-    fn get_value_raw(&self, key: &str) -> Option<&[u8]> {
-        Self::find_node(&self.root, key).and_then(|node| node.value.as_deref())
     }
     /// Get the CBOR-decoded Value stored under `key`, if any.
     pub fn get_value(&self, key: &str) -> Result<Option<Value>> {
-        if let Some(bytes) = self.get_value_raw(key) {
-            let v: Value = serde_cbor::from_slice(bytes)
-                .map_err(|_| IndexError::InvalidFormat("invalid CBOR payload"))?;
-            Ok(Some(v))
-        } else {
-            Ok(None)
+        match self {
+            Trie::InMemory { root } => {
+                if let Some(node) = Self::find_node(root, key) {
+                    if let Some(bytes) = node.value.as_deref() {
+                        let v: Value = serde_cbor::from_slice(bytes)
+                            .map_err(|_| IndexError::InvalidFormat("invalid CBOR payload"))?;
+                        Ok(Some(v))
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+            Trie::Mmap { buf } => {
+                match <Self as TrieBackend>::find_prefix(self, key) {
+                    Some(GenericFindResult::Node(handle)) => {
+                        let mut pos = if let Handle::Mmap(off) = handle { off } else { return Ok(None) };
+                        pos += NODE_HEADER_LEN;
+                        // Read TLV tag and length
+                        if pos + 5 > buf.len() {
+                            return Err(IndexError::InvalidFormat("truncated payload TLV"));
+                        }
+                        let tag = buf[pos]; pos += 1;
+                        let len_bytes: [u8; 4] = buf[pos..pos+4]
+                            .try_into()
+                            .map_err(|_| IndexError::InvalidFormat("truncated payload length"))?;
+                        let val_len = u32::from_le_bytes(len_bytes) as usize;
+                        pos += 4;
+                        if tag == 1 {
+                            if pos + val_len > buf.len() {
+                                return Err(IndexError::InvalidFormat("truncated payload data"));
+                            }
+                            let bytes = &buf[pos..pos+val_len];
+                            let v: Value = serde_cbor::from_slice(bytes)
+                                .map_err(|_| IndexError::InvalidFormat("invalid CBOR payload"))?;
+                            Ok(Some(v))
+                        } else {
+                            Ok(None)
+                        }
+                    }
+                    _ => Ok(None),
+                }
+            }
         }
     }
     /// Immutable lookup of a node by exact key.
@@ -562,18 +543,24 @@ impl Trie {
         prefix_len
     }
 
-    /// Serialize the compressed radix trie in the new indexed on-disk format:
+    /// Write this trie into the binary index format ("IDX1"), using pre-order encoding:
     /// - 4-byte MAGIC header ("IDX1")
-    /// - pre-order nodes with 1-byte is_end, 2-byte LE child_count
-    /// - fixed-size index table (count × [1-byte first_byte, 8-byte offset])
-    /// - child blobs: 2-byte label_len + label + subtree
-    pub fn write_radix<W: Write>(&self, w: &mut W) -> Result<()> {
-        // write magic header + node data into a cursor, then dump to w
-        let mut buf = Cursor::new(Vec::new());
-        buf.write_all(&MAGIC)?;
-        Self::write_node(&self.root, &mut buf)?;
-        w.write_all(&buf.into_inner())?;
-        Ok(())
+    /// - per-node header: is_end (1 byte), child_count (u16 LE)
+    /// - per-node CBOR payload TLV
+    /// - fixed-size index table (child_count × [first_byte (1 byte), child_offset (u64 LE)])
+    /// - child blobs: label_len (u16 LE) + label bytes + subtree
+    pub fn write_index<W: Write>(&self, w: &mut W) -> Result<()> {
+        match self {
+            Trie::InMemory { root } => {
+                // write magic header + node data into a cursor, then dump to w
+                let mut buf = Cursor::new(Vec::new());
+                buf.write_all(&MAGIC)?;
+                Self::write_node(root, &mut buf)?;
+                w.write_all(&buf.into_inner())?;
+                Ok(())
+            }
+            Trie::Mmap { .. } => panic!("cannot write a memory-mapped trie"),
+        }
     }
 
     fn write_node<W: Write + Seek>(node: &TrieNode, w: &mut W) -> io::Result<()> {
@@ -631,90 +618,6 @@ impl Trie {
     }
 
 
-    /// Deserialize the indexed on-disk format: expects a 4-byte MAGIC header,
-    /// then nodes with index tables and child blobs.
-    pub fn read_radix<R: Read>(r: &mut R) -> Result<Self> {
-        // read entire stream into memory buffer
-        let mut buf = Vec::new();
-        r.read_to_end(&mut buf)?;
-        // require and skip magic header
-        if buf.len() < HEADER_LEN || &buf[..HEADER_LEN] != &MAGIC {
-            return Err(IndexError::InvalidFormat("missing or corrupt magic header"));
-        }
-        let mut pos = HEADER_LEN;
-        let root = Self::read_node_from_buf(&buf, &mut pos)?;
-        Ok(Trie { root })
-    }
-
-
-    fn read_node_from_buf(buf: &[u8], pos: &mut usize) -> io::Result<TrieNode> {
-        // header: is_end (1 byte) + child_count (2 bytes LE)
-        if *pos + 3 > buf.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated header"));
-        }
-        let is_end = buf[*pos] != 0;
-        *pos += 1;
-        let count = u16::from_le_bytes([buf[*pos], buf[*pos + 1]]) as usize;
-        *pos += 2;
-        // read payload TLV: tag (1 byte) + length (4 bytes LE) + payload bytes
-        if *pos + 5 > buf.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated payload TLV"));
-        }
-        let tag = buf[*pos];
-        *pos += 1;
-        let len_bytes: [u8; 4] = buf[*pos..*pos + 4]
-            .try_into()
-            .map_err(|_| io::Error::new(io::ErrorKind::UnexpectedEof, "truncated payload length"))?;
-        let val_len = u32::from_le_bytes(len_bytes) as usize;
-        *pos += 4;
-        let value = if tag == 1 {
-            if *pos + val_len > buf.len() {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated payload data"));
-            }
-            let data = buf[*pos..*pos + val_len].to_vec();
-            *pos += val_len;
-            Some(data)
-        } else {
-            None
-        };
-        // read index table entries
-        let mut index = Vec::with_capacity(count);
-        for _ in 0..count {
-            if *pos + 9 > buf.len() {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated index entry"));
-            }
-            let first_byte = buf[*pos];
-            let child_offset = u64::from_le_bytes(
-                buf[*pos + 1..*pos + 9]
-                    .try_into()
-                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "truncated index entry"))?
-            ) as usize;
-            *pos += 9;
-            index.push((first_byte, child_offset));
-        }
-        // deserialize each child from its blob
-        let mut children = Vec::with_capacity(count);
-        for &(_fb, child_pos) in &index {
-            let mut cpos = child_pos;
-            // label_len + label bytes
-            if cpos + 2 > buf.len() {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated label len"));
-            }
-            let label_len = u16::from_le_bytes([buf[cpos], buf[cpos + 1]]) as usize;
-            cpos += 2;
-            if cpos + label_len > buf.len() {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated label"));
-            }
-            let label = std::str::from_utf8(&buf[cpos..cpos + label_len])
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-                .to_string();
-            cpos += label_len;
-            // recurse into child node
-            let child_node = Self::read_node_from_buf(buf, &mut cpos)?;
-            children.push((label, Box::new(child_node)));
-        }
-        Ok(TrieNode { value, children, is_end })
-    }
 } // end impl Trie
 
 /// A listing entry returned by `Trie::list`: either a full key or a grouped prefix.

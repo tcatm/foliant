@@ -1,4 +1,4 @@
-use foliant::{Trie, MmapTrie, Entry};
+use foliant::{Trie, Entry};
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -21,14 +21,14 @@ fn serialize_and_mmap_list() {
 
     // Serialize into an in-memory buffer
     let mut buf = Vec::new();
-    trie.write_radix(&mut buf).unwrap();
+    trie.write_index(&mut buf).unwrap();
 
     // Write to a NamedTempFile
     let mut tmp = NamedTempFile::new().expect("temp file");
     tmp.as_file_mut().write_all(&buf).unwrap();
 
     // Load via memory-mapped trie
-    let mtrie = MmapTrie::load(tmp.path()).unwrap();
+    let mtrie = Trie::load(tmp.path()).unwrap();
 
     // Compare listings without delimiter
     let mut list_mem = trie.list("", None);
@@ -57,14 +57,14 @@ fn serialize_and_mmap_list_prefix_a() {
 
     // Serialize into an in-memory buffer
     let mut buf = Vec::new();
-    trie.write_radix(&mut buf).unwrap();
+    trie.write_index(&mut buf).unwrap();
 
     // Write to a NamedTempFile
     let mut tmp = NamedTempFile::new().expect("temp file");
     tmp.as_file_mut().write_all(&buf).unwrap();
 
     // Load via memory-mapped trie
-    let mtrie = MmapTrie::load(tmp.path()).unwrap();
+    let mtrie = Trie::load(tmp.path()).unwrap();
 
     // List entries with prefix "a"
     let mut list_mem = trie.list("a", None);

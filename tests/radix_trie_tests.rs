@@ -1,4 +1,6 @@
 use foliant::{Trie, Entry};
+use tempfile::NamedTempFile;
+use std::io::Write;
 mod common;
 use common::collect_sorted;
 
@@ -28,11 +30,12 @@ fn serialize_deserialize_roundtrip() {
     for &k in &keys {
         trie.insert(k);
     }
-    // Serialize to buffer
+    // Serialize to buffer, write to temp file, and reload via mmap
     let mut buf = Vec::new();
-    trie.write_radix(&mut buf).unwrap();
-    // Deserialize back
-    let trie2 = Trie::read_radix(&mut &buf[..]).unwrap();
+    trie.write_index(&mut buf).unwrap();
+    let mut tmp = NamedTempFile::new().expect("temp file");
+    tmp.write_all(&buf).expect("write temp");
+    let trie2 = Trie::load(tmp.path()).unwrap();
     // Compare listings
     let orig = collect_sorted(trie.list_iter("", None));
     let de = collect_sorted(trie2.list("", None));

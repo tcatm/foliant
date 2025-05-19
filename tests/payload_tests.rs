@@ -1,6 +1,7 @@
-use foliant::{Trie, MmapTrie, Value};
+use foliant::{Trie, Value};
 use serde_cbor;
 use tempfile::NamedTempFile;
+use std::io::Write;
 
 /// Test inserting and retrieving typed CBOR values in-memory, and round-trip via serialization.
 #[test]
@@ -18,9 +19,12 @@ fn in_memory_value_roundtrip() {
     assert_eq!(trie.get_value("gamma").unwrap(), None);
     assert_eq!(trie.get_value("delta").unwrap(), None);
     // Serialize to buffer and read back
+    // Serialize to buffer, write to a temp file, and load via mmap
     let mut buf = Vec::new();
-    trie.write_radix(&mut buf).unwrap();
-    let trie2 = Trie::read_radix(&mut &buf[..]).unwrap();
+    trie.write_index(&mut buf).unwrap();
+    let mut tmp2 = NamedTempFile::new().expect("temp file");
+    tmp2.write_all(&buf).expect("write temp");
+    let trie2 = Trie::load(tmp2.path()).unwrap();
     assert_eq!(trie2.get_value("alpha").unwrap(), Some(Value::Integer(42)));
     assert_eq!(trie2.get_value("beta").unwrap(), Some(Value::Text("hello".to_string())));
     assert_eq!(trie2.get_value("gamma").unwrap(), None);
@@ -37,9 +41,9 @@ fn mmap_value_access() {
     trie.insert_with_value("y", v_arr);
     // Write to temporary file
     let mut tmp = NamedTempFile::new().expect("temp file");
-    trie.write_radix(&mut tmp).unwrap();
+    trie.write_index(&mut tmp).unwrap();
     // Load via mmap
-    let mtrie = MmapTrie::load(tmp.path()).unwrap();
+    let mtrie = Trie::load(tmp.path()).unwrap();
     // Access decoded values
     assert_eq!(mtrie.get_value("x").unwrap(), Some(Value::Bool(true)));
     assert_eq!(mtrie.get_value("y").unwrap(), Some(Value::Array(vec![

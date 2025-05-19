@@ -90,7 +90,7 @@ Sample lines in `sample.jsonl`:
 
 ### Key Types
 - `TrieNode<V>`: in-memory node with `children: Vec<(String, Box<TrieNode<V>>)>`, `is_end`, and optional `value: Vec<u8>`
-- `Trie<V>`: owns root node, supports `insert`, `insert_with_value`, `list`, `write_radix`, `read_radix`
+- `Trie<V>`: owns root node, supports `insert`, `insert_with_value`, `list`, `write_index`, `read_radix`
 - `MmapTrie<V>`: wraps an `Mmap` buffer, supports `load`, `list`, and `get_value`
 - Generic `TrieBackend` + `GenericTrieIter` for unified traversal
 

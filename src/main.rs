@@ -4,7 +4,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::time::{Instant, Duration};
 // On-disk index support moved to library
-use foliant::{Trie, Entry, MmapTrie};
+use foliant::{Trie, Entry};
 use serde_cbor;
 use serde_json;
 
@@ -109,7 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Serialize compressed radix trie to binary
             let write_start = Instant::now();
             let mut writer = io::BufWriter::new(File::create(&index)?);
-            trie.write_radix(&mut writer)?;
+            trie.write_index(&mut writer)?;
             writer.flush()?;
             let write_duration = write_start.elapsed();
             // Metrics
@@ -134,12 +134,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::List { index, prefix, delimiter } => {
             // Memory-map and lazily open the index
             let load_start = Instant::now();
-            let mmap_trie = MmapTrie::load(&index)?;
+            let trie = Trie::load(&index)?;
             let load_duration = load_start.elapsed();
             eprint!("Loaded index in {:.3} ms\n", load_duration.as_secs_f64() * 1000.0);
             // Stream and print entries with realtime progress
             let iter_start = Instant::now();
-            let mut iter = mmap_trie.list_iter(&prefix, delimiter);
+            let mut iter = trie.list_iter(&prefix, delimiter);
             let iter_duration = iter_start.elapsed();
             eprintln!("Iterator creation time: {:.3} ms", iter_duration.as_secs_f64() * 1000.0);
             let mut printed = 0usize;
@@ -148,7 +148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match entry {
                     Entry::Key(s) => {
                         // print key, followed by optional CBOR-decoded JSON Value in dim color
-                        if let Some(val) = mmap_trie.get_value(&s)? {
+                        if let Some(val) = trie.get_value(&s)? {
                             let val_str = serde_json::to_string(&val)?;
                             println!("📄 {} \x1b[2m{}\x1b[0m", s, val_str);
                         } else {

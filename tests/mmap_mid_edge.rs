@@ -1,4 +1,4 @@
-use foliant::{Trie, MmapTrie, Entry};
+use foliant::{Trie, Entry};
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -13,14 +13,14 @@ fn mid_edge_prefix_mmap() {
 
     // Serialize to a buffer
     let mut buf = Vec::new();
-    trie.write_radix(&mut buf).unwrap();
+    trie.write_index(&mut buf).unwrap();
 
     // Write to a NamedTempFile for mmap loading
     let mut tmp = NamedTempFile::new().expect("temp file");
     tmp.as_file_mut().write_all(&buf).unwrap();
 
     // Load via mmap-based trie
-    let mtrie = MmapTrie::load(tmp.path()).expect("mmap load failed");
+    let mtrie = Trie::load(tmp.path()).expect("mmap load failed");
 
     // Expected results for prefix "abc"
     let expected = vec![
