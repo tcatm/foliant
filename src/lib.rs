@@ -5,6 +5,8 @@ use std::path::Path;
 use std::sync::Arc;
 use memmap2::Mmap;
 use std::fmt;
+use serde_cbor;
+pub use serde_cbor::Value as Value;
 
 /// Error type for the index library.
 #[derive(Debug)]
@@ -55,10 +57,12 @@ const LABEL_LEN_LEN: usize = 2;                   // u16 label length
 /// A node in the trie.
 #[derive(Default, Debug, Clone)]
 struct TrieNode {
-    // Each edge is labeled by a (possibly multi-character) string
+    /// Optional CBOR value (raw bytes) stored at this node if it is a key.
+    value: Option<Vec<u8>>,
+    /// Each edge is labeled by a (possibly multi-character) string
     children: Vec<(String, Box<TrieNode>)>,
     is_end: bool,
-} // end fn find_node_extra_buf
+}
 
 // --- Generic trie backend abstraction to unify both in-memory and mmap implementations ---
 /// Result of finding a prefix in a trie backend.
@@ -228,6 +232,45 @@ impl MmapTrie {
     pub fn list(&self, prefix: &str, delimiter: Option<char>) -> Vec<Entry> {
         <Self as TrieBackend>::list(self, prefix, delimiter)
     }
+    /// Get the raw CBOR value bytes for an exact `key`, if present.
+    /// Get the raw CBOR-encoded bytes stored under `key`, if any.
+    fn get_value_raw(&self, key: &str) -> Result<Option<&[u8]>> {
+        // Find the node handle for this key
+        match <Self as TrieBackend>::find_prefix(self, key) {
+            Some(GenericFindResult::Node(handle)) => {
+                let mut pos = handle + NODE_HEADER_LEN;
+                // Read TLV tag and length
+                if pos + 5 > self.buf.len() {
+                    return Err(IndexError::InvalidFormat("truncated payload TLV"));
+                }
+                let tag = self.buf[pos]; pos += 1;
+                let len_bytes: [u8; 4] = self.buf[pos..pos+4]
+                    .try_into()
+                    .map_err(|_| IndexError::InvalidFormat("truncated payload length"))?;
+                let val_len = u32::from_le_bytes(len_bytes) as usize;
+                pos += 4;
+                if tag == 1 {
+                    if pos + val_len > self.buf.len() {
+                        return Err(IndexError::InvalidFormat("truncated payload data"));
+                    }
+                    Ok(Some(&self.buf[pos..pos+val_len]))
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+    /// Get the CBOR-decoded Value stored under `key`, if any.
+    pub fn get_value(&self, key: &str) -> Result<Option<Value>> {
+        if let Some(bytes) = self.get_value_raw(key)? {
+            let v: Value = serde_cbor::from_slice(bytes)
+                .map_err(|_| IndexError::InvalidFormat("invalid CBOR payload"))?;
+            Ok(Some(v))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 // NodeStorage implementations for Trie and MmapTrie
@@ -267,11 +310,26 @@ impl NodeStorage for MmapTrie {
     }
     fn read_children(&self, handle: &Self::Handle) -> io::Result<Vec<(String, Self::Handle)>> {
         let mut pos = *handle;
+        // ensure we can read node header
         if pos + NODE_HEADER_LEN > self.buf.len() {
             return Ok(Vec::new());
         }
+        // parse node header
         let count = u16::from_le_bytes([self.buf[pos + 1], self.buf[pos + 2]]) as usize;
         pos += NODE_HEADER_LEN;
+        // skip TLV payload: tag + length + data
+        if pos + 5 <= self.buf.len() {
+            let _tag = self.buf[pos];
+            pos += 1;
+            // read length (4 bytes LE)
+            let len_bytes: [u8; 4] = self.buf[pos..pos + 4]
+                .try_into()
+                .unwrap_or([0,0,0,0]);
+            let val_len = u32::from_le_bytes(len_bytes) as usize;
+            pos += 4;
+            // skip the payload data itself
+            pos = pos.saturating_add(val_len);
+        }
         let mut offsets = Vec::with_capacity(count);
         for i in 0..count {
             let ent = pos + i * INDEX_ENTRY_LEN;
@@ -415,6 +473,77 @@ impl Trie {
             }
         }
     }
+    /// Insert a key with an attached CBOR value (raw bytes).
+    pub fn insert_with_value(&mut self, key: &str, value: Vec<u8>) {
+        // Standard insert (marks is_end and potentially splits edges)
+        self.insert(key);
+        // Locate the leaf node and set its payload
+        if let Some(node) = Self::find_node_mut(&mut self.root, key) {
+            node.value = Some(value);
+        }
+    }
+    /// Get a reference to the raw value bytes for `key`, if any.
+    /// Get the raw CBOR-encoded bytes stored under `key`, if any.
+    fn get_value_raw(&self, key: &str) -> Option<&[u8]> {
+        Self::find_node(&self.root, key).and_then(|node| node.value.as_deref())
+    }
+    /// Get the CBOR-decoded Value stored under `key`, if any.
+    pub fn get_value(&self, key: &str) -> Result<Option<Value>> {
+        if let Some(bytes) = self.get_value_raw(key) {
+            let v: Value = serde_cbor::from_slice(bytes)
+                .map_err(|_| IndexError::InvalidFormat("invalid CBOR payload"))?;
+            Ok(Some(v))
+        } else {
+            Ok(None)
+        }
+    }
+    /// Immutable lookup of a node by exact key.
+    fn find_node<'a>(mut node: &'a TrieNode, mut rem: &str) -> Option<&'a TrieNode> {
+        if rem.is_empty() {
+            return Some(node);
+        }
+        while !rem.is_empty() {
+            let mut matched = false;
+            for (label, child) in &node.children {
+                if rem.starts_with(label.as_str()) {
+                    rem = &rem[label.len()..];
+                    node = child.as_ref();
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                return None;
+            }
+        }
+        Some(node)
+    }
+    /// Mutable lookup of a node by exact key.
+    fn find_node_mut<'a>(mut node: &'a mut TrieNode, mut rem: &str) -> Option<&'a mut TrieNode> {
+        if rem.is_empty() {
+            return Some(node);
+        }
+        loop {
+            let mut matched = false;
+            // Iterate by index to avoid borrowing entire children vector
+            for i in 0..node.children.len() {
+                let label = &node.children[i].0;
+                if rem.starts_with(label.as_str()) {
+                    rem = &rem[label.len()..];
+                    let child = &mut node.children[i].1;
+                    node = child.as_mut();
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                return None;
+            }
+            if rem.is_empty() {
+                return Some(node);
+            }
+        }
+    }
 
 
     /// Compute the byte-length of the common prefix of `a` and `b`.
@@ -452,6 +581,18 @@ impl Trie {
         w.write_all(&[node.is_end as u8])?;
         let count = node.children.len() as usize;
         w.write_all(&(count as u16).to_le_bytes())?;
+        // payload TLV: tag (1 byte), length (4 bytes LE), [CBOR payload]
+        if let Some(ref data) = node.value {
+            // tag = 1 indicates CBOR payload
+            w.write_all(&[1u8])?;
+            let len = data.len() as u32;
+            w.write_all(&len.to_le_bytes())?;
+            w.write_all(data)?;
+        } else {
+            // tag = 0 indicates no value
+            w.write_all(&[0u8])?;
+            w.write_all(&0u32.to_le_bytes())?;
+        }
         // reserve space for index table (count × (1 byte + 8 bytes))
         let index_pos = w.stream_position()?;
         for _ in 0..count {
@@ -515,6 +656,27 @@ impl Trie {
         *pos += 1;
         let count = u16::from_le_bytes([buf[*pos], buf[*pos + 1]]) as usize;
         *pos += 2;
+        // read payload TLV: tag (1 byte) + length (4 bytes LE) + payload bytes
+        if *pos + 5 > buf.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated payload TLV"));
+        }
+        let tag = buf[*pos];
+        *pos += 1;
+        let len_bytes: [u8; 4] = buf[*pos..*pos + 4]
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::UnexpectedEof, "truncated payload length"))?;
+        let val_len = u32::from_le_bytes(len_bytes) as usize;
+        *pos += 4;
+        let value = if tag == 1 {
+            if *pos + val_len > buf.len() {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated payload data"));
+            }
+            let data = buf[*pos..*pos + val_len].to_vec();
+            *pos += val_len;
+            Some(data)
+        } else {
+            None
+        };
         // read index table entries
         let mut index = Vec::with_capacity(count);
         for _ in 0..count {
@@ -551,7 +713,7 @@ impl Trie {
             let child_node = Self::read_node_from_buf(buf, &mut cpos)?;
             children.push((label, Box::new(child_node)));
         }
-        Ok(TrieNode { children, is_end })
+        Ok(TrieNode { value, children, is_end })
     }
 } // end impl Trie
 

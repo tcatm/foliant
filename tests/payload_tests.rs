@@ -1,0 +1,49 @@
+use index::{Trie, MmapTrie, Value};
+use serde_cbor;
+use tempfile::NamedTempFile;
+
+/// Test inserting and retrieving typed CBOR values in-memory, and round-trip via serialization.
+#[test]
+fn in_memory_value_roundtrip() {
+    let mut trie = Trie::new();
+    // Insert an integer and a string as CBOR values
+    let v_int = serde_cbor::to_vec(&42u8).unwrap();
+    let v_str = serde_cbor::to_vec(&"hello".to_string()).unwrap();
+    trie.insert_with_value("alpha", v_int);
+    trie.insert_with_value("beta", v_str);
+    trie.insert("gamma");
+    // Retrieve decoded values
+    assert_eq!(trie.get_value("alpha").unwrap(), Some(Value::Integer(42)));
+    assert_eq!(trie.get_value("beta").unwrap(), Some(Value::Text("hello".to_string())));
+    assert_eq!(trie.get_value("gamma").unwrap(), None);
+    assert_eq!(trie.get_value("delta").unwrap(), None);
+    // Serialize to buffer and read back
+    let mut buf = Vec::new();
+    trie.write_radix(&mut buf).unwrap();
+    let trie2 = Trie::read_radix(&mut &buf[..]).unwrap();
+    assert_eq!(trie2.get_value("alpha").unwrap(), Some(Value::Integer(42)));
+    assert_eq!(trie2.get_value("beta").unwrap(), Some(Value::Text("hello".to_string())));
+    assert_eq!(trie2.get_value("gamma").unwrap(), None);
+}
+
+/// Test retrieving CBOR values via memory-mapped trie.
+#[test]
+fn mmap_value_access() {
+    let mut trie = Trie::new();
+    // Boolean and array types
+    let v_bool = serde_cbor::to_vec(&true).unwrap();
+    let v_arr = serde_cbor::to_vec(&vec![1u8,2,3]).unwrap();
+    trie.insert_with_value("x", v_bool);
+    trie.insert_with_value("y", v_arr);
+    // Write to temporary file
+    let mut tmp = NamedTempFile::new().expect("temp file");
+    trie.write_radix(&mut tmp).unwrap();
+    // Load via mmap
+    let mtrie = MmapTrie::load(tmp.path()).unwrap();
+    // Access decoded values
+    assert_eq!(mtrie.get_value("x").unwrap(), Some(Value::Bool(true)));
+    assert_eq!(mtrie.get_value("y").unwrap(), Some(Value::Array(vec![
+        Value::Integer(1), Value::Integer(2), Value::Integer(3)
+    ])));
+    assert_eq!(mtrie.get_value("z").unwrap(), None);
+}

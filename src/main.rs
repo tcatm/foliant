@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::time::{Instant, Duration};
 // On-disk index support moved to library
 use index::{Trie, Entry, MmapTrie};
+use serde_cbor;
+use serde_json;
 
 /// A simple CLI for building and querying a Trie index.
 #[derive(Parser)]
@@ -24,6 +26,9 @@ enum Commands {
         /// Input file (defaults to stdin)
         #[arg(long, value_name = "INPUT")]
         input: Option<PathBuf>,
+        /// Interpret each line as JSON and extract this field as the key
+        #[arg(short, long, value_name = "KEYNAME")]
+        json: Option<String>,
     },
     /// List entries in an existing index
     List {
@@ -43,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Index { index, input } => {
+        Commands::Index { index, input, json } => {
             // Build the trie, measuring throughput
             let mut trie = Trie::new();
             let reader: Box<dyn BufRead> = if let Some(input_path) = input {
@@ -63,7 +68,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 bytes_in += line.len();
                 entries += 1;
-                trie.insert(&line);
+                if let Some(ref keyname) = json {
+                    // Parse JSON object and extract key/value
+                    let mut jv: serde_json::Value = serde_json::from_str(&line)?;
+                    let obj = jv.as_object_mut()
+                        .ok_or_else(|| format!("expected JSON object per line"))?;
+                    let key_val = obj.remove(keyname)
+                        .ok_or_else(|| format!("missing key field '{}'", keyname))?;
+                    let key_str = key_val.as_str()
+                        .ok_or_else(|| format!("key field '{}' is not a string", keyname))?;
+                    // Serialize remaining object to CBOR bytes
+                    let cbor = serde_cbor::to_vec(&jv)?;
+                    trie.insert_with_value(key_str, cbor);
+                } else {
+                    trie.insert(&line);
+                }
                 // periodic progress report
                 let now = Instant::now();
                 if now.duration_since(last_report) >= report_interval {
@@ -127,7 +146,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let list_start = Instant::now();
             for entry in &mut iter {
                 match entry {
-                    Entry::Key(s) => println!("📄 {}", s),
+                    Entry::Key(s) => {
+                        // print key, followed by optional CBOR-decoded JSON Value in dim color
+                        if let Some(val) = mmap_trie.get_value(&s)? {
+                            let val_str = serde_json::to_string(&val)?;
+                            println!("📄 {} \x1b[2m{}\x1b[0m", s, val_str);
+                        } else {
+                            println!("📄 {}", s);
+                        }
+                    }
                     Entry::CommonPrefix(s) => println!("📁 {}", s),
                 }
                 printed += 1;
