@@ -1,4 +1,4 @@
-use index::Entry;
+use foliant::Entry;
 
 /// Collect all entries from the iterator, sort them, and return a Vec<Entry>.
 pub fn collect_sorted<I>(iter: I) -> Vec<Entry>

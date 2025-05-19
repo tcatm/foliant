@@ -1,4 +1,4 @@
-use index::{Trie, Entry};
+use foliant::{Trie, Entry};
 mod common;
 use common::collect_sorted;
 

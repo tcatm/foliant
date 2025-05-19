@@ -1,4 +1,4 @@
-use index::{Trie, MmapTrie, Value};
+use foliant::{Trie, MmapTrie, Value};
 use serde_cbor;
 use tempfile::NamedTempFile;
 

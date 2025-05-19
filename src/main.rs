@@ -4,7 +4,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::time::{Instant, Duration};
 // On-disk index support moved to library
-use index::{Trie, Entry, MmapTrie};
+use foliant::{Trie, Entry, MmapTrie};
 use serde_cbor;
 use serde_json;
 

@@ -1,4 +1,4 @@
-use index::{Trie, MmapTrie, Entry};
+use foliant::{Trie, MmapTrie, Entry};
 use std::io::Write;
 use tempfile::NamedTempFile;
 
