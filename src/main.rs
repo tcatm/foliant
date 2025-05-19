@@ -134,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::List { index, prefix, delimiter } => {
             // Memory-map and lazily open the index
             let load_start = Instant::now();
-            let trie = Index::load(&index)?;
+            let trie = Index::open(&index)?;
             let load_duration = load_start.elapsed();
             eprint!("Loaded index in {:.3} ms\n", load_duration.as_secs_f64() * 1000.0);
             // Stream and print entries with realtime progress

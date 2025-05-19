@@ -24,7 +24,7 @@ fn in_memory_value_roundtrip() {
     trie.write_index(&mut buf).unwrap();
     let mut tmp2 = NamedTempFile::new().expect("temp file");
     tmp2.write_all(&buf).expect("write temp");
-    let trie2 = Index::load(tmp2.path()).unwrap();
+    let trie2 = Index::open(tmp2.path()).unwrap();
     assert_eq!(trie2.get_value("alpha").unwrap(), Some(Value::Integer(42)));
     assert_eq!(trie2.get_value("beta").unwrap(), Some(Value::Text("hello".to_string())));
     assert_eq!(trie2.get_value("gamma").unwrap(), None);
@@ -43,7 +43,7 @@ fn mmap_value_access() {
     let mut tmp = NamedTempFile::new().expect("temp file");
     trie.write_index(&mut tmp).unwrap();
     // Load via mmap
-    let mtrie = Index::load(tmp.path()).unwrap();
+    let mtrie = Index::open(tmp.path()).unwrap();
     // Access decoded values
     assert_eq!(mtrie.get_value("x").unwrap(), Some(Value::Bool(true)));
     assert_eq!(mtrie.get_value("y").unwrap(), Some(Value::Array(vec![

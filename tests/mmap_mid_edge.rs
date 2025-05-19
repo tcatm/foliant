@@ -20,7 +20,7 @@ fn mid_edge_prefix_mmap() {
     tmp.as_file_mut().write_all(&buf).unwrap();
 
     // Load via mmap-based trie
-    let mtrie = Index::load(tmp.path()).expect("mmap load failed");
+    let mtrie = Index::open(tmp.path()).expect("mmap load failed");
 
     // Expected results for prefix "abc"
     let expected = vec![

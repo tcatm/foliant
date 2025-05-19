@@ -28,7 +28,7 @@ fn serialize_and_mmap_list() {
     tmp.as_file_mut().write_all(&buf).unwrap();
 
     // Load via memory-mapped trie
-    let mtrie = Index::load(tmp.path()).unwrap();
+    let mtrie = Index::open(tmp.path()).unwrap();
 
     // Compare listings without delimiter
     let mut list_mem = trie.list("", None);
@@ -64,7 +64,7 @@ fn serialize_and_mmap_list_prefix_a() {
     tmp.as_file_mut().write_all(&buf).unwrap();
 
     // Load via memory-mapped trie
-    let mtrie = Index::load(tmp.path()).unwrap();
+    let mtrie = Index::open(tmp.path()).unwrap();
 
     // List entries with prefix "a"
     let mut list_mem = trie.list("a", None);

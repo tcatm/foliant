@@ -197,26 +197,16 @@ impl<B: TrieBackend> Iterator for GenericTrieIter<B> {
         None
     }
 }
-impl<B: TrieBackend> PartialEq<Vec<Entry>> for GenericTrieIter<B> {
-    fn eq(&self, other: &Vec<Entry>) -> bool {
-        let got = self.clone().collect::<Vec<_>>();
-        let want = other.clone();
-        got == want
-    }
-}
-
-/// Index structure for strings, backed by a radix trie.
+    /// Index structure for strings, backed by a radix trie.
 ///
 /// Supports both in-memory construction and on-disk memory-mapped queries.
 #[derive(Clone)]
 pub enum Index {
     /// In-memory index built via `new()`, `insert()`, etc.
     InMemory { root: TrieNode },
-    /// Read-only memory-mapped index loaded via `load()`, zero-copy listing.
+    /// Read-only memory-mapped index loaded via `open()`, zero-copy listing.
     Mmap { buf: Arc<Mmap> },
 }
-
-
 
 // Unified NodeStorage implementation for both in-memory and memory-mapped Index
 impl NodeStorage for Index {
@@ -325,9 +315,9 @@ impl Index {
         Index::InMemory { root: TrieNode::default() }
     }
     
-    /// Load a serialized indexed radix trie from disk via mmap.
+    /// Open a serialized indexed radix trie from disk via mmap.
     /// Expects the file to begin with the 4-byte MAGIC header "IDX1".
-    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(path)?;
         // SAFETY: file is not modified
         let mmap = unsafe { Mmap::map(&file)? };
@@ -640,17 +630,5 @@ impl Entry {
             Entry::Key(_) => "Key",
             Entry::CommonPrefix(_) => "CommonPrefix",
         }
-    }
-}
-
-impl std::cmp::PartialOrd for Entry {
-    fn partial_cmp(&self, other: &Entry) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl std::cmp::Ord for Entry {
-    fn cmp(&self, other: &Entry) -> std::cmp::Ordering {
-        self.as_str().cmp(other.as_str())
     }
 }

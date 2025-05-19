@@ -35,7 +35,7 @@ fn serialize_deserialize_roundtrip() {
     trie.write_index(&mut buf).unwrap();
     let mut tmp = NamedTempFile::new().expect("temp file");
     tmp.write_all(&buf).expect("write temp");
-    let trie2 = Index::load(tmp.path()).unwrap();
+    let trie2 = Index::open(tmp.path()).unwrap();
     // Compare listings
     let orig = collect_sorted(trie.list_iter("", None));
     let de = collect_sorted(trie2.list("", None));
