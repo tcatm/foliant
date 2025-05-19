@@ -4,6 +4,45 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 use memmap2::Mmap;
+use std::fmt;
+
+/// Error type for the index library.
+#[derive(Debug)]
+pub enum IndexError {
+    /// I/O error
+    Io(io::Error),
+    /// Data is not in the expected indexed format
+    InvalidFormat(&'static str),
+}
+
+impl fmt::Display for IndexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IndexError::Io(e) => write!(f, "I/O error: {}", e),
+            IndexError::InvalidFormat(msg) => write!(f, "Invalid index format: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for IndexError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            IndexError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for IndexError {
+    fn from(err: io::Error) -> IndexError {
+        IndexError::Io(err)
+    }
+}
+
+/// Result type for index operations.
+pub type Result<T> = std::result::Result<T, IndexError>;
+mod storage;
+use storage::{NodeStorage, generic_find_prefix, generic_children};
 
 // Magic header for the new indexed format: 4 bytes, 'I','D','X','1'
 const MAGIC: [u8; 4] = *b"IDX1";
@@ -128,9 +167,8 @@ impl<B: TrieBackend> Iterator for GenericTrieIter<B> {
                 }
             }
             let is_term = self.backend.is_end(&h);
-            let mut children = self.backend.children(&h);
-            children.sort_by(|a, b| b.0.cmp(&a.0));
-            for (lbl, child) in children {
+            // Children are pre-sorted by NodeStorage implementations
+            for (lbl, child) in self.backend.children(&h) {
                 let mut np = path.clone();
                 np.push_str(&lbl);
                 self.stack.push((child, np));
@@ -170,13 +208,13 @@ pub struct MmapTrie {
 impl MmapTrie {
     /// Load a serialized indexed radix trie from disk via mmap.
     /// Expects the file to begin with the 4-byte MAGIC header "IDX1".
-    pub fn load<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(path)?;
         // SAFETY: we do not modify the file
         let mmap = unsafe { Mmap::map(&file)? };
         // verify magic header
         if mmap.len() < HEADER_LEN || &mmap[..HEADER_LEN] != &MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid index format"));
+            return Err(IndexError::InvalidFormat("missing or corrupt magic header"));
         }
         let buf = Arc::new(mmap);
         Ok(MmapTrie { buf })
@@ -192,37 +230,95 @@ impl MmapTrie {
     }
 }
 
+// NodeStorage implementations for Trie and MmapTrie
+impl NodeStorage for Trie {
+    /// Handle is a raw pointer to a TrieNode; heap-allocated Boxes ensure stability
+    type Handle = *const TrieNode;
+    fn root_handle(&self) -> Self::Handle {
+        &self.root as *const TrieNode
+    }
+    fn is_terminal(&self, handle: &Self::Handle) -> io::Result<bool> {
+        // SAFETY: handle is a valid pointer from root_handle or read_children
+        let node = unsafe { &**handle };
+        Ok(node.is_end)
+    }
+    fn read_children(&self, handle: &Self::Handle) -> io::Result<Vec<(String, Self::Handle)>> {
+        // SAFETY: handle is a valid pointer to TrieNode
+        let node = unsafe { &**handle };
+        let mut out = Vec::with_capacity(node.children.len());
+        for (label, child) in &node.children {
+            let child_ptr: *const TrieNode = child.as_ref();
+            out.push((label.clone(), child_ptr));
+        }
+        // Ensure children are sorted descending by label for correct traversal order
+        out.sort_by(|a, b| b.0.cmp(&a.0));
+        Ok(out)
+    }
+}
+
+impl NodeStorage for MmapTrie {
+    type Handle = usize;
+    fn root_handle(&self) -> Self::Handle {
+        // skip magic header
+        HEADER_LEN
+    }
+    fn is_terminal(&self, handle: &Self::Handle) -> io::Result<bool> {
+        Ok(self.buf.get(*handle).copied().unwrap_or(0) != 0)
+    }
+    fn read_children(&self, handle: &Self::Handle) -> io::Result<Vec<(String, Self::Handle)>> {
+        let mut pos = *handle;
+        if pos + NODE_HEADER_LEN > self.buf.len() {
+            return Ok(Vec::new());
+        }
+        let count = u16::from_le_bytes([self.buf[pos + 1], self.buf[pos + 2]]) as usize;
+        pos += NODE_HEADER_LEN;
+        let mut offsets = Vec::with_capacity(count);
+        for i in 0..count {
+            let ent = pos + i * INDEX_ENTRY_LEN;
+            if ent + INDEX_ENTRY_LEN > self.buf.len() {
+                break;
+            }
+            let off = u64::from_le_bytes(
+                self.buf[ent + 1..ent + 9]
+                    .try_into()
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "truncated index entry"))?
+            ) as usize;
+            offsets.push(off);
+        }
+        let mut out = Vec::with_capacity(offsets.len());
+        for off in offsets {
+            let mut p = off;
+            if p + LABEL_LEN_LEN > self.buf.len() {
+                continue;
+            }
+            let l = u16::from_le_bytes([self.buf[p], self.buf[p + 1]]) as usize;
+            p += LABEL_LEN_LEN;
+            if p + l > self.buf.len() {
+                continue;
+            }
+            let label = std::str::from_utf8(&self.buf[p..p + l])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                .to_string();
+            let child_handle = p + l;
+            out.push((label, child_handle));
+        }
+        // Ensure children are sorted descending by label for traversal
+        out.sort_by(|a, b| b.0.cmp(&a.0));
+        Ok(out)
+    }
+}
+
 // Implement the generic TrieBackend trait for the in-memory Trie
 impl TrieBackend for Trie {
-    type Handle = usize;
+    type Handle = *const TrieNode;
     fn find_prefix(&self, prefix: &str) -> Option<GenericFindResult<Self::Handle>> {
-        match self.find_node_extra(prefix) {
-            Some(FindResult::Node(node)) => {
-                let handle = node as *const TrieNode as usize;
-                Some(GenericFindResult::Node(handle))
-            }
-            Some(FindResult::EdgeMid(child, tail)) => {
-                let handle = child as *const TrieNode as usize;
-                Some(GenericFindResult::EdgeMid(handle, tail.to_string()))
-            }
-            None => None,
-        }
+        generic_find_prefix(self, prefix).ok().flatten()
     }
     fn is_end(&self, handle: &Self::Handle) -> bool {
-        let addr = *handle;
-        let ptr = addr as *const TrieNode;
-        unsafe { (*ptr).is_end }
+        NodeStorage::is_terminal(self, handle).unwrap_or(false)
     }
     fn children(&self, handle: &Self::Handle) -> Vec<(String, Self::Handle)> {
-        let addr = *handle;
-        let ptr = addr as *const TrieNode;
-        let node = unsafe { &*ptr };
-        node.children.iter()
-            .map(|(l, c)| {
-                let child_handle = c.as_ref() as *const TrieNode as usize;
-                (l.clone(), child_handle)
-            })
-            .collect()
+        generic_children(self, handle).unwrap_or_default()
     }
 }
 
@@ -230,142 +326,18 @@ impl TrieBackend for Trie {
 impl TrieBackend for MmapTrie {
     type Handle = usize;
     fn find_prefix(&self, prefix: &str) -> Option<GenericFindResult<Self::Handle>> {
-        match find_node_extra_buf(&self.buf, prefix) {
-            Some(FindResultBuf::Node(pos)) => Some(GenericFindResult::Node(pos)),
-            Some(FindResultBuf::EdgeMid(label_pos, tail)) => {
-                let len = u16::from_le_bytes([self.buf[label_pos], self.buf[label_pos+1]]) as usize;
-                let subtree = label_pos + 2 + len;
-                Some(GenericFindResult::EdgeMid(subtree, tail))
-            }
-            None => None,
-        }
+        generic_find_prefix(self, prefix).ok().flatten()
     }
     fn is_end(&self, handle: &Self::Handle) -> bool {
-        self.buf.get(*handle).copied().unwrap_or(0) != 0
+        NodeStorage::is_terminal(self, handle).unwrap_or(false)
     }
     fn children(&self, handle: &Self::Handle) -> Vec<(String, Self::Handle)> {
-        let mut pos = *handle;
-        if pos + NODE_HEADER_LEN > self.buf.len() {
-            return Vec::new();
-        }
-        let count = u16::from_le_bytes([self.buf[pos+1], self.buf[pos+2]]) as usize;
-        pos += NODE_HEADER_LEN;
-        let mut offsets = Vec::with_capacity(count);
-        for i in 0..count {
-            let ent = pos + i * INDEX_ENTRY_LEN;
-            if ent + INDEX_ENTRY_LEN > self.buf.len() { break; }
-            let off = u64::from_le_bytes(self.buf[ent+1..ent+9].try_into().unwrap()) as usize;
-            offsets.push(off);
-        }
-        let mut out = Vec::with_capacity(count);
-        for &lp in &offsets {
-            let mut p = lp;
-            if p + LABEL_LEN_LEN > self.buf.len() { continue; }
-            let l = u16::from_le_bytes([self.buf[p], self.buf[p+1]]) as usize;
-            p += LABEL_LEN_LEN;
-            if p + l > self.buf.len() { continue; }
-            if let Ok(lbl) = std::str::from_utf8(&self.buf[p..p+l]) {
-                let child_pos = p + l;
-                out.push((lbl.to_string(), child_pos));
-            }
-        }
-        out
+        generic_children(self, handle).unwrap_or_default()
     }
 }
 
-// Internal helper for buffer-based prefix lookup
-enum FindResultBuf {
-    Node(usize),
-    EdgeMid(usize, String),
-}
+// buffer-based prefix lookup logic removed; use generic_find_prefix instead
 
-
-// Find the node or mid-edge position for `prefix` in the mapped buffer
-fn find_node_extra_buf(buf: &[u8], prefix: &str) -> Option<FindResultBuf> {
-    // require and skip magic header
-    if buf.len() < HEADER_LEN || &buf[..HEADER_LEN] != &MAGIC {
-        return None;
-    }
-    let mut pos = HEADER_LEN;
-    let mut rem = prefix;
-    if rem.is_empty() {
-        return Some(FindResultBuf::Node(pos));
-    }
-    loop {
-        // read node header: is_end (1 byte) + child_count (2 bytes)
-        if pos + NODE_HEADER_LEN > buf.len() {
-            return None;
-        }
-        let _is_end = buf[pos];
-        let count = u16::from_le_bytes([
-            buf[pos + 1], buf[pos + 2]
-        ]) as usize;
-        pos += NODE_HEADER_LEN;
-        // read index table: (first_byte, child_offset)
-        let mut table = Vec::with_capacity(count);
-        // read index table entries
-        for _ in 0..count {
-            if pos + INDEX_ENTRY_LEN > buf.len() {
-                return None;
-            }
-            let first_byte = buf[pos];
-            let child_offset = u64::from_le_bytes(
-                buf[pos + 1..pos + INDEX_ENTRY_LEN].try_into().unwrap()
-            ) as usize;
-            table.push((first_byte, child_offset));
-            pos += INDEX_ENTRY_LEN;
-        }
-        // match on the first byte of the remaining prefix
-        let b0 = rem.as_bytes()[0];
-        match table.binary_search_by_key(&b0, |(fb, _)| *fb) {
-            Ok(i) => {
-                let (_fb, child_pos) = table[i];
-                // read the edge label at child_pos
-                let mut cpos = child_pos;
-                // read edge label length
-                if cpos + LABEL_LEN_LEN > buf.len() {
-                    return None;
-                }
-                let label_len = u16::from_le_bytes([
-                    buf[cpos], buf[cpos + 1]
-                ]) as usize;
-                cpos += LABEL_LEN_LEN;
-                if cpos + label_len > buf.len() {
-                    return None;
-                }
-                // read label
-                let label = match std::str::from_utf8(&buf[cpos..cpos + label_len]) {
-                    Ok(s) => s,
-                    Err(_) => return None,
-                };
-                // full-edge match?
-                if rem.starts_with(label) {
-                    rem = &rem[label_len..];
-                    pos = cpos + label_len;
-                    if rem.is_empty() {
-                        return Some(FindResultBuf::Node(pos));
-                    }
-                    continue;
-                }
-                // mid-edge match?
-                if label.starts_with(rem) {
-                    let tail = label[rem.len()..].to_string();
-                    return Some(FindResultBuf::EdgeMid(child_pos, tail));
-                }
-                return None;
-            }
-            Err(_) => return None,
-        }
-    }
-}
-
-/// Internal result of prefix lookup: exact node or mid-edge child + label remainder
-enum FindResult<'a> {
-    /// `prefix` ended exactly at this node
-    Node(&'a TrieNode),
-    /// `prefix` fell in the middle of an edge: child node and the rest of its label
-    EdgeMid(&'a TrieNode, &'a str),
-}
 
 /// Statistics collected during trie traversal.
 #[derive(Default, Debug, Clone)]
@@ -377,38 +349,10 @@ pub struct TraverseStats {
     /// Number of keys (terminal nodes) collected.
     pub keys_collected: usize,
 }
-
-
+// Inherent implementation of Trie methods (without find_node_extra)
 impl Trie {
-    // The in-memory find_node helper is unused; use find_node_extra for lookups.
-    /// Extended prefix lookup: if `prefix` ends inside an edge label, return child and remainder.
-    fn find_node_extra<'a>(&'a self, prefix: &str) -> Option<FindResult<'a>> {
-        let mut node = &self.root;
-        let mut rem = prefix;
-        if rem.is_empty() {
-            return Some(FindResult::Node(node));
-        }
-        while !rem.is_empty() {
-            let mut matched = false;
-            for (label, child) in &node.children {
-                if rem.starts_with(label) {
-                    // consume full edge label and descend
-                    rem = &rem[label.len()..];
-                    node = child.as_ref();
-                    matched = true;
-                    break;
-                } else if label.starts_with(rem) {
-                    // prefix ends mid-edge; prepare child partial match
-                    let tail = &label[rem.len()..];
-                    return Some(FindResult::EdgeMid(child.as_ref(), tail));
-                }
-            }
-            if !matched {
-                return None;
-            }
-        }
-        Some(FindResult::Node(node))
-    }
+
+
     /// Create a new, empty Trie.
     pub fn new() -> Self {
         Trie { root: TrieNode::default() }
@@ -494,7 +438,7 @@ impl Trie {
     /// - pre-order nodes with 1-byte is_end, 2-byte LE child_count
     /// - fixed-size index table (count × [1-byte first_byte, 8-byte offset])
     /// - child blobs: 2-byte label_len + label + subtree
-    pub fn write_radix<W: Write>(&self, w: &mut W) -> io::Result<()> {
+    pub fn write_radix<W: Write>(&self, w: &mut W) -> Result<()> {
         // write magic header + node data into a cursor, then dump to w
         let mut buf = Cursor::new(Vec::new());
         buf.write_all(&MAGIC)?;
@@ -548,13 +492,13 @@ impl Trie {
 
     /// Deserialize the indexed on-disk format: expects a 4-byte MAGIC header,
     /// then nodes with index tables and child blobs.
-    pub fn read_radix<R: Read>(r: &mut R) -> io::Result<Self> {
+    pub fn read_radix<R: Read>(r: &mut R) -> Result<Self> {
         // read entire stream into memory buffer
         let mut buf = Vec::new();
         r.read_to_end(&mut buf)?;
         // require and skip magic header
         if buf.len() < HEADER_LEN || &buf[..HEADER_LEN] != &MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid index format"));
+            return Err(IndexError::InvalidFormat("missing or corrupt magic header"));
         }
         let mut pos = HEADER_LEN;
         let root = Self::read_node_from_buf(&buf, &mut pos)?;
@@ -579,7 +523,9 @@ impl Trie {
             }
             let first_byte = buf[*pos];
             let child_offset = u64::from_le_bytes(
-                buf[*pos + 1..*pos + 9].try_into().unwrap()
+                buf[*pos + 1..*pos + 9]
+                    .try_into()
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "truncated index entry"))?
             ) as usize;
             *pos += 9;
             index.push((first_byte, child_offset));
