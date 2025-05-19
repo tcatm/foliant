@@ -1,10 +1,10 @@
-use foliant::{Trie, Entry};
+use foliant::{Index, Entry};
 mod common;
 use common::collect_sorted;
 
 #[test]
 fn insert_and_list_no_delimiter() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     let words = ["app", "apple", "appetite", "banana", "band", "bandage", "bandana"];
     for &w in &words {
         trie.insert(w);
@@ -28,7 +28,7 @@ fn insert_and_list_no_delimiter() {
 
 #[test]
 fn list_with_delimiter() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     trie.insert("foo/bar/1");
     trie.insert("foo/bar/2");
     trie.insert("foo/baz/1");
@@ -52,7 +52,7 @@ fn list_with_delimiter() {
 
 #[test]
 fn nonexistent_prefix() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     trie.insert("hello");
     let result = collect_sorted(trie.list("world", None));
     assert!(result.is_empty());
@@ -60,7 +60,7 @@ fn nonexistent_prefix() {
 
 #[test]
 fn sample_path_delimiter_query() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     let paths = [
         "dir1/file1.txt",
         "dir1/subdir/file2.txt",

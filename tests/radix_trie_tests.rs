@@ -1,4 +1,4 @@
-use foliant::{Trie, Entry};
+use foliant::{Index, Entry};
 use tempfile::NamedTempFile;
 use std::io::Write;
 mod common;
@@ -9,7 +9,7 @@ use common::collect_sorted;
 
 #[test]
 fn long_common_prefix_keys() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     let words = ["compression", "complete", "companion"];
     for &w in &words {
         trie.insert(w);
@@ -25,7 +25,7 @@ fn long_common_prefix_keys() {
 
 #[test]
 fn serialize_deserialize_roundtrip() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     let keys = ["", "a", "ab", "abc", "compression", "companion"];
     for &k in &keys {
         trie.insert(k);
@@ -35,7 +35,7 @@ fn serialize_deserialize_roundtrip() {
     trie.write_index(&mut buf).unwrap();
     let mut tmp = NamedTempFile::new().expect("temp file");
     tmp.write_all(&buf).expect("write temp");
-    let trie2 = Trie::load(tmp.path()).unwrap();
+    let trie2 = Index::load(tmp.path()).unwrap();
     // Compare listings
     let orig = collect_sorted(trie.list_iter("", None));
     let de = collect_sorted(trie2.list("", None));
@@ -50,7 +50,7 @@ fn serialize_deserialize_roundtrip() {
 
 #[test]
 fn listing_mid_edge_prefix() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     let words = ["compression", "complete"];
     for &w in &words {
         trie.insert(w);
@@ -75,7 +75,7 @@ fn listing_mid_edge_prefix() {
 
 #[test]
 fn splitting_on_partial_overlap() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     trie.insert("test");
     trie.insert("team");
     let result = collect_sorted(trie.list_iter("te", None));
@@ -89,7 +89,7 @@ fn splitting_on_partial_overlap() {
 
 #[test]
 fn delimiter_grouping_after_compression() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     let paths = [
         "dir1/file1",
         "dir1/subdir/file2",
@@ -118,7 +118,7 @@ fn delimiter_grouping_after_compression() {
 
 #[test]
 fn empty_key() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     trie.insert("");
     let result = collect_sorted(trie.list_iter("", None));
     assert_eq!(result, vec![Entry::Key("".to_string())]);
@@ -126,7 +126,7 @@ fn empty_key() {
 
 #[test]
 fn duplicate_insert() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     trie.insert("repeat");
     trie.insert("repeat");
     let result = collect_sorted(trie.list_iter("", None));
@@ -135,7 +135,7 @@ fn duplicate_insert() {
 
 #[test]
 fn prefix_key_cases() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     let keys = ["a", "ab", "abc"];
     for &k in &keys { trie.insert(k); }
     let r1 = collect_sorted(trie.list_iter("a", None));
@@ -153,7 +153,7 @@ fn prefix_key_cases() {
 
 #[test]
 fn ordering_of_keys() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     for &k in &["b", "a", "c"] { trie.insert(k); }
     let result = collect_sorted(trie.list_iter("", None));
     let expected = vec![
@@ -166,7 +166,7 @@ fn ordering_of_keys() {
 
 #[test]
 fn nonexistent_prefix_radix() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     trie.insert("hello");
     let result = collect_sorted(trie.list_iter("helz", None));
     assert!(result.is_empty());
@@ -174,7 +174,7 @@ fn nonexistent_prefix_radix() {
 
 #[test]
 fn unicode_keys() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     let words = ["こんにちは", "こんばんは", "こん"];
     for &w in &words { trie.insert(w); }
     let result = collect_sorted(trie.list_iter("こん", None));
@@ -185,7 +185,7 @@ fn unicode_keys() {
 
 #[test]
 fn unicode_common_prefix() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     let words = ["🤖robot", "🤖romantic"];
     for &w in &words { trie.insert(w); }
     let r1 = collect_sorted(trie.list_iter("🤖", None));
@@ -198,7 +198,7 @@ fn unicode_common_prefix() {
 
 #[test]
 fn multi_delimiter_grouping() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     let paths = ["foo/bar/baz", "foo/bar/qux"];
     for &p in &paths { trie.insert(p); }
     let r1 = collect_sorted(trie.list_iter("foo/", Some('/')));
@@ -211,7 +211,7 @@ fn multi_delimiter_grouping() {
 
 #[test]
 fn delimiter_edge_cases() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     let paths = ["/a", "b/"];
     for &p in &paths { trie.insert(p); }
     let r1 = collect_sorted(trie.list_iter("", Some('/')));
@@ -226,7 +226,7 @@ fn delimiter_edge_cases() {
 
 #[test]
 fn only_delimiter_key() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     trie.insert("/");
     // Plain listing
     let plain = collect_sorted(trie.list_iter("", None));
@@ -243,7 +243,7 @@ fn only_delimiter_key() {
 
 #[test]
 fn trailing_delimiter_key() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     trie.insert("a/");
     // Grouping at root should yield the full 'a/' as a common prefix
     let grp = collect_sorted(trie.list_iter("", Some('/')));
@@ -258,7 +258,7 @@ fn trailing_delimiter_key() {
 
 #[test]
 fn delimiter_at_start_and_end() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     let key = "/start/";
     trie.insert(key);
     // Grouping at root picks up first '/'
@@ -274,7 +274,7 @@ fn delimiter_at_start_and_end() {
 
 #[test]
 fn multiple_leading_delimiters() {
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     trie.insert("//foo");
     // At root, first slash groups '/'
     let r1 = collect_sorted(trie.list_iter("", Some('/')));

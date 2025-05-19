@@ -1,4 +1,4 @@
-use foliant::{Trie, Entry};
+use foliant::{Index, Entry};
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -8,7 +8,7 @@ use tempfile::NamedTempFile;
 #[test]
 fn serialize_and_mmap_list() {
     // Build a sample trie
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     let keys = [
         "alpha",
         "beta",
@@ -28,7 +28,7 @@ fn serialize_and_mmap_list() {
     tmp.as_file_mut().write_all(&buf).unwrap();
 
     // Load via memory-mapped trie
-    let mtrie = Trie::load(tmp.path()).unwrap();
+    let mtrie = Index::load(tmp.path()).unwrap();
 
     // Compare listings without delimiter
     let mut list_mem = trie.list("", None);
@@ -49,7 +49,7 @@ fn serialize_and_mmap_list() {
 #[test]
 fn serialize_and_mmap_list_prefix_a() {
     // Build a trie with some keys, including ones not matching the prefix
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     let keys = ["a1", "a2", "a3", "b1"];
     for &k in &keys {
         trie.insert(k);
@@ -64,7 +64,7 @@ fn serialize_and_mmap_list_prefix_a() {
     tmp.as_file_mut().write_all(&buf).unwrap();
 
     // Load via memory-mapped trie
-    let mtrie = Trie::load(tmp.path()).unwrap();
+    let mtrie = Index::load(tmp.path()).unwrap();
 
     // List entries with prefix "a"
     let mut list_mem = trie.list("a", None);

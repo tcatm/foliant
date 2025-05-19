@@ -1,4 +1,4 @@
-use foliant::{Trie, Entry};
+use foliant::{Index, Entry};
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -7,7 +7,7 @@ use tempfile::NamedTempFile;
 #[test]
 fn mid_edge_prefix_mmap() {
     // Build a small trie with a compressed edge "abcd"
-    let mut trie = Trie::new();
+    let mut trie = Index::new();
     trie.insert("abcdx");
     trie.insert("abcde");
 
@@ -20,7 +20,7 @@ fn mid_edge_prefix_mmap() {
     tmp.as_file_mut().write_all(&buf).unwrap();
 
     // Load via mmap-based trie
-    let mtrie = Trie::load(tmp.path()).expect("mmap load failed");
+    let mtrie = Index::load(tmp.path()).expect("mmap load failed");
 
     // Expected results for prefix "abc"
     let expected = vec![

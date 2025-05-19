@@ -205,35 +205,35 @@ impl<B: TrieBackend> PartialEq<Vec<Entry>> for GenericTrieIter<B> {
     }
 }
 
-/// A prefix trie for indexing strings.
+/// Index structure for strings, backed by a radix trie.
 ///
 /// Supports both in-memory construction and on-disk memory-mapped queries.
 #[derive(Clone)]
-pub enum Trie {
-    /// In-memory trie built via `new()`, `insert()`, etc.
+pub enum Index {
+    /// In-memory index built via `new()`, `insert()`, etc.
     InMemory { root: TrieNode },
-    /// Memory-mapped trie loaded via `load()`, zero-copy listing.
+    /// Read-only memory-mapped index loaded via `load()`, zero-copy listing.
     Mmap { buf: Arc<Mmap> },
 }
 
 
 
-// Unified NodeStorage implementation for both in-memory and memory-mapped Trie
-impl NodeStorage for Trie {
+// Unified NodeStorage implementation for both in-memory and memory-mapped Index
+impl NodeStorage for Index {
     type Handle = Handle;
     fn root_handle(&self) -> Self::Handle {
         match self {
-            Trie::InMemory { root } => Handle::Mem(root as *const TrieNode),
-            Trie::Mmap { .. } => Handle::Mmap(HEADER_LEN),
+            Index::InMemory { root } => Handle::Mem(root as *const TrieNode),
+            Index::Mmap { .. } => Handle::Mmap(HEADER_LEN),
         }
     }
     fn is_terminal(&self, handle: &Self::Handle) -> io::Result<bool> {
         match (self, handle) {
-            (Trie::InMemory { .. }, Handle::Mem(ptr)) => {
+            (Index::InMemory { .. }, Handle::Mem(ptr)) => {
                 let node = unsafe { &**ptr };
                 Ok(node.is_end)
             }
-            (Trie::Mmap { buf }, Handle::Mmap(offset)) => {
+            (Index::Mmap { buf }, Handle::Mmap(offset)) => {
                 Ok(buf.get(*offset).copied().unwrap_or(0) != 0)
             }
             _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid handle")),
@@ -241,7 +241,7 @@ impl NodeStorage for Trie {
     }
     fn read_children(&self, handle: &Self::Handle) -> io::Result<Vec<(String, Self::Handle)>> {
         match (self, handle) {
-            (Trie::InMemory { .. }, Handle::Mem(ptr)) => {
+            (Index::InMemory { .. }, Handle::Mem(ptr)) => {
                 let node = unsafe { &**ptr };
                 let mut out = Vec::with_capacity(node.children.len());
                 for (label, child) in &node.children {
@@ -251,7 +251,7 @@ impl NodeStorage for Trie {
                 out.sort_by(|a, b| b.0.cmp(&a.0));
                 Ok(out)
             }
-            (Trie::Mmap { buf }, Handle::Mmap(mut pos)) => {
+            (Index::Mmap { buf }, Handle::Mmap(mut pos)) => {
                 // ensure we can read node header
                 if pos + NODE_HEADER_LEN > buf.len() {
                     return Ok(Vec::new());
@@ -304,8 +304,8 @@ impl NodeStorage for Trie {
         }
     }
 }
-// Implement the generic TrieBackend trait for the unified Trie
-impl TrieBackend for Trie {
+// Implement the generic TrieBackend trait for the unified Index
+impl TrieBackend for Index {
     type Handle = Handle;
     fn find_prefix(&self, prefix: &str) -> Option<GenericFindResult<Self::Handle>> {
         generic_find_prefix(self, prefix).ok().flatten()
@@ -331,15 +331,15 @@ pub struct TraverseStats {
     /// Number of keys (terminal nodes) collected.
     pub keys_collected: usize,
 }
-// Inherent implementation of Trie methods (without find_node_extra)
-impl Trie {
+// Inherent implementation of Index methods
+impl Index {
 
 
     /// Create a new, empty Trie.
     /// Create a new, empty in-memory Trie.
     /// Create a new, empty in-memory Trie.
     pub fn new() -> Self {
-        Trie::InMemory { root: TrieNode::default() }
+        Index::InMemory { root: TrieNode::default() }
     }
     
     /// Load a serialized indexed radix trie from disk via mmap.
@@ -351,7 +351,7 @@ impl Trie {
         if mmap.len() < HEADER_LEN || &mmap[..HEADER_LEN] != &MAGIC {
             return Err(IndexError::InvalidFormat("missing or corrupt magic header"));
         }
-        Ok(Trie::Mmap { buf: Arc::new(mmap) })
+        Ok(Index::Mmap { buf: Arc::new(mmap) })
     }
     
     /// Streaming iterator over entries under `prefix`, grouping at the first `delimiter`.
@@ -366,14 +366,14 @@ impl Trie {
     /// Insert a string into the radix trie, splitting edges on partial matches.
     pub fn insert(&mut self, key: &str) {
         match self {
-            Trie::InMemory { root } => {
+            Index::InMemory { root } => {
                 let mut node = root;
                 let mut suffix = key;
                 loop {
                     let mut matched = false;
                     for i in 0..node.children.len() {
                         let (ref label, _) = node.children[i];
-                        let lcp = Trie::common_prefix_len(label, suffix);
+                        let lcp = Self::common_prefix_len(label, suffix);
                         if lcp == 0 {
                             continue;
                         }
@@ -413,7 +413,7 @@ impl Trie {
                     }
                 }
             }
-            Trie::Mmap { .. } => panic!("cannot insert into a memory-mapped trie"),
+            Index::Mmap { .. } => panic!("cannot insert into a memory-mapped trie"),
         }
     }
     /// Insert a key with an attached CBOR value (raw bytes).
@@ -422,18 +422,18 @@ impl Trie {
         self.insert(key);
         // Locate the leaf node and set its payload in in-memory trie
         match self {
-            Trie::InMemory { root } => {
+            Index::InMemory { root } => {
                 if let Some(node) = Self::find_node_mut(root, key) {
                     node.value = Some(value);
                 }
             }
-            Trie::Mmap { .. } => panic!("cannot insert into a memory-mapped trie"),
+            Index::Mmap { .. } => panic!("cannot insert into a memory-mapped trie"),
         }
     }
     /// Get the CBOR-decoded Value stored under `key`, if any.
     pub fn get_value(&self, key: &str) -> Result<Option<Value>> {
         match self {
-            Trie::InMemory { root } => {
+            Index::InMemory { root } => {
                 if let Some(node) = Self::find_node(root, key) {
                     if let Some(bytes) = node.value.as_deref() {
                         let v: Value = serde_cbor::from_slice(bytes)
@@ -446,7 +446,7 @@ impl Trie {
                     Ok(None)
                 }
             }
-            Trie::Mmap { buf } => {
+            Index::Mmap { buf } => {
                 match <Self as TrieBackend>::find_prefix(self, key) {
                     Some(GenericFindResult::Node(handle)) => {
                         let mut pos = if let Handle::Mmap(off) = handle { off } else { return Ok(None) };
@@ -551,7 +551,7 @@ impl Trie {
     /// - child blobs: label_len (u16 LE) + label bytes + subtree
     pub fn write_index<W: Write>(&self, w: &mut W) -> Result<()> {
         match self {
-            Trie::InMemory { root } => {
+            Index::InMemory { root } => {
                 // write magic header + node data into a cursor, then dump to w
                 let mut buf = Cursor::new(Vec::new());
                 buf.write_all(&MAGIC)?;
@@ -559,7 +559,7 @@ impl Trie {
                 w.write_all(&buf.into_inner())?;
                 Ok(())
             }
-            Trie::Mmap { .. } => panic!("cannot write a memory-mapped trie"),
+            Index::Mmap { .. } => panic!("cannot write a memory-mapped trie"),
         }
     }
 
@@ -620,7 +620,7 @@ impl Trie {
 
 } // end impl Trie
 
-/// A listing entry returned by `Trie::list`: either a full key or a grouped prefix.
+/// A listing entry returned by `Index::list`: either a full key or a grouped prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
     /// A complete key (an inserted string).

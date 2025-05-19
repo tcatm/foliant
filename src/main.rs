@@ -4,7 +4,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::time::{Instant, Duration};
 // On-disk index support moved to library
-use foliant::{Trie, Entry};
+use foliant::{Index, Entry};
 use serde_cbor;
 use serde_json;
 
@@ -50,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Index { index, input, json } => {
             // Build the trie, measuring throughput
-            let mut trie = Trie::new();
+            let mut trie = Index::new();
             let reader: Box<dyn BufRead> = if let Some(input_path) = input {
                 Box::new(BufReader::new(File::open(input_path)?))
             } else {
@@ -134,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::List { index, prefix, delimiter } => {
             // Memory-map and lazily open the index
             let load_start = Instant::now();
-            let trie = Trie::load(&index)?;
+            let trie = Index::load(&index)?;
             let load_duration = load_start.elapsed();
             eprint!("Loaded index in {:.3} ms\n", load_duration.as_secs_f64() * 1000.0);
             // Stream and print entries with realtime progress
