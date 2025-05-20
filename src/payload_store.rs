@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, Write, Seek};
+use std::io::{self, Write, IoSlice, BufWriter};
 use std::path::Path;
 use std::sync::Arc;
 use memmap2::Mmap;
@@ -7,9 +7,11 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::convert::TryInto;
 
-/// Builder for appending payloads of type V to a file-backed store.
+const CHUNK_SIZE: usize = 128 * 1024;
+/// Builder for appending payloads of type V to a file-backed store, buffering writes in 128KiB.
 pub struct PayloadStoreBuilder<V: Serialize> {
-    file: File,
+    writer: BufWriter<File>,
+    offset: u64,
     phantom: std::marker::PhantomData<V>,
 }
 
@@ -17,27 +19,31 @@ impl<V: Serialize> PayloadStoreBuilder<V> {
     /// Open a disk-backed payload store for writing, truncating any existing file.
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let file = File::create(path)?;
-        Ok(PayloadStoreBuilder { file, phantom: std::marker::PhantomData })
+        let writer = BufWriter::with_capacity(CHUNK_SIZE, file);
+        Ok(PayloadStoreBuilder { writer, offset: 0, phantom: std::marker::PhantomData })
     }
 
-    /// Append a payload, returning an identifier (offset+1). Zero means no payload.
+    /// Append an optional payload; returns an identifier (offset+1), 0 means no payload.
     pub fn append(&mut self, value: Option<V>) -> io::Result<u64> {
         if let Some(val) = value {
             let data = serde_cbor::to_vec(&val)
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "CBOR serialize failed"))?;
-            let offset = self.file.stream_position()?;
-            let len = data.len() as u32;
-            self.file.write_all(&len.to_le_bytes())?;
-            self.file.write_all(&data)?;
-            Ok(offset + 1)
+            let current = self.offset;
+            let len_bytes = (data.len() as u32).to_le_bytes();
+            let bufs = [IoSlice::new(&len_bytes), IoSlice::new(&data)];
+            self.writer.write_vectored(&bufs)?;
+            self.offset += 4 + data.len() as u64;
+            Ok(current + 1)
         } else {
             Ok(0)
         }
     }
 
-    /// Close the payload store, ensuring all data is flushed.
-    pub fn close(self) -> io::Result<()> {
-        self.file.sync_all()
+    /// Flush buffered writes and sync to disk.
+    pub fn close(mut self) -> io::Result<()> {
+        self.writer.flush()?;
+        let file = self.writer.into_inner()?;
+        file.sync_all()
     }
 }
 

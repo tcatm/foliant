@@ -337,12 +337,10 @@ impl<V: Serialize> DatabaseBuilder<V> {
         // payload pointer (u64 LE): offset into payload file (0 if none)
         let ptr = node.payload_ptr.unwrap_or(0);
         w.write_all(&ptr.to_le_bytes())?;
-        // reserve space for index table (count × (1 byte + 8 bytes))
+        // Reserve space for the index table (count entries × INDEX_ENTRY_LEN bytes)
         let index_pos = w.stream_position()?;
-        for _ in 0..count {
-            w.write_all(&[0u8])?;
-            w.write_all(&0u64.to_le_bytes())?;
-        }
+        let zero_table = vec![0u8; count * INDEX_ENTRY_LEN];
+        w.write_all(&zero_table)?;
         // sort children by first byte for binary-searchable index
         let mut children: Vec<_> = node.children.iter().collect();
         children.sort_by_key(|(label, _)| label.as_bytes().first().cloned().unwrap_or(0));
@@ -359,13 +357,15 @@ impl<V: Serialize> DatabaseBuilder<V> {
             Self::write_node_with_pointers(child, w, payload_store)?;
             entries.push((first_byte, child_offset));
         }
-        // go back and fill in the index table
+        // Fill in the index table in one buffered write
         let after_pos = w.stream_position()?;
         w.seek(SeekFrom::Start(index_pos))?;
-        for (first_byte, offset) in entries {
-            w.write_all(&[first_byte])?;
-            w.write_all(&offset.to_le_bytes())?;
+        let mut table_buf = Vec::with_capacity(entries.len() * INDEX_ENTRY_LEN);
+        for (first_byte, offset) in &entries {
+            table_buf.push(*first_byte);
+            table_buf.extend_from_slice(&offset.to_le_bytes());
         }
+        w.write_all(&table_buf)?;
         w.seek(SeekFrom::Start(after_pos))?;
         Ok(())
     }
@@ -448,14 +448,20 @@ impl<V: Serialize> DatabaseBuilder<V> {
         }
     }
 
-    /// Finalize and write index and payload files to disk.
+    /// Finalize and write index and payload files to disk, batching writes via a buffer.
     pub fn close(mut self) -> Result<()> {
-        // Write magic and placeholder payload offset
-        self.idx_file.write_all(&MAGIC)?;
-        self.idx_file.write_all(&0u64.to_le_bytes())?;
-        // Write trie nodes and payload pointers
-        Self::write_node_with_pointers(&self.root, &mut self.idx_file, &mut self.payload_store)?;
-        // Ensure payload file is flushed
+        use std::io::BufWriter;
+        const CHUNK_SIZE: usize = 128 * 1024;
+        // Wrap the index file in a buffered writer (128KiB) to batch writes
+        let mut w = BufWriter::with_capacity(CHUNK_SIZE, self.idx_file);
+        // Write magic header and placeholder payload offset
+        w.write_all(&MAGIC)?;
+        w.write_all(&0u64.to_le_bytes())?;
+        // Write trie nodes and payload pointers via our generic writer
+        Self::write_node_with_pointers(&self.root, &mut w, &mut self.payload_store)?;
+        // Flush buffered writes to disk
+        w.flush().map_err(IndexError::Io)?;
+        // Flush payload store
         self.payload_store.close()?;
         Ok(())
     }
