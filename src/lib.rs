@@ -632,3 +632,15 @@ impl Entry {
         }
     }
 }
+
+impl std::cmp::PartialOrd for Entry {
+    fn partial_cmp(&self, other: &Entry) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::cmp::Ord for Entry {
+    fn cmp(&self, other: &Entry) -> std::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
