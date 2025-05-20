@@ -1,65 +1,73 @@
+use std::fs::File;
 use std::io::{self, Write, Seek};
+use std::path::Path;
+use std::sync::Arc;
+use memmap2::Mmap;
 
-/// Append-only payload store for on-disk serialized payloads.
-pub struct PayloadStore {
-    buf: Vec<u8>,
+/// Builder for appending payloads to a file-backed store.
+pub struct PayloadStoreBuilder {
+    file: File,
 }
 
-impl PayloadStore {
-    /// Create a new, empty PayloadStore.
-    pub fn new() -> Self {
-        PayloadStore { buf: Vec::new() }
+impl PayloadStoreBuilder {
+    /// Open a disk-backed payload store for writing, truncating any existing file.
+    pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        let file = File::create(path)?;
+        Ok(PayloadStoreBuilder { file })
     }
 
     /// Append a payload, returning an identifier (offset+1). Zero means no payload.
-    pub fn append(&mut self, data: &[u8]) -> u64 {
-        let offset = self.buf.len() as u64;
-        // Store length prefix (u32 LE) and data
-        self.buf.extend(&(data.len() as u32).to_le_bytes());
-        self.buf.extend(data);
-        offset + 1
+    pub fn append(&mut self, data: &[u8]) -> io::Result<u64> {
+        let offset = self.file.stream_position()?;
+        let len = data.len() as u32;
+        self.file.write_all(&len.to_le_bytes())?;
+        self.file.write_all(data)?;
+        Ok(offset + 1)
     }
 
-    /// Write all payloads to writer at current position, returning start offset.
-    pub fn finish<W: Write + Seek>(&self, w: &mut W) -> io::Result<u64> {
-        let payload_offset = w.stream_position()?;
-        w.write_all(&self.buf)?;
-        Ok(payload_offset)
+    /// Close the payload store, ensuring all data is flushed.
+    pub fn close(self) -> io::Result<()> {
+        self.file.sync_all()
     }
 }
 
-/// Mmap-backed payload store reader.
-pub struct MmapPayloadStore<'a> {
-    buf: &'a [u8],
-    offset: usize,
+/// Read-only payload store backed by a memory-mapped file.
+pub struct PayloadStore {
+    buf: Arc<Mmap>,
 }
 
-impl<'a> MmapPayloadStore<'a> {
-    /// Construct from mmap buffer and payload section offset.
-    pub fn new(buf: &'a [u8], offset: usize) -> Self {
-        MmapPayloadStore { buf, offset }
+impl PayloadStore {
+    /// Open a read-only payload store by memory-mapping the file at `path`.
+    pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        let file = File::open(path)?;
+        let mmap = unsafe { Mmap::map(&file)? };
+        Ok(PayloadStore { buf: Arc::new(mmap) })
     }
 
-    /// Retrieve the payload for a given identifier.
-    pub fn get(&self, ptr_val: u64) -> io::Result<Option<&'a [u8]>> {
+    /// Retrieve the payload for a given identifier as a byte slice.
+    pub fn get(&self, ptr_val: u64) -> io::Result<Option<&[u8]>> {
         if ptr_val == 0 {
             return Ok(None);
         }
-        // Stored id = rel_offset + 1
         let rel = (ptr_val - 1) as usize;
-        let mut p = self.offset + rel;
-        // Read length prefix
-        if p + 4 > self.buf.len() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated payload length"));
+        let buf = &self.buf;
+        if rel + 4 > buf.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated payload length"));
         }
-        let len_bytes: [u8; 4] = self.buf[p..p + 4]
+        let len_bytes: [u8; 4] = buf[rel..rel + 4]
             .try_into()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid payload length"))?;
         let val_len = u32::from_le_bytes(len_bytes) as usize;
-        p += 4;
-        if p + val_len > self.buf.len() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated payload data"));
+        let start = rel + 4;
+        if start + val_len > buf.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated payload data"));
         }
-        Ok(Some(&self.buf[p..p + val_len]))
+        Ok(Some(&buf[start..start + val_len]))
+    }
+}
+
+impl Clone for PayloadStore {
+    fn clone(&self) -> Self {
+        PayloadStore { buf: self.buf.clone() }
     }
 }

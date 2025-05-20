@@ -54,7 +54,7 @@ pub type Result<T> = std::result::Result<T, IndexError>;
 mod storage;
 mod payload_store;
 use storage::{NodeStorage, generic_find_prefix, generic_children};
-use payload_store::{PayloadStore, MmapPayloadStore};
+use payload_store::{PayloadStoreBuilder, PayloadStore};
 
 // Magic header for the new indexed format: 4 bytes, 'I','D','X','1'
 // Followed by 8-byte payload section start offset (u64 LE)
@@ -233,8 +233,58 @@ where
 pub enum Database {
     /// In-memory database built via `new()` and `insert()`.
     InMemory { root: TrieNode },
-    /// Read-only memory-mapped database loaded via `open()`, zero-copy listing.
-    Mmap { idx: Arc<Mmap>, payload: Arc<Mmap> },
+    /// Read-only database loaded via `open()`, mmapping .idx and reading .payload via PayloadStore.
+    Mmap { idx: Arc<Mmap>, payload: PayloadStore },
+}
+
+/// Builder for creating a new on-disk database. Use `new(path)` to begin,
+/// call `insert(key, value)` as needed, then `close()` to write index and payload files.
+/// Builder for creating a new on-disk database. Use `new(path)` to begin,
+/// call `insert(key, value)` as needed, then `close()` to write index and payload files.
+pub struct DatabaseBuilder {
+    root: TrieNode,
+    idx_file: File,
+    payload_store: PayloadStoreBuilder,
+}
+
+impl DatabaseBuilder {
+    /// Create a new database builder writing to <base>.idx and <base>.payload (truncating existing).
+    pub fn new<P: AsRef<Path>>(base: P) -> Result<Self> {
+        let base = base.as_ref();
+        let idx_path = base.with_extension("idx");
+        let payload_path = base.with_extension("payload");
+        // Truncate or create files
+        let idx_file = File::create(&idx_path)?;
+        let payload_store = PayloadStoreBuilder::open(&payload_path)?;
+        Ok(DatabaseBuilder {
+            root: TrieNode::default(),
+            idx_file,
+            payload_store,
+        })
+    }
+
+    /// Insert a key with optional CBOR payload into the trie.
+    pub fn insert(&mut self, key: &str, value: Option<Vec<u8>>) {
+        // In-memory insert logic on root
+        let mut builder = Database::InMemory { root: self.root.clone() };
+        builder.insert(key, value);
+        // Extract updated trie
+        if let Database::InMemory { root } = builder {
+            self.root = root;
+        }
+    }
+
+    /// Finalize and write index and payload files to disk.
+    pub fn close(mut self) -> Result<()> {
+        // Write magic and placeholder payload offset
+        self.idx_file.write_all(&MAGIC)?;
+        self.idx_file.write_all(&0u64.to_le_bytes())?;
+        // Write trie nodes and payload pointers
+        Database::write_node_with_pointers(&self.root, &mut self.idx_file, &mut self.payload_store)?;
+        // Ensure payload file is flushed
+        self.payload_store.close()?;
+        Ok(())
+    }
 }
 
 // Unified NodeStorage implementation for both in-memory and memory-mapped Database
@@ -353,10 +403,9 @@ impl Database {
         if idx_mmap.len() < MAGIC.len() || &idx_mmap[..MAGIC.len()] != &MAGIC {
             return Err(IndexError::InvalidFormat("missing or corrupt magic header"));
         }
-        // Open and map payload file
-        let payload_file = File::open(&payload_path)?;
-        let payload_mmap = unsafe { Mmap::map(&payload_file)? };
-        Ok(Database::Mmap { idx: Arc::new(idx_mmap), payload: Arc::new(payload_mmap) })
+        // Open payload store for reading
+        let payload_store = PayloadStore::open(&payload_path)?;
+        Ok(Database::Mmap { idx: Arc::new(idx_mmap), payload: payload_store })
     }
     
     /// Streaming interface over entries under `prefix`, grouping at the first `delimiter`.
@@ -466,8 +515,6 @@ impl Database {
             }
             Database::Mmap { idx, payload } => {
                 if let Some(GenericFindResult::Node(handle)) = <Self as TrieBackend>::find_prefix(self, key) {
-                    // Create payload-reader for mmaped payload data
-                    let mps = MmapPayloadStore::new(&payload[..], 0);
                     // Locate pointer in node header: is_end (1) + child_count (2)
                     let off = if let Handle::Mmap(o) = handle { o } else { return Ok(None) };
                     let ptr_pos = off + 1 + 2;
@@ -478,9 +525,9 @@ impl Database {
                         .try_into()
                         .map_err(|_| IndexError::InvalidFormat("invalid payload pointer"))?;
                     let ptr_val = u64::from_le_bytes(ptr_bytes);
-                    // Retrieve payload data if present
-                    if let Some(bytes) = mps.get(ptr_val)? {
-                        let v: Value = serde_cbor::from_slice(bytes)
+                    // Retrieve payload data via payload store
+                    if let Some(bytes) = payload.clone().get(ptr_val)? {
+                        let v: Value = serde_cbor::from_slice(&bytes)
                             .map_err(|_| IndexError::InvalidFormat("invalid CBOR payload"))?;
                         Ok(Some(v))
                     } else {
@@ -557,43 +604,13 @@ impl Database {
         prefix_len
     }
 
-    /// Write this trie into the binary index format ("IDX1"), using pre-order encoding:
-    /// - 4-byte MAGIC header ("IDX1")
-    /// - per-node header: is_end (1 byte), child_count (u16 LE)
-    /// - per-node CBOR payload TLV
-    /// - fixed-size index table (child_count × [first_byte (1 byte), child_offset (u64 LE)])
-    /// - child blobs: label_len (u16 LE) + label bytes + subtree
-    pub fn write_index<W: Write>(&self, w: &mut W) -> Result<()> {
-        match self {
-            Database::InMemory { root } => {
-                // Build trie and payload section buffers, then dump to writer
-                let mut buf = Cursor::new(Vec::new());
-                // Write magic and placeholder for payload section offset
-                buf.write_all(&MAGIC)?;
-                buf.write_all(&0u64.to_le_bytes())?;
-                // Payload store for collecting CBOR payloads
-                let mut ps = PayloadStore::new();
-                // Write trie nodes with payload pointers
-                Self::write_node_with_pointers(root, &mut buf, &mut ps)?;
-                // Write payload section and get its start offset
-                let payload_offset = ps.finish(&mut buf)?;
-                // Patch payload offset into header after magic
-                buf.seek(SeekFrom::Start(MAGIC.len() as u64))?;
-                buf.write_all(&(payload_offset as u64).to_le_bytes())?;
-                // Flush entire buffer to output
-                w.write_all(&buf.into_inner())?;
-                Ok(())
-            }
-            Database::Mmap { .. } => panic!("cannot write a memory-mapped database"),
-        }
-    }
 
     /// Write a trie node, recording its payload in payload_buf and writing
     /// a pointer to that payload.
     fn write_node_with_pointers<W: Write + Seek>(
         node: &TrieNode,
         w: &mut W,
-        payload_store: &mut crate::payload_store::PayloadStore,
+        payload_store: &mut crate::payload_store::PayloadStoreBuilder,
     ) -> io::Result<()> {
         // header: is_end (1 byte) + child_count (2 bytes LE)
         w.write_all(&[node.is_end as u8])?;
@@ -603,7 +620,8 @@ impl Database {
         // Store payload in payload_buf; encode pointer as offset+1, 0 means no payload
         // Append payload and get pointer id (u64)
         let ptr = if let Some(ref data) = node.value {
-            payload_store.append(data)
+            // append returns (offset+1)
+            payload_store.append(data)?
         } else {
             0u64
         };
@@ -644,22 +662,21 @@ impl Database {
     /// For a read-only memory-mapped database, returns an error.
     pub fn save<P: AsRef<Path>>(&self, base: P) -> Result<()> {
         match self {
-            Database::InMemory { .. } => {
-                // Serialize into combined buffer
-                let mut buf = Vec::new();
-                self.write_index(&mut buf)?;
-                // Parse payload offset from header
-                let off_pos = MAGIC.len();
-                let mut off_bytes = [0u8; 8];
-                off_bytes.copy_from_slice(&buf[off_pos..off_pos + 8]);
-                let payload_offset = u64::from_le_bytes(off_bytes) as usize;
-                // Split buffer into idx and payload
-                let (idx_buf, payload_buf) = buf.split_at(payload_offset);
-                // Write to files
+            Database::InMemory { root } => {
+                // Prepare paths
                 let idx_path = base.as_ref().with_extension("idx");
                 let payload_path = base.as_ref().with_extension("payload");
-                std::fs::write(idx_path, idx_buf)?;
-                std::fs::write(payload_path, payload_buf)?;
+                // Open index file for writing
+                let mut idx_file = File::create(&idx_path)?;
+                // Write header: MAGIC + placeholder payload offset (unused for separate files)
+                idx_file.write_all(&MAGIC)?;
+                idx_file.write_all(&0u64.to_le_bytes())?;
+                // Open payload store for writing payload entries
+                let mut ps = PayloadStoreBuilder::open(&payload_path)?;
+                // Write trie nodes to index file, recording payload pointers to payload store
+                Self::write_node_with_pointers(root, &mut idx_file, &mut ps)?;
+                // Flush payload store to disk
+                ps.close()?;
                 Ok(())
             }
             Database::Mmap { .. } => Err(IndexError::InvalidFormat(

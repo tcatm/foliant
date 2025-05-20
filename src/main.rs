@@ -4,7 +4,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::time::{Instant, Duration};
 // On-disk index support moved to library
-use foliant::{Database, Entry};
+use foliant::{Database, DatabaseBuilder, Entry};
 use foliant::Streamer;
 use serde_cbor;
 use serde_json;
@@ -50,8 +50,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::Index { index, input, json } => {
-            // Build the database in-memory, measuring throughput
-            let mut db = Database::new();
+            // Build the database on-disk via builder, measuring throughput
+            let mut builder = DatabaseBuilder::new(&index)?;
             let reader: Box<dyn BufRead> = if let Some(input_path) = input {
                 Box::new(BufReader::new(File::open(input_path)?))
             } else {
@@ -80,9 +80,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .ok_or_else(|| format!("key field '{}' is not a string", keyname))?;
                     // Serialize remaining object to CBOR bytes
                     let cbor = serde_cbor::to_vec(&jv)?;
-                    db.insert(key_str, Some(cbor));
+                    builder.insert(key_str, Some(cbor));
                 } else {
-                    db.insert(&line, None);
+                    builder.insert(&line, None);
                 }
                 // periodic progress report
                 let now = Instant::now();
@@ -109,7 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let duration = start.elapsed();
             // Write out database files (.idx and .payload)
             let write_start = Instant::now();
-            db.save(&index)?;
+            builder.close()?;
             let write_duration = write_start.elapsed();
             // Metrics
             let secs = duration.as_secs_f64();

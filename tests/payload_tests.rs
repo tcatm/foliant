@@ -1,4 +1,4 @@
-use foliant::{Database, Value};
+use foliant::{Database, DatabaseBuilder, Value};
 use serde_cbor;
 use tempfile::tempdir;
 
@@ -30,16 +30,18 @@ fn in_memory_value_roundtrip() {
 /// Test retrieving CBOR values via memory-mapped trie.
 #[test]
 fn mmap_value_access() {
-    let mut db = Database::new();
+    // Setup temporary base path
+    let dir = tempdir().expect("temp dir");
+    let base = dir.path().join("db");
+    // Initialize database builder
+    let mut builder = DatabaseBuilder::new(&base).unwrap();
     // Boolean and array types
     let v_bool = serde_cbor::to_vec(&true).unwrap();
     let v_arr = serde_cbor::to_vec(&vec![1u8,2,3]).unwrap();
-    db.insert("x", Some(v_bool));
-    db.insert("y", Some(v_arr));
+    builder.insert("x", Some(v_bool));
+    builder.insert("y", Some(v_arr));
     // Serialize to disk and load via mmap
-    let dir = tempdir().expect("temp dir");
-    let base = dir.path().join("db");
-    db.save(&base).unwrap();
+    builder.close().unwrap();
     let mdb = Database::open(&base).unwrap();
     // Access decoded values
     assert_eq!(mdb.get_value("x").unwrap(), Some(Value::Bool(true)));
