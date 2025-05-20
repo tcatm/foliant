@@ -105,12 +105,6 @@ trait TrieBackend: Clone {
         }
     }
 
-    /// Collect all entries under `prefix` into a Vec, grouping at `delimiter`.
-    fn list(&self, prefix: &str, delimiter: Option<char>) -> Vec<Entry>
-    where Self: Sized
-    {
-        self.list_iter(prefix, delimiter).collect()
-    }
 }
 
 
@@ -197,6 +191,35 @@ impl<B: TrieBackend> Iterator for GenericTrieIter<B> {
         None
     }
 }
+
+/// Trait for streaming items, similar to `Iterator`.
+pub trait Streamer {
+    /// The type of item yielded by the streamer.
+    type Item;
+    /// Return the next item in the stream, or None if finished.
+    fn next(&mut self) -> Option<Self::Item>;
+    /// Consume the streamer and collect all remaining items into a Vec.
+    fn collect(mut self) -> Vec<Self::Item>
+    where Self: Sized,
+    {
+        let mut v = Vec::new();
+        while let Some(item) = self.next() {
+            v.push(item);
+        }
+        v
+    }
+}
+
+impl<B> Streamer for GenericTrieIter<B>
+where
+    B: TrieBackend,
+{
+    type Item = Entry;
+    fn next(&mut self) -> Option<Self::Item> {
+        Iterator::next(self)
+    }
+}
+
     /// Index structure for strings, backed by a radix trie.
 ///
 /// Supports both in-memory construction and on-disk memory-mapped queries.
@@ -327,13 +350,9 @@ impl Index {
         Ok(Index::Mmap { buf: Arc::new(mmap) })
     }
     
-    /// Streaming iterator over entries under `prefix`, grouping at the first `delimiter`.
-    pub fn list_iter<'a>(&'a self, prefix: &str, delimiter: Option<char>) -> impl Iterator<Item = Entry> + 'a {
+    /// Streaming interface over entries under `prefix`, grouping at the first `delimiter`.
+    pub fn list(&self, prefix: &str, delimiter: Option<char>) -> impl Streamer<Item = Entry> {
         <Self as TrieBackend>::list_iter(self, prefix, delimiter)
-    }
-    /// Collect all entries under `prefix` into a Vec, grouping at `delimiter`.
-    pub fn list(&self, prefix: &str, delimiter: Option<char>) -> Vec<Entry> {
-        <Self as TrieBackend>::list(self, prefix, delimiter)
     }
 
     /// Insert a key with an optional CBOR payload into the radix trie, splitting edges on partial matches.

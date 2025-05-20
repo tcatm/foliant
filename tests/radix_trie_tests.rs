@@ -1,8 +1,7 @@
 use foliant::{Index, Entry};
+use foliant::Streamer;
 use tempfile::NamedTempFile;
 use std::io::Write;
-mod common;
-use common::collect_sorted;
 
 // Tests for expected behavior of a radix (compressed) trie interface.
 // These should pass on a standard Trie implementation and remain valid after compression.
@@ -14,7 +13,8 @@ fn long_common_prefix_keys() {
     for &w in &words {
         trie.insert(w, None);
     }
-    let result = collect_sorted(trie.list_iter("com", None));
+    let mut result: Vec<Entry> = trie.list("com", None).collect();
+    result.sort();
     let mut expected: Vec<Entry> = words
         .iter()
         .map(|&s| Entry::Key(s.to_string()))
@@ -37,13 +37,17 @@ fn serialize_deserialize_roundtrip() {
     tmp.write_all(&buf).expect("write temp");
     let trie2 = Index::open(tmp.path()).unwrap();
     // Compare listings
-    let orig = collect_sorted(trie.list_iter("", None));
-    let de = collect_sorted(trie2.list("", None));
+    let mut orig: Vec<Entry> = trie.list("", None).collect();
+    orig.sort();
+    let mut de: Vec<Entry> = trie2.list("", None).collect();
+    de.sort();
     assert_eq!(orig, de);
     // Also test some prefixes
     for &pref in &["", "a", "ab", "comp"] {
-        let o = collect_sorted(trie.list_iter(pref, Some('/')));
-        let d = collect_sorted(trie2.list_iter(pref, Some('/')));
+        let mut o: Vec<Entry> = trie.list(pref, Some('/')).collect();
+        o.sort();
+        let mut d: Vec<Entry> = trie2.list(pref, Some('/')).collect();
+        d.sort();
         assert_eq!(o, d, "mismatch on prefix {}", pref);
     }
 }
@@ -56,7 +60,8 @@ fn listing_mid_edge_prefix() {
         trie.insert(w, None);
     }
     // Prefix that ends in the middle of an edge label in a compressed trie
-    let result = collect_sorted(trie.list_iter("comp", None));
+    let mut result: Vec<Entry> = trie.list("comp", None).collect();
+    result.sort();
     let mut expected: Vec<Entry> = words
         .iter()
         .map(|&s| Entry::Key(s.to_string()))
@@ -65,7 +70,8 @@ fn listing_mid_edge_prefix() {
     assert_eq!(result, expected);
 
     // Longer prefix matching only one key
-    let res2 = collect_sorted(trie.list_iter("compre", None));
+    let mut res2: Vec<Entry> = trie.list("compre", None).collect();
+    res2.sort();
     let expected2: Vec<Entry> = vec!["compression"]
         .into_iter()
         .map(|s| Entry::Key(s.to_string()))
@@ -78,7 +84,8 @@ fn splitting_on_partial_overlap() {
     let mut trie = Index::new();
     trie.insert("test", None);
     trie.insert("team", None);
-    let result = collect_sorted(trie.list_iter("te", None));
+    let mut result: Vec<Entry> = trie.list("te", None).collect();
+    result.sort();
     let mut expected: Vec<Entry> = vec!["test", "team"]
         .into_iter()
         .map(|s| Entry::Key(s.to_string()))
@@ -99,7 +106,8 @@ fn delimiter_grouping_after_compression() {
         trie.insert(p, None);
     }
     // Top-level grouping on '/'
-    let top = collect_sorted(trie.list_iter("", Some('/')));
+    let mut top: Vec<Entry> = trie.list("", Some('/')).collect();
+    top.sort();
     let expected_top: Vec<Entry> = vec![
         Entry::CommonPrefix("dir1/".to_string()),
         Entry::CommonPrefix("dir2/".to_string()),
@@ -107,7 +115,8 @@ fn delimiter_grouping_after_compression() {
     assert_eq!(top, expected_top);
 
     // Grouping within dir1
-    let dir1 = collect_sorted(trie.list_iter("dir1/", Some('/')));
+    let mut dir1: Vec<Entry> = trie.list("dir1/", Some('/')).collect();
+    dir1.sort();
     let expected_dir1: Vec<Entry> = vec![
         Entry::Key("dir1/file1".to_string()),
         Entry::CommonPrefix("dir1/subdir/".to_string()),
@@ -120,7 +129,8 @@ fn delimiter_grouping_after_compression() {
 fn empty_key() {
     let mut trie = Index::new();
     trie.insert("", None);
-    let result = collect_sorted(trie.list_iter("", None));
+    let mut result: Vec<Entry> = trie.list("", None).collect();
+    result.sort();
     assert_eq!(result, vec![Entry::Key("".to_string())]);
 }
 
@@ -129,7 +139,8 @@ fn duplicate_insert() {
     let mut trie = Index::new();
     trie.insert("repeat", None);
     trie.insert("repeat", None);
-    let result = collect_sorted(trie.list_iter("", None));
+    let mut result: Vec<Entry> = trie.list("", None).collect();
+    result.sort();
     assert_eq!(result, vec![Entry::Key("repeat".to_string())]);
 }
 
@@ -138,16 +149,20 @@ fn prefix_key_cases() {
     let mut trie = Index::new();
     let keys = ["a", "ab", "abc"];
     for &k in &keys { trie.insert(k, None); }
-    let r1 = collect_sorted(trie.list_iter("a", None));
+    let mut r1: Vec<Entry> = trie.list("a", None).collect();
+    r1.sort();
     let expected1: Vec<Entry> = keys.iter().map(|&s| Entry::Key(s.to_string())).collect();
     assert_eq!(r1, expected1);
-    let r2 = collect_sorted(trie.list_iter("ab", None));
+    let mut r2: Vec<Entry> = trie.list("ab", None).collect();
+    r2.sort();
     let expected2: Vec<Entry> = ["ab", "abc"].iter().map(|&s| Entry::Key(s.to_string())).collect();
     assert_eq!(r2, expected2);
-    let r3 = collect_sorted(trie.list_iter("abc", None));
+    let mut r3: Vec<Entry> = trie.list("abc", None).collect();
+    r3.sort();
     let expected3 = vec![Entry::Key("abc".to_string())];
     assert_eq!(r3, expected3);
-    let r4 = collect_sorted(trie.list_iter("abcd", None));
+    let mut r4: Vec<Entry> = trie.list("abcd", None).collect();
+    r4.sort();
     assert!(r4.is_empty());
 }
 
@@ -155,7 +170,8 @@ fn prefix_key_cases() {
 fn ordering_of_keys() {
     let mut trie = Index::new();
     for &k in &["b", "a", "c"] { trie.insert(k, None); }
-    let result = collect_sorted(trie.list_iter("", None));
+    let mut result: Vec<Entry> = trie.list("", None).collect();
+    result.sort();
     let expected = vec![
         Entry::Key("a".to_string()),
         Entry::Key("b".to_string()),
@@ -168,7 +184,8 @@ fn ordering_of_keys() {
 fn nonexistent_prefix_radix() {
     let mut trie = Index::new();
     trie.insert("hello", None);
-    let result = collect_sorted(trie.list_iter("helz", None));
+    let mut result: Vec<Entry> = trie.list("helz", None).collect();
+    result.sort();
     assert!(result.is_empty());
 }
 
@@ -177,7 +194,8 @@ fn unicode_keys() {
     let mut trie = Index::new();
     let words = ["こんにちは", "こんばんは", "こん"];
     for &w in &words { trie.insert(w, None); }
-    let result = collect_sorted(trie.list_iter("こん", None));
+    let mut result: Vec<Entry> = trie.list("こん", None).collect();
+    result.sort();
     let mut expected: Vec<Entry> = words.iter().map(|&s| Entry::Key(s.to_string())).collect();
     expected.sort();
     assert_eq!(result, expected);
@@ -188,11 +206,13 @@ fn unicode_common_prefix() {
     let mut trie = Index::new();
     let words = ["🤖robot", "🤖romantic"];
     for &w in &words { trie.insert(w, None); }
-    let r1 = collect_sorted(trie.list_iter("🤖", None));
+    let mut r1: Vec<Entry> = trie.list("🤖", None).collect();
+    r1.sort();
     let mut exp1: Vec<Entry> = words.iter().map(|&s| Entry::Key(s.to_string())).collect();
     exp1.sort();
     assert_eq!(r1, exp1);
-    let r2 = collect_sorted(trie.list_iter("🤖rob", None));
+    let mut r2: Vec<Entry> = trie.list("🤖rob", None).collect();
+    r2.sort();
     assert_eq!(r2, vec![Entry::Key("🤖robot".to_string())]);
 }
 
@@ -201,10 +221,12 @@ fn multi_delimiter_grouping() {
     let mut trie = Index::new();
     let paths = ["foo/bar/baz", "foo/bar/qux"];
     for &p in &paths { trie.insert(p, None); }
-    let r1 = collect_sorted(trie.list_iter("foo/", Some('/')));
+    let mut r1: Vec<Entry> = trie.list("foo/", Some('/')).collect();
+    r1.sort();
     let exp1 = vec![Entry::CommonPrefix("foo/bar/".to_string())];
     assert_eq!(r1, exp1);
-    let r2 = collect_sorted(trie.list_iter("foo/bar/", Some('/')));
+    let mut r2: Vec<Entry> = trie.list("foo/bar/", Some('/')).collect();
+    r2.sort();
     let exp2: Vec<Entry> = paths.iter().map(|&s| Entry::Key(s.to_string())).collect();
     assert_eq!(r2, exp2);
 }
@@ -214,13 +236,15 @@ fn delimiter_edge_cases() {
     let mut trie = Index::new();
     let paths = ["/a", "b/"];
     for &p in &paths { trie.insert(p, None); }
-    let r1 = collect_sorted(trie.list_iter("", Some('/')));
+    let mut r1: Vec<Entry> = trie.list("", Some('/')).collect();
+    r1.sort();
     let exp1 = vec![
         Entry::CommonPrefix("/".to_string()),
         Entry::CommonPrefix("b/".to_string()),
     ];
     assert_eq!(r1, exp1);
-    let r2 = collect_sorted(trie.list_iter("/", Some('/')));
+    let mut r2: Vec<Entry> = trie.list("/", Some('/')).collect();
+    r2.sort();
     assert_eq!(r2, vec![Entry::Key("/a".to_string())]);
 }
 
@@ -229,15 +253,19 @@ fn only_delimiter_key() {
     let mut trie = Index::new();
     trie.insert("/", None);
     // Plain listing
-    let plain = collect_sorted(trie.list_iter("", None));
+    let mut plain: Vec<Entry> = trie.list("", None).collect();
+    plain.sort();
     assert_eq!(plain, vec![Entry::Key("/".to_string())]);
     // Grouping at root
-    let grp = collect_sorted(trie.list_iter("", Some('/')));
+    let mut grp: Vec<Entry> = trie.list("", Some('/')).collect();
+    grp.sort();
     assert_eq!(grp, vec![Entry::CommonPrefix("/".to_string())]);
     // Listing after prefix '/'
-    let after_grp = collect_sorted(trie.list_iter("/", Some('/')));
+    let mut after_grp: Vec<Entry> = trie.list("/", Some('/')).collect();
+    after_grp.sort();
     assert_eq!(after_grp, vec![Entry::CommonPrefix("/".to_string())]);
-    let after_plain = collect_sorted(trie.list_iter("/", None));
+    let mut after_plain: Vec<Entry> = trie.list("/", None).collect();
+    after_plain.sort();
     assert_eq!(after_plain, vec![Entry::Key("/".to_string())]);
 }
 
@@ -246,13 +274,16 @@ fn trailing_delimiter_key() {
     let mut trie = Index::new();
     trie.insert("a/", None);
     // Grouping at root should yield the full 'a/' as a common prefix
-    let grp = collect_sorted(trie.list_iter("", Some('/')));
+    let mut grp: Vec<Entry> = trie.list("", Some('/')).collect();
+    grp.sort();
     assert_eq!(grp, vec![Entry::CommonPrefix("a/".to_string())]);
     // Listing after prefix 'a/'
-    let after = collect_sorted(trie.list_iter("a/", Some('/')));
+    let mut after: Vec<Entry> = trie.list("a/", Some('/')).collect();
+    after.sort();
     assert_eq!(after, vec![Entry::CommonPrefix("a/".to_string())]);
     // Plain listing still returns the key
-    let plain = collect_sorted(trie.list_iter("", None));
+    let mut plain: Vec<Entry> = trie.list("", None).collect();
+    plain.sort();
     assert_eq!(plain, vec![Entry::Key("a/".to_string())]);
 }
 
@@ -262,13 +293,16 @@ fn delimiter_at_start_and_end() {
     let key = "/start/";
     trie.insert(key, None);
     // Grouping at root picks up first '/'
-    let root_grp = collect_sorted(trie.list_iter("", Some('/')));
+    let mut root_grp: Vec<Entry> = trie.list("", Some('/')).collect();
+    root_grp.sort();
     assert_eq!(root_grp, vec![Entry::CommonPrefix("/".to_string())]);
     // After consuming first '/', grouping yields the full '/start/'
-    let mid_grp = collect_sorted(trie.list_iter("/", Some('/')));
+    let mut mid_grp: Vec<Entry> = trie.list("/", Some('/')).collect();
+    mid_grp.sort();
     assert_eq!(mid_grp, vec![Entry::CommonPrefix(key.to_string())]);
     // After full prefix, listing yields the key as a common-prefix (ends with '/')
-    let end_grp = collect_sorted(trie.list_iter(key, Some('/')));
+    let mut end_grp: Vec<Entry> = trie.list(key, Some('/')).collect();
+    end_grp.sort();
     assert_eq!(end_grp, vec![Entry::CommonPrefix(key.to_string())]);
 }
 
@@ -277,12 +311,15 @@ fn multiple_leading_delimiters() {
     let mut trie = Index::new();
     trie.insert("//foo", None);
     // At root, first slash groups '/'
-    let r1 = collect_sorted(trie.list_iter("", Some('/')));
+    let mut r1: Vec<Entry> = trie.list("", Some('/')).collect();
+    r1.sort();
     assert_eq!(r1, vec![Entry::CommonPrefix("/".to_string())]);
     // After one '/', grouping yields '//' as common prefix
-    let r2 = collect_sorted(trie.list_iter("/", Some('/')));
+    let mut r2: Vec<Entry> = trie.list("/", Some('/')).collect();
+    r2.sort();
     assert_eq!(r2, vec![Entry::CommonPrefix("//".to_string())]);
     // After '//' prefix, the remaining key is 'foo'
-    let r3 = collect_sorted(trie.list_iter("//", Some('/')));
+    let mut r3: Vec<Entry> = trie.list("//", Some('/')).collect();
+    r3.sort();
     assert_eq!(r3, vec![Entry::Key("//foo".to_string())]);
 }

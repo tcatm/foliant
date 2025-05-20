@@ -1,4 +1,5 @@
 use foliant::{Index, Entry};
+use foliant::Streamer;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -31,15 +32,15 @@ fn serialize_and_mmap_list() {
     let mtrie = Index::open(tmp.path()).unwrap();
 
     // Compare listings without delimiter
-    let mut list_mem = trie.list("", None);
-    let mut list_mmap = mtrie.list("", None);
+    let mut list_mem: Vec<Entry> = trie.list("", None).collect();
+    let mut list_mmap: Vec<Entry> = mtrie.list("", None).collect();
     list_mem.sort();
     list_mmap.sort();
     assert_eq!(list_mem, list_mmap);
 
     // Compare listings grouped by '/'
-    let mut grp_mem = trie.list("", Some('/'));
-    let mut grp_mmap = mtrie.list("", Some('/'));
+    let mut grp_mem: Vec<Entry> = trie.list("", Some('/')).collect();
+    let mut grp_mmap: Vec<Entry> = mtrie.list("", Some('/')).collect();
     grp_mem.sort();
     grp_mmap.sort();
     assert_eq!(grp_mem, grp_mmap);
@@ -67,8 +68,8 @@ fn serialize_and_mmap_list_prefix_a() {
     let mtrie = Index::open(tmp.path()).unwrap();
 
     // List entries with prefix "a"
-    let mut list_mem = trie.list("a", None);
-    let mut list_mmap = mtrie.list("a", None);
+    let mut list_mem: Vec<Entry> = trie.list("a", None).collect();
+    let mut list_mmap: Vec<Entry> = mtrie.list("a", None).collect();
     list_mem.sort();
     list_mmap.sort();
 

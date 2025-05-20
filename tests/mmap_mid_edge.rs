@@ -1,4 +1,5 @@
 use foliant::{Index, Entry};
+use foliant::Streamer;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -29,12 +30,12 @@ fn mid_edge_prefix_mmap() {
     ];
 
     // In-memory listing
-    let mut mem = trie.list("abc", None);
+    let mut mem: Vec<Entry> = trie.list("abc", None).collect();
     mem.sort();
     assert_eq!(mem, expected, "in-memory trie mismatch");
 
     // Mmap listing
-    let mut mm = mtrie.list("abc", None);
+    let mut mm: Vec<Entry> = mtrie.list("abc", None).collect();
     mm.sort();
     assert_eq!(mm, expected, "mmap trie mismatch");
 

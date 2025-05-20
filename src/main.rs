@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::{Instant, Duration};
 // On-disk index support moved to library
 use foliant::{Index, Entry};
+use foliant::Streamer;
 use serde_cbor;
 use serde_json;
 
@@ -138,13 +139,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let load_duration = load_start.elapsed();
             eprint!("Loaded index in {:.3} ms\n", load_duration.as_secs_f64() * 1000.0);
             // Stream and print entries with realtime progress
-            let iter_start = Instant::now();
-            let mut iter = trie.list_iter(&prefix, delimiter);
-            let iter_duration = iter_start.elapsed();
-            eprintln!("Iterator creation time: {:.3} ms", iter_duration.as_secs_f64() * 1000.0);
+            let stream_start = Instant::now();
+            let mut stream = trie.list(&prefix, delimiter);
+            let stream_duration = stream_start.elapsed();
+            eprintln!("Stream creation time: {:.3} ms", stream_duration.as_secs_f64() * 1000.0);
             let mut printed = 0usize;
             let list_start = Instant::now();
-            for entry in &mut iter {
+
+            while let Some(entry) = stream.next() {
                 match entry {
                     Entry::Key(s) => {
                         // print key, followed by optional CBOR-decoded JSON Value in dim color
@@ -159,6 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 printed += 1;
             }
+            
             // finish progress line
             eprintln!();
             let list_duration = list_start.elapsed();
@@ -166,9 +169,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let idx_size = std::fs::metadata(&index)?.len();
             eprintln!("Index size: {} bytes", idx_size);
             eprintln!(
-                "Load time: {:.3} ms, Iterator creation time: {:.3} ms, List time: {:.3} ms, Printed {} entries",
+                "Load time: {:.3} ms, Stream creation time: {:.3} ms, List time: {:.3} ms, Printed {} entries",
                 load_duration.as_secs_f64() * 1000.0,
-                iter_duration.as_secs_f64() * 1000.0,
+                stream_duration.as_secs_f64() * 1000.0,
                 list_duration.as_secs_f64() * 1000.0,
                 printed
             );
