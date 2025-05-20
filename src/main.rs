@@ -6,7 +6,7 @@ use std::time::{Instant, Duration};
 // On-disk index support moved to library
 use foliant::{Database, DatabaseBuilder, Entry};
 use foliant::Streamer;
-use serde_json::{self, ser};
+use serde_json;
 
 /// A simple CLI for building and querying a Trie index.
 #[derive(Parser)]
@@ -136,7 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::List { index, prefix, delimiter } => {
             // Open read-only database via mmap
             let load_start = Instant::now();
-            let db = Database::open(&index)?;
+            let db = Database::<serde_json::Value>::open(&index)?;
             let load_duration = load_start.elapsed();
             eprintln!("Loaded database in {:.3} ms", load_duration.as_secs_f64() * 1000.0);
             // Stream and print entries with realtime progress

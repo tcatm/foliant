@@ -1,14 +1,11 @@
-#![allow(private_interfaces)]
 use std::collections::HashSet;
 use std::io::{self, Write, Seek, SeekFrom};
 use std::fs::File;
-use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
 use memmap2::Mmap;
 use std::convert::TryInto;
 use std::fmt;
-use serde_cbor;
 use serde::Serialize;
 pub use serde_cbor::Value as Value;
 
@@ -19,12 +16,6 @@ pub enum IndexError {
     Io(io::Error),
     /// Data is not in the expected indexed format
     InvalidFormat(&'static str),
-}
-// Internal handle for unified NodeStorage across in-memory and mmap variants
-#[derive(Clone)]
-enum Handle {
-    Mem(*const TrieNode),
-    Mmap(usize),
 }
 
 impl fmt::Display for IndexError {
@@ -57,6 +48,33 @@ mod storage;
 mod payload_store;
 use storage::{NodeStorage, generic_find_prefix, generic_children};
 use payload_store::{PayloadStoreBuilder, PayloadStore};
+use serde::de::DeserializeOwned;
+use std::path::PathBuf;
+
+/// Opaque handle for navigating the on-disk trie
+#[derive(Clone, Copy, Debug)]
+pub enum Handle {
+    /// Memory-mapped index offset
+    Mmap(usize),
+}
+
+/// Read-only database: mmap-backed index and payload store
+pub struct Database<V = Value>
+where
+    V: DeserializeOwned,
+{
+    idx: Arc<Mmap>,
+    payload: PayloadStore<V>,
+}
+// Manually implement Clone since derived bounds are too strict
+impl<V> Clone for Database<V>
+where
+    V: DeserializeOwned,
+{
+    fn clone(&self) -> Self {
+        Database { idx: self.idx.clone(), payload: self.payload.clone() }
+    }
+}
 
 // Magic header for the new indexed format: 4 bytes, 'I','D','X','1'
 // Followed by 8-byte payload section start offset (u64 LE)
@@ -71,8 +89,8 @@ const LABEL_LEN_LEN: usize = 2;                   // u16 label length
 /// A node in the trie.
 #[derive(Default, Debug, Clone)]
 struct TrieNode {
-    /// Optional CBOR value (raw bytes) stored at this node if it is a key.
-    value: Option<Vec<u8>>,
+    /// Optional pointer (offset+1) into the payload file; 0 means no payload.
+    payload_ptr: Option<u64>,
     /// Each edge is labeled by a (possibly multi-character) string
     children: Vec<(String, Box<TrieNode>)>,
     is_end: bool,
@@ -226,350 +244,41 @@ where
     }
 }
 
-    /// Index structure for strings, backed by a radix trie.
-///
-/// Supports both in-memory construction and on-disk memory-mapped queries.
-#[derive(Clone)]
-/// Database structure for strings, backed by a radix trie.
-/// Supports both in-memory construction and on-disk memory-mapped queries.
-pub enum Database {
-    /// In-memory database built via `new()` and `insert()`.
-    InMemory { root: TrieNode },
-    /// Read-only database loaded via `open()`, mmapping .idx and reading .payload via PayloadStore.
-    Mmap { idx: Arc<Mmap>, payload: PayloadStore },
-}
-
 /// Builder for creating a new on-disk database. Use `new(path)` to begin,
 /// call `insert(key, value)` as needed, then `close()` to write index and payload files.
-pub struct DatabaseBuilder<V: Serialize> {
+/// Builder for creating a new on-disk database with values of type V.
+/// Insert keys and optional V payloads, then call `close()` to write index and payload files.
+/// Builder for creating a new on-disk database with values of type V.
+/// Insert keys with `insert()`, then call `close()` or `into_database()`.
+pub struct DatabaseBuilder<V = Value>
+where
+    V: Serialize,
+{
+    /// Base path (without extension) for .idx and .payload files
+    base: PathBuf,
     root: TrieNode,
     idx_file: File,
-    payload_store: PayloadStoreBuilder,
-    phantom: PhantomData<V>
+    payload_store: PayloadStoreBuilder<V>,
 }
 
 impl<V: Serialize> DatabaseBuilder<V> {
     /// Create a new database builder writing to <base>.idx and <base>.payload (truncating existing).
     pub fn new<P: AsRef<Path>>(base: P) -> Result<Self> {
-        let base = base.as_ref();
+        let base = base.as_ref().to_path_buf();
         let idx_path = base.with_extension("idx");
         let payload_path = base.with_extension("payload");
         // Truncate or create files
         let idx_file = File::create(&idx_path)?;
-        let payload_store = PayloadStoreBuilder::open(&payload_path)?;
+        let payload_store = PayloadStoreBuilder::<V>::open(&payload_path)?;
         Ok(DatabaseBuilder {
+            base,
             root: TrieNode::default(),
             idx_file,
             payload_store,
-            phantom: PhantomData,
         })
     }
 
-    /// Insert a key with optional serializable payload into the trie.
-    pub fn insert(&mut self, key: &str, value: Option<V>)
 
-    {
-        // In-memory insert logic on root
-        let mut builder = Database::InMemory { root: self.root.clone() };
-        builder.insert(key, value);
-        // Extract updated trie
-        if let Database::InMemory { root } = builder {
-            self.root = root;
-        }
-    }
-
-    /// Finalize and write index and payload files to disk.
-    pub fn close(mut self) -> Result<()> {
-        // Write magic and placeholder payload offset
-        self.idx_file.write_all(&MAGIC)?;
-        self.idx_file.write_all(&0u64.to_le_bytes())?;
-        // Write trie nodes and payload pointers
-        Database::write_node_with_pointers(&self.root, &mut self.idx_file, &mut self.payload_store)?;
-        // Ensure payload file is flushed
-        self.payload_store.close()?;
-        Ok(())
-    }
-}
-
-// Unified NodeStorage implementation for both in-memory and memory-mapped Database
-impl NodeStorage for Database {
-    type Handle = Handle;
-    fn root_handle(&self) -> Self::Handle {
-        match self {
-            Database::InMemory { root } => Handle::Mem(root as *const TrieNode),
-            Database::Mmap { .. } => Handle::Mmap(HEADER_LEN),
-        }
-    }
-    fn is_terminal(&self, handle: &Self::Handle) -> io::Result<bool> {
-        match (self, handle) {
-            (Database::InMemory { .. }, Handle::Mem(ptr)) => {
-                let node = unsafe { &**ptr };
-                Ok(node.is_end)
-            }
-            (Database::Mmap { idx, .. }, Handle::Mmap(offset)) => {
-                Ok(idx.get(*offset).copied().unwrap_or(0) != 0)
-            }
-            _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid handle")),
-        }
-    }
-    fn read_children(&self, handle: &Self::Handle) -> io::Result<Vec<(String, Self::Handle)>> {
-        match (self, handle) {
-            (Database::InMemory { .. }, Handle::Mem(ptr)) => {
-                let node = unsafe { &**ptr };
-                let mut out = Vec::with_capacity(node.children.len());
-                for (label, child) in &node.children {
-                    let child_ptr: *const TrieNode = child.as_ref();
-                    out.push((label.clone(), Handle::Mem(child_ptr)));
-                }
-                out.sort_by(|a, b| b.0.cmp(&a.0));
-                Ok(out)
-            }
-            (Database::Mmap { idx, .. }, Handle::Mmap(mut pos)) => {
-                // ensure we can read node header
-                if pos + NODE_HEADER_LEN > idx.len() {
-                    return Ok(Vec::new());
-                }
-                // read child count
-                let count = u16::from_le_bytes([idx[pos + 1], idx[pos + 2]]) as usize;
-                // skip header (is_end + child_count + payload ptr)
-                pos += NODE_HEADER_LEN;
-                // read index entries: each is [first_byte (1), child_offset (8)]
-                let mut offsets = Vec::with_capacity(count);
-                for i in 0..count {
-                    let ent = pos + i * INDEX_ENTRY_LEN;
-                    if ent + INDEX_ENTRY_LEN > idx.len() {
-                        break;
-                    }
-                    let off = u64::from_le_bytes(
-                        idx[ent + 1..ent + 9]
-                            .try_into()
-                            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "truncated index entry"))?
-                    ) as usize;
-                    offsets.push(off);
-                }
-                let mut out = Vec::with_capacity(offsets.len());
-                for off in offsets {
-                    let mut p = off;
-                    if p + LABEL_LEN_LEN > idx.len() {
-                        continue;
-                    }
-                    let l = u16::from_le_bytes([idx[p], idx[p + 1]]) as usize;
-                    p += LABEL_LEN_LEN;
-                    if p + l > idx.len() {
-                        continue;
-                    }
-                    let label = std::str::from_utf8(&idx[p..p + l])
-                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-                        .to_string();
-                    out.push((label, Handle::Mmap(p + l)));
-                }
-                out.sort_by(|a, b| b.0.cmp(&a.0));
-                Ok(out)
-            }
-            _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid handle")),
-        }
-    }
-}
-// Implement the generic TrieBackend trait for the unified Database
-impl TrieBackend for Database {
-    type Handle = Handle;
-    fn find_prefix(&self, prefix: &str) -> Option<GenericFindResult<Self::Handle>> {
-        generic_find_prefix(self, prefix).ok().flatten()
-    }
-    fn is_end(&self, handle: &Self::Handle) -> bool {
-        NodeStorage::is_terminal(self, handle).unwrap_or(false)
-    }
-    fn children(&self, handle: &Self::Handle) -> Vec<(String, Self::Handle)> {
-        generic_children(self, handle).unwrap_or_default()
-    }
-}
-
-// Inherent implementation of Index methods
-impl Database {
-    /// Create a new, empty in-memory Trie.
-    pub fn new() -> Self {
-        Database::InMemory { root: TrieNode::default() }
-    }
-    
-    /// Open an indexed radix trie via mmap.
-    /// If separate index (.idx) and payload (.payload) files are present under the given base path, they will be opened.
-    /// Otherwise, a combined index file is expected at the given path, beginning with the 4-byte MAGIC header "IDX1",
-    /// followed by an 8-byte payload section start offset (u64 LE).
-    /// Open a read-only database via mmap. Expects separate index (.idx) and payload (.payload) files.
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let base = path.as_ref();
-        let idx_path = base.with_extension("idx");
-        let payload_path = base.with_extension("payload");
-        // Open and map index file
-        let idx_file = File::open(&idx_path)?;
-        let idx_mmap = unsafe { Mmap::map(&idx_file)? };
-        // Check magic header in index file
-        if idx_mmap.len() < MAGIC.len() || &idx_mmap[..MAGIC.len()] != &MAGIC {
-            return Err(IndexError::InvalidFormat("missing or corrupt magic header"));
-        }
-        // Open payload store for reading
-        let payload_store = PayloadStore::open(&payload_path)?;
-        Ok(Database::Mmap { idx: Arc::new(idx_mmap), payload: payload_store })
-    }
-    
-    /// Streaming interface over entries under `prefix`, grouping at the first `delimiter`.
-    pub fn list(&self, prefix: &str, delimiter: Option<char>) -> impl Streamer<Item = Entry> {
-        <Self as TrieBackend>::list_iter(self, prefix, delimiter)
-    }
-
-    /// Insert a key with optional CBOR payload into the radix trie, splitting edges on partial matches.
-    /// The payload should be raw CBOR-encoded bytes, or None for no payload.
-    pub fn insert<V>(&mut self, key: &str, value: Option<V>)
-    where
-        V: Serialize,
-    {
-        // Prepare payload and insertion pointers
-        let mut payload = serde_cbor::to_vec(&value)
-            .map_err(|_| IndexError::InvalidFormat("invalid CBOR payload"))
-            .ok();
-        match self {
-            Database::InMemory { root } => {
-                // raw pointer to root for payload attachment
-                let root_ptr: *mut TrieNode = root;
-                let mut node = root;
-                let mut suffix = key;
-                loop {
-                    let mut matched = false;
-                    for i in 0..node.children.len() {
-                        let (ref label, _) = node.children[i];
-                        let lcp = Self::common_prefix_len(label, suffix);
-                        if lcp == 0 {
-                            continue;
-                        }
-                        let (orig_label, orig_child) = node.children.remove(i);
-                        if lcp < orig_label.len() {
-                            // Split edge into intermediate node
-                            let mut intermediate = TrieNode::default();
-                            let label_rem = &orig_label[lcp..];
-                            intermediate.children.push((label_rem.to_string(), orig_child));
-                            let key_rem = &suffix[lcp..];
-                            if key_rem.is_empty() {
-                                intermediate.is_end = true;
-                            } else {
-                                let mut leaf = TrieNode::default();
-                                leaf.is_end = true;
-                                intermediate.children.push((key_rem.to_string(), Box::new(leaf)));
-                            }
-                            let prefix_label = &orig_label[..lcp];
-                            node.children.insert(i, (prefix_label.to_string(), Box::new(intermediate)));
-                            // attach payload if provided
-                            if let Some(val) = payload.take() {
-                                unsafe {
-                                    if let Some(n) = Self::find_node_mut(&mut *root_ptr, key) {
-                                        n.value = Some(val);
-                                    }
-                                }
-                            }
-                            return;
-                        } else {
-                            // Consume full edge label
-                            suffix = &suffix[lcp..];
-                            node.children.insert(i, (orig_label, orig_child));
-                            if suffix.is_empty() {
-                                node.children[i].1.is_end = true;
-                                // attach payload if provided
-                                if let Some(val) = payload.take() {
-                                    unsafe {
-                                        if let Some(n) = Self::find_node_mut(&mut *root_ptr, key) {
-                                            n.value = Some(val);
-                                        }
-                                    }
-                                }
-                                return;
-                            }
-                            node = &mut node.children[i].1;
-                            matched = true;
-                            break;
-                        }
-                    }
-                    if !matched {
-                        // No matching edge; append new leaf
-                        let mut leaf = TrieNode::default();
-                        leaf.is_end = true;
-                        node.children.push((suffix.to_string(), Box::new(leaf)));
-                        // attach payload if provided
-                        if let Some(val) = payload.take() {
-                            unsafe {
-                                if let Some(n) = Self::find_node_mut(&mut *root_ptr, key) {
-                                    n.value = Some(val);
-                                }
-                            }
-                        }
-                        return;
-                    }
-                }
-            }
-            Database::Mmap { .. } => panic!("cannot insert into a memory-mapped database"),
-        }
-    }
-    /// Get the CBOR-decoded Value stored under `key`, if any.
-    pub fn get_value(&self, key: &str) -> Result<Option<Value>> {
-        match self {
-            Database::InMemory { root } => {
-                if let Some(node) = Self::find_node(root, key) {
-                    if let Some(bytes) = node.value.as_deref() {
-                        let opt_v: Option<Value> = serde_cbor::from_slice(bytes)
-                            .map_err(|_| IndexError::InvalidFormat("invalid CBOR payload"))?;
-                        Ok(opt_v)
-                    } else {
-                        Ok(None)
-                    }
-                } else {
-                    Ok(None)
-                }
-            }
-            Database::Mmap { idx, payload } => {
-                if let Some(GenericFindResult::Node(handle)) = <Self as TrieBackend>::find_prefix(self, key) {
-                    // Locate pointer in node header: is_end (1) + child_count (2)
-                    let off = if let Handle::Mmap(o) = handle { o } else { return Ok(None) };
-                    let ptr_pos = off + 1 + 2;
-                    if ptr_pos + 8 > idx.len() {
-                        return Err(IndexError::InvalidFormat("truncated payload pointer"));
-                    }
-                    let ptr_bytes: [u8; 8] = idx[ptr_pos..ptr_pos + 8]
-                        .try_into()
-                        .map_err(|_| IndexError::InvalidFormat("invalid payload pointer"))?;
-                    let ptr_val = u64::from_le_bytes(ptr_bytes);
-                    // Retrieve payload data via payload store
-                    if let Some(bytes) = payload.clone().get(ptr_val)? {
-                        let opt_v: Option<Value> = serde_cbor::from_slice(&bytes)
-                            .map_err(|_| IndexError::InvalidFormat("invalid CBOR payload"))?;
-                        Ok(opt_v)
-                    } else {
-                        Ok(None)
-                    }
-                } else {
-                    Ok(None)
-                }
-            }
-        }
-    }
-    /// Immutable lookup of a node by exact key.
-    fn find_node<'a>(mut node: &'a TrieNode, mut rem: &str) -> Option<&'a TrieNode> {
-        if rem.is_empty() {
-            return Some(node);
-        }
-        while !rem.is_empty() {
-            let mut matched = false;
-            for (label, child) in &node.children {
-                if rem.starts_with(label.as_str()) {
-                    rem = &rem[label.len()..];
-                    node = child.as_ref();
-                    matched = true;
-                    break;
-                }
-            }
-            if !matched {
-                return None;
-            }
-        }
-        Some(node)
-    }
     /// Mutable lookup of a node by exact key.
     fn find_node_mut<'a>(mut node: &'a mut TrieNode, mut rem: &str) -> Option<&'a mut TrieNode> {
         if rem.is_empty() {
@@ -614,27 +323,19 @@ impl Database {
         prefix_len
     }
 
-
     /// Write a trie node, recording its payload in payload_buf and writing
     /// a pointer to that payload.
     fn write_node_with_pointers<W: Write + Seek>(
         node: &TrieNode,
         w: &mut W,
-        payload_store: &mut crate::payload_store::PayloadStoreBuilder,
+        payload_store: &mut crate::payload_store::PayloadStoreBuilder<V>,
     ) -> io::Result<()> {
         // header: is_end (1 byte) + child_count (2 bytes LE)
         w.write_all(&[node.is_end as u8])?;
         let count = node.children.len() as usize;
         w.write_all(&(count as u16).to_le_bytes())?;
-        // payload pointer (u64 LE): offset into payload_buf, or 0 if none
-        // Store payload in payload_buf; encode pointer as offset+1, 0 means no payload
-        // Append payload and get pointer id (u64)
-        let ptr = if let Some(ref data) = node.value {
-            // append returns (offset+1)
-            payload_store.append(data)?
-        } else {
-            0u64
-        };
+        // payload pointer (u64 LE): offset into payload file (0 if none)
+        let ptr = node.payload_ptr.unwrap_or(0);
         w.write_all(&ptr.to_le_bytes())?;
         // reserve space for index table (count × (1 byte + 8 bytes))
         let index_pos = w.stream_position()?;
@@ -668,37 +369,248 @@ impl Database {
         w.seek(SeekFrom::Start(after_pos))?;
         Ok(())
     }
-    /// Save an in-memory database, writing separate index (.idx) and payload (.payload) files.
-    /// For a read-only memory-mapped database, returns an error.
-    pub fn save<P: AsRef<Path>>(&self, base: P) -> Result<()> {
-        match self {
-            Database::InMemory { root } => {
-                // Prepare paths
-                let idx_path = base.as_ref().with_extension("idx");
-                let payload_path = base.as_ref().with_extension("payload");
-                // Open index file for writing
-                let mut idx_file = File::create(&idx_path)?;
-                // Write header: MAGIC + placeholder payload offset (unused for separate files)
-                idx_file.write_all(&MAGIC)?;
-                idx_file.write_all(&0u64.to_le_bytes())?;
-                // Open payload store for writing payload entries
-                let mut ps = PayloadStoreBuilder::open(&payload_path)?;
-                // Write trie nodes to index file, recording payload pointers to payload store
-                Self::write_node_with_pointers(root, &mut idx_file, &mut ps)?;
-                // Flush payload store to disk
-                ps.close()?;
-                Ok(())
+
+
+    /// Insert a key with an optional value `V`, storing the payload and splitting edges on partial matches.
+    /// The value is serialized into the payload store and referenced by the node.
+    pub fn insert(&mut self, key: &str, value: Option<V>) {
+        // Append payload via PayloadStoreBuilder; returns offset+1 (0 means no payload)
+        let ptr = self.payload_store.append(value)
+            .expect("payload append failed");
+  
+        // raw pointer to root for payload attachment
+        let root_ptr: *mut TrieNode = &mut self.root as *mut TrieNode;
+        let mut node: &mut TrieNode = &mut self.root;
+        let mut suffix = key;
+        loop {
+            let mut matched = false;
+            for i in 0..node.children.len() {
+                let (ref label, _) = node.children[i];
+                let lcp = Self::common_prefix_len(label, suffix);
+                if lcp == 0 {
+                    continue;
+                }
+                let (orig_label, orig_child) = node.children.remove(i);
+                if lcp < orig_label.len() {
+                    // Split edge into intermediate node
+                    let mut intermediate = TrieNode::default();
+                    let label_rem = &orig_label[lcp..];
+                    intermediate.children.push((label_rem.to_string(), orig_child));
+                    let key_rem = &suffix[lcp..];
+                    if key_rem.is_empty() {
+                        intermediate.is_end = true;
+                    } else {
+                        let mut leaf = TrieNode::default();
+                        leaf.is_end = true;
+                        intermediate.children.push((key_rem.to_string(), Box::new(leaf)));
+                    }
+                    let prefix_label = &orig_label[..lcp];
+                    node.children.insert(i, (prefix_label.to_string(), Box::new(intermediate)));
+                    // attach payload pointer to this node
+                    unsafe {
+                        if let Some(n) = Self::find_node_mut(&mut *root_ptr, key) {
+                            n.payload_ptr = Some(ptr);
+                        }
+                    }
+                    return;
+                } else {
+                    // Consume full edge label
+                    suffix = &suffix[lcp..];
+                    node.children.insert(i, (orig_label, orig_child));
+                    if suffix.is_empty() {
+                        node.children[i].1.is_end = true;
+                        // attach payload pointer to this node
+                        unsafe {
+                            if let Some(n) = Self::find_node_mut(&mut *root_ptr, key) {
+                                n.payload_ptr = Some(ptr);
+                            }
+                        }
+                        return;
+                    }
+                    node = &mut node.children[i].1;
+                    matched = true;
+                    break;
+                }
             }
-            Database::Mmap { .. } => Err(IndexError::InvalidFormat(
-                "cannot save a read-only database",
-            )),
+            if !matched {
+                // No matching edge; append new leaf
+                let mut leaf = TrieNode::default();
+                leaf.is_end = true;
+                node.children.push((suffix.to_string(), Box::new(leaf)));
+                // attach payload pointer to this node
+                unsafe {
+                    if let Some(n) = Self::find_node_mut(&mut *root_ptr, key) {
+                        n.payload_ptr = Some(ptr);
+                    }
+                }
+                return;
+            }
         }
     }
 
+    /// Finalize and write index and payload files to disk.
+    pub fn close(mut self) -> Result<()> {
+        // Write magic and placeholder payload offset
+        self.idx_file.write_all(&MAGIC)?;
+        self.idx_file.write_all(&0u64.to_le_bytes())?;
+        // Write trie nodes and payload pointers
+        Self::write_node_with_pointers(&self.root, &mut self.idx_file, &mut self.payload_store)?;
+        // Ensure payload file is flushed
+        self.payload_store.close()?;
+        Ok(())
+    }
 
+    /// Consume the builder, write files, and open a read-only Database<V> via mmap.
+    pub fn into_database(self) -> Result<Database<V>>
+    where
+        V: DeserializeOwned,
+    {
+        let base = self.base.clone();
+        self.close()?;
+        Database::<V>::open(base)
+    }
+
+}
+
+// NodeStorage implementation for on-disk, mmap-backed Database<V>
+impl<V> NodeStorage for Database<V>
+where
+    V: DeserializeOwned,
+{
+    type Handle = Handle;
+    fn root_handle(&self) -> Self::Handle {
+        // root node begins immediately after the 4-byte magic + 8-byte header
+        Handle::Mmap(HEADER_LEN)
+    }
+
+    fn is_terminal(&self, handle: &Self::Handle) -> io::Result<bool> {
+        // Only mmap-backed handles are supported
+        let Handle::Mmap(offset) = *handle;
+        Ok(self.idx.get(offset).copied().unwrap_or(0) != 0)
+    }
+
+    fn read_children(&self, handle: &Self::Handle) -> io::Result<Vec<(String, Self::Handle)>> {
+        // Only mmap-backed handles are supported
+        let Handle::Mmap(mut pos) = *handle;
+        let buf = &*self.idx;
+        // ensure we can read node header
+        if pos + NODE_HEADER_LEN > buf.len() {
+            return Ok(Vec::new());
+        }
+        // read child count (u16 LE) at byte 1..3
+        let count = u16::from_le_bytes([buf[pos + 1], buf[pos + 2]]) as usize;
+        // skip header (is_end + child_count + payload ptr)
+        pos += NODE_HEADER_LEN;
+        // read index entries: each is [first_byte (1), child_offset (8)]
+        let mut offsets = Vec::with_capacity(count);
+        for i in 0..count {
+            let ent = pos + i * INDEX_ENTRY_LEN;
+            if ent + INDEX_ENTRY_LEN > buf.len() {
+                break;
+            }
+            let off = u64::from_le_bytes(
+                buf[ent + 1..ent + 9]
+                    .try_into()
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "truncated index entry"))?
+            ) as usize;
+            offsets.push(off);
+        }
+        // collect children: read label and sub-node offset
+        let mut out = Vec::with_capacity(offsets.len());
+        for off in offsets {
+            let mut p = off;
+            if p + LABEL_LEN_LEN > buf.len() {
+                continue;
+            }
+            let l = u16::from_le_bytes([buf[p], buf[p + 1]]) as usize;
+            p += LABEL_LEN_LEN;
+            if p + l > buf.len() {
+                continue;
+            }
+            let label = std::str::from_utf8(&buf[p..p + l])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                .to_string();
+            // next byte offset marks the start of this child's subtree
+            out.push((label, Handle::Mmap(p + l)));
+        }
+        out.sort_by(|a, b| b.0.cmp(&a.0));
+        Ok(out)
+    }
+}
+
+// Implement the generic TrieBackend trait for the mmap-backed Database<V>
+impl<V> TrieBackend for Database<V>
+where
+    V: DeserializeOwned,
+{
+    type Handle = Handle;
+    fn find_prefix(&self, prefix: &str) -> Option<GenericFindResult<Self::Handle>> {
+        generic_find_prefix(self, prefix).ok().flatten()
+    }
+    fn is_end(&self, handle: &Self::Handle) -> bool {
+        NodeStorage::is_terminal(self, handle).unwrap_or(false)
+    }
+    fn children(&self, handle: &Self::Handle) -> Vec<(String, Self::Handle)> {
+        generic_children(self, handle).unwrap_or_default()
+    }
+}
+
+// Inherent implementation of Index methods
+impl<V> Database<V>
+where
+    V: DeserializeOwned,
+{
+    /// Open an indexed radix trie via mmap.
+    /// If separate index (.idx) and payload (.payload) files are present under the given base path, they will be opened.
+    /// Otherwise, a combined index file is expected at the given path, beginning with the 4-byte MAGIC header "IDX1",
+    /// followed by an 8-byte payload section start offset (u64 LE).
+    /// Open a read-only database via mmap. Expects separate index (.idx) and payload (.payload) files.
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let base = path.as_ref();
+        let idx_path = base.with_extension("idx");
+        let payload_path = base.with_extension("payload");
+        // Open and map index file
+        let idx_file = File::open(&idx_path)?;
+        let idx_mmap = unsafe { Mmap::map(&idx_file)? };
+        // Check magic header in index file
+        if idx_mmap.len() < MAGIC.len() || &idx_mmap[..MAGIC.len()] != &MAGIC {
+            return Err(IndexError::InvalidFormat("missing or corrupt magic header"));
+        }
+        // Open payload store for reading
+        let payload_store = PayloadStore::open(&payload_path)?;
+        Ok(Database { idx: Arc::new(idx_mmap), payload: payload_store })
+    }
+    
+    /// Streaming interface over entries under `prefix`, grouping at the first `delimiter`.
+    pub fn list(&self, prefix: &str, delimiter: Option<char>) -> impl Streamer<Item = Entry> {
+        <Self as TrieBackend>::list_iter(self, prefix, delimiter)
+    }
+
+    /// Get the deserialized payload of type V stored under `key`, if any.
+    pub fn get_value(&self, key: &str) -> Result<Option<V>> {
+        if let Some(GenericFindResult::Node(handle)) = <Self as TrieBackend>::find_prefix(self, key) {
+            // Locate pointer in node header: is_end (1) + child_count (2)
+            // payload pointer is at off + 1 + 2
+            let Handle::Mmap(off) = handle;
+            let ptr_pos = off + 1 + 2;
+            if ptr_pos + 8 > self.idx.len() {
+                return Err(IndexError::InvalidFormat("truncated payload pointer"));
+            }
+            let ptr_bytes: [u8; 8] = self.idx[ptr_pos..ptr_pos + 8]
+                .try_into()
+                .map_err(|_| IndexError::InvalidFormat("invalid payload pointer"))?;
+            let ptr_val = u64::from_le_bytes(ptr_bytes);
+            // Retrieve payload data via payload store
+            let v_opt = self.payload.get(ptr_val)
+                .map_err(IndexError::Io)?;
+            Ok(v_opt)
+        } else {
+            Ok(None)
+        }
+    }
 } // end impl Trie
 
-/// A listing entry returned by `Index::list`: either a full key or a grouped prefix.
+/// A listing entry returned by `Database::list`: either a key or a grouped prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
     /// A complete key (an inserted string).
