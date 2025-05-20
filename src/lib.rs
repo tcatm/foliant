@@ -1,13 +1,15 @@
 #![allow(private_interfaces)]
 use std::collections::HashSet;
-use std::io::{self, Write, Seek, SeekFrom, Cursor};
+use std::io::{self, Write, Seek, SeekFrom};
 use std::fs::File;
+use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
 use memmap2::Mmap;
 use std::convert::TryInto;
 use std::fmt;
 use serde_cbor;
+use serde::Serialize;
 pub use serde_cbor::Value as Value;
 
 /// Error type for the index library.
@@ -239,15 +241,14 @@ pub enum Database {
 
 /// Builder for creating a new on-disk database. Use `new(path)` to begin,
 /// call `insert(key, value)` as needed, then `close()` to write index and payload files.
-/// Builder for creating a new on-disk database. Use `new(path)` to begin,
-/// call `insert(key, value)` as needed, then `close()` to write index and payload files.
-pub struct DatabaseBuilder {
+pub struct DatabaseBuilder<V: Serialize> {
     root: TrieNode,
     idx_file: File,
     payload_store: PayloadStoreBuilder,
+    phantom: PhantomData<V>
 }
 
-impl DatabaseBuilder {
+impl<V: Serialize> DatabaseBuilder<V> {
     /// Create a new database builder writing to <base>.idx and <base>.payload (truncating existing).
     pub fn new<P: AsRef<Path>>(base: P) -> Result<Self> {
         let base = base.as_ref();
@@ -260,11 +261,14 @@ impl DatabaseBuilder {
             root: TrieNode::default(),
             idx_file,
             payload_store,
+            phantom: PhantomData,
         })
     }
 
-    /// Insert a key with optional CBOR payload into the trie.
-    pub fn insert(&mut self, key: &str, value: Option<Vec<u8>>) {
+    /// Insert a key with optional serializable payload into the trie.
+    pub fn insert(&mut self, key: &str, value: Option<V>)
+
+    {
         // In-memory insert logic on root
         let mut builder = Database::InMemory { root: self.root.clone() };
         builder.insert(key, value);
@@ -413,10 +417,16 @@ impl Database {
         <Self as TrieBackend>::list_iter(self, prefix, delimiter)
     }
 
-    /// Insert a key with an optional CBOR payload into the radix trie, splitting edges on partial matches.
-    pub fn insert(&mut self, key: &str, value: Option<Vec<u8>>) {
+    /// Insert a key with optional CBOR payload into the radix trie, splitting edges on partial matches.
+    /// The payload should be raw CBOR-encoded bytes, or None for no payload.
+    pub fn insert<V>(&mut self, key: &str, value: Option<V>)
+    where
+        V: Serialize,
+    {
         // Prepare payload and insertion pointers
-        let mut payload = value;
+        let mut payload = serde_cbor::to_vec(&value)
+            .map_err(|_| IndexError::InvalidFormat("invalid CBOR payload"))
+            .ok();
         match self {
             Database::InMemory { root } => {
                 // raw pointer to root for payload attachment
@@ -503,9 +513,9 @@ impl Database {
             Database::InMemory { root } => {
                 if let Some(node) = Self::find_node(root, key) {
                     if let Some(bytes) = node.value.as_deref() {
-                        let v: Value = serde_cbor::from_slice(bytes)
+                        let opt_v: Option<Value> = serde_cbor::from_slice(bytes)
                             .map_err(|_| IndexError::InvalidFormat("invalid CBOR payload"))?;
-                        Ok(Some(v))
+                        Ok(opt_v)
                     } else {
                         Ok(None)
                     }
@@ -527,9 +537,9 @@ impl Database {
                     let ptr_val = u64::from_le_bytes(ptr_bytes);
                     // Retrieve payload data via payload store
                     if let Some(bytes) = payload.clone().get(ptr_val)? {
-                        let v: Value = serde_cbor::from_slice(&bytes)
+                        let opt_v: Option<Value> = serde_cbor::from_slice(&bytes)
                             .map_err(|_| IndexError::InvalidFormat("invalid CBOR payload"))?;
-                        Ok(Some(v))
+                        Ok(opt_v)
                     } else {
                         Ok(None)
                     }

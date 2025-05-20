@@ -10,9 +10,9 @@ fn long_common_prefix_keys() {
     let mut db = Database::new();
     let words = ["compression", "complete", "companion"];
     for &w in &words {
-        db.insert(w, None);
+        db.insert(w, None::<Vec<u8>>);
     }
-    let mut result: Vec<Entry> = db.list("com", None).collect();
+    let mut result: Vec<Entry> = db.list("com", None::<char>).collect();
     result.sort();
     let mut expected: Vec<Entry> = words
         .iter()
@@ -27,7 +27,7 @@ fn serialize_deserialize_roundtrip() {
     let mut db = Database::new();
     let keys = ["", "a", "ab", "abc", "compression", "companion"];
     for &k in &keys {
-        db.insert(k, None);
+        db.insert(k, None::<Vec<u8>>);
     }
     // Serialize to buffer, write to temp file, and reload via mmap
     let dir = tempdir().expect("temp dir");
@@ -35,9 +35,9 @@ fn serialize_deserialize_roundtrip() {
     db.save(&base).unwrap();
     let db2 = Database::open(&base).unwrap();
     // Compare listings
-    let mut orig: Vec<Entry> = db.list("", None).collect();
+    let mut orig: Vec<Entry> = db.list("", None::<char>).collect();
     orig.sort();
-    let mut de: Vec<Entry> = db2.list("", None).collect();
+    let mut de: Vec<Entry> = db2.list("", None::<char>).collect();
     de.sort();
     assert_eq!(orig, de);
     // Also test some prefixes
@@ -55,10 +55,10 @@ fn listing_mid_edge_prefix() {
     let mut db = Database::new();
     let words = ["compression", "complete"];
     for &w in &words {
-        db.insert(w, None);
+        db.insert(w, None::<Vec<u8>>);
     }
     // Prefix that ends in the middle of an edge label in a compressed db
-    let mut result: Vec<Entry> = db.list("comp", None).collect();
+    let mut result: Vec<Entry> = db.list("comp", None::<char>).collect();
     result.sort();
     let mut expected: Vec<Entry> = words
         .iter()
@@ -68,7 +68,7 @@ fn listing_mid_edge_prefix() {
     assert_eq!(result, expected);
 
     // Longer prefix matching only one key
-    let mut res2: Vec<Entry> = db.list("compre", None).collect();
+    let mut res2: Vec<Entry> = db.list("compre", None::<char>).collect();
     res2.sort();
     let expected2: Vec<Entry> = vec!["compression"]
         .into_iter()
@@ -80,9 +80,9 @@ fn listing_mid_edge_prefix() {
 #[test]
 fn splitting_on_partial_overlap() {
     let mut db = Database::new();
-    db.insert("test", None);
-    db.insert("team", None);
-    let mut result: Vec<Entry> = db.list("te", None).collect();
+    db.insert("test", None::<Vec<u8>>);
+    db.insert("team", None::<Vec<u8>>);
+    let mut result: Vec<Entry> = db.list("te", None::<char>).collect();
     result.sort();
     let mut expected: Vec<Entry> = vec!["test", "team"]
         .into_iter()
@@ -101,7 +101,7 @@ fn delimiter_grouping_after_compression() {
         "dir2/file3",
     ];
     for &p in &paths {
-        db.insert(p, None);
+        db.insert(p, None::<Vec<u8>>);
     }
     // Top-level grouping on '/'
     let mut top: Vec<Entry> = db.list("", Some('/')).collect();
@@ -126,8 +126,8 @@ fn delimiter_grouping_after_compression() {
 #[test]
 fn empty_key() {
     let mut db = Database::new();
-    db.insert("", None);
-    let mut result: Vec<Entry> = db.list("", None).collect();
+    db.insert("", None::<Vec<u8>>);
+    let mut result: Vec<Entry> = db.list("", None::<char>).collect();
     result.sort();
     assert_eq!(result, vec![Entry::Key("".to_string())]);
 }
@@ -135,9 +135,9 @@ fn empty_key() {
 #[test]
 fn duplicate_insert() {
     let mut db = Database::new();
-    db.insert("repeat", None);
-    db.insert("repeat", None);
-    let mut result: Vec<Entry> = db.list("", None).collect();
+    db.insert("repeat", None::<Vec<u8>>);
+    db.insert("repeat", None::<Vec<u8>>);
+    let mut result: Vec<Entry> = db.list("", None::<char>).collect();
     result.sort();
     assert_eq!(result, vec![Entry::Key("repeat".to_string())]);
 }
@@ -146,20 +146,20 @@ fn duplicate_insert() {
 fn prefix_key_cases() {
     let mut db = Database::new();
     let keys = ["a", "ab", "abc"];
-    for &k in &keys { db.insert(k, None); }
-    let mut r1: Vec<Entry> = db.list("a", None).collect();
+    for &k in &keys { db.insert(k, None::<Vec<u8>>); }
+    let mut r1: Vec<Entry> = db.list("a", None::<char>).collect();
     r1.sort();
     let expected1: Vec<Entry> = keys.iter().map(|&s| Entry::Key(s.to_string())).collect();
     assert_eq!(r1, expected1);
-    let mut r2: Vec<Entry> = db.list("ab", None).collect();
+    let mut r2: Vec<Entry> = db.list("ab", None::<char>).collect();
     r2.sort();
     let expected2: Vec<Entry> = ["ab", "abc"].iter().map(|&s| Entry::Key(s.to_string())).collect();
     assert_eq!(r2, expected2);
-    let mut r3: Vec<Entry> = db.list("abc", None).collect();
+    let mut r3: Vec<Entry> = db.list("abc", None::<char>).collect();
     r3.sort();
     let expected3 = vec![Entry::Key("abc".to_string())];
     assert_eq!(r3, expected3);
-    let mut r4: Vec<Entry> = db.list("abcd", None).collect();
+    let mut r4: Vec<Entry> = db.list("abcd", None::<char>).collect();
     r4.sort();
     assert!(r4.is_empty());
 }
@@ -167,8 +167,8 @@ fn prefix_key_cases() {
 #[test]
 fn ordering_of_keys() {
     let mut db = Database::new();
-    for &k in &["b", "a", "c"] { db.insert(k, None); }
-    let mut result: Vec<Entry> = db.list("", None).collect();
+    for &k in &["b", "a", "c"] { db.insert(k, None::<Vec<u8>>); }
+    let mut result: Vec<Entry> = db.list("", None::<char>).collect();
     result.sort();
     let expected = vec![
         Entry::Key("a".to_string()),
@@ -181,8 +181,8 @@ fn ordering_of_keys() {
 #[test]
 fn nonexistent_prefix_radix() {
     let mut db = Database::new();
-    db.insert("hello", None);
-    let mut result: Vec<Entry> = db.list("helz", None).collect();
+    db.insert("hello", None::<Vec<u8>>);
+    let mut result: Vec<Entry> = db.list("helz", None::<char>).collect();
     result.sort();
     assert!(result.is_empty());
 }
@@ -191,8 +191,8 @@ fn nonexistent_prefix_radix() {
 fn unicode_keys() {
     let mut db = Database::new();
     let words = ["こんにちは", "こんばんは", "こん"];
-    for &w in &words { db.insert(w, None); }
-    let mut result: Vec<Entry> = db.list("こん", None).collect();
+    for &w in &words { db.insert(w, None::<Vec<u8>>); }
+    let mut result: Vec<Entry> = db.list("こん", None::<char>).collect();
     result.sort();
     let mut expected: Vec<Entry> = words.iter().map(|&s| Entry::Key(s.to_string())).collect();
     expected.sort();
@@ -203,13 +203,13 @@ fn unicode_keys() {
 fn unicode_common_prefix() {
     let mut db = Database::new();
     let words = ["🤖robot", "🤖romantic"];
-    for &w in &words { db.insert(w, None); }
-    let mut r1: Vec<Entry> = db.list("🤖", None).collect();
+    for &w in &words { db.insert(w, None::<Vec<u8>>); }
+    let mut r1: Vec<Entry> = db.list("🤖", None::<char>).collect();
     r1.sort();
     let mut exp1: Vec<Entry> = words.iter().map(|&s| Entry::Key(s.to_string())).collect();
     exp1.sort();
     assert_eq!(r1, exp1);
-    let mut r2: Vec<Entry> = db.list("🤖rob", None).collect();
+    let mut r2: Vec<Entry> = db.list("🤖rob", None::<char>).collect();
     r2.sort();
     assert_eq!(r2, vec![Entry::Key("🤖robot".to_string())]);
 }
@@ -218,7 +218,7 @@ fn unicode_common_prefix() {
 fn multi_delimiter_grouping() {
     let mut db = Database::new();
     let paths = ["foo/bar/baz", "foo/bar/qux"];
-    for &p in &paths { db.insert(p, None); }
+    for &p in &paths { db.insert(p, None::<Vec<u8>>); }
     let mut r1: Vec<Entry> = db.list("foo/", Some('/')).collect();
     r1.sort();
     let exp1 = vec![Entry::CommonPrefix("foo/bar/".to_string())];
@@ -233,7 +233,7 @@ fn multi_delimiter_grouping() {
 fn delimiter_edge_cases() {
     let mut db = Database::new();
     let paths = ["/a", "b/"];
-    for &p in &paths { db.insert(p, None); }
+    for &p in &paths { db.insert(p, None::<Vec<u8>>); }
     let mut r1: Vec<Entry> = db.list("", Some('/')).collect();
     r1.sort();
     let exp1 = vec![
@@ -249,9 +249,9 @@ fn delimiter_edge_cases() {
 #[test]
 fn only_delimiter_key() {
     let mut db = Database::new();
-    db.insert("/", None);
+    db.insert("/", None::<Vec<u8>>);
     // Plain listing
-    let mut plain: Vec<Entry> = db.list("", None).collect();
+    let mut plain: Vec<Entry> = db.list("", None::<char>).collect();
     plain.sort();
     assert_eq!(plain, vec![Entry::Key("/".to_string())]);
     // Grouping at root
@@ -262,7 +262,7 @@ fn only_delimiter_key() {
     let mut after_grp: Vec<Entry> = db.list("/", Some('/')).collect();
     after_grp.sort();
     assert_eq!(after_grp, vec![Entry::CommonPrefix("/".to_string())]);
-    let mut after_plain: Vec<Entry> = db.list("/", None).collect();
+    let mut after_plain: Vec<Entry> = db.list("/", None::<char>).collect();
     after_plain.sort();
     assert_eq!(after_plain, vec![Entry::Key("/".to_string())]);
 }
@@ -270,7 +270,7 @@ fn only_delimiter_key() {
 #[test]
 fn trailing_delimiter_key() {
     let mut db = Database::new();
-    db.insert("a/", None);
+    db.insert("a/", None::<Vec<u8>>);
     // Grouping at root should yield the full 'a/' as a common prefix
     let mut grp: Vec<Entry> = db.list("", Some('/')).collect();
     grp.sort();
@@ -280,7 +280,7 @@ fn trailing_delimiter_key() {
     after.sort();
     assert_eq!(after, vec![Entry::CommonPrefix("a/".to_string())]);
     // Plain listing still returns the key
-    let mut plain: Vec<Entry> = db.list("", None).collect();
+    let mut plain: Vec<Entry> = db.list("", None::<char>).collect();
     plain.sort();
     assert_eq!(plain, vec![Entry::Key("a/".to_string())]);
 }
@@ -289,7 +289,7 @@ fn trailing_delimiter_key() {
 fn delimiter_at_start_and_end() {
     let mut db = Database::new();
     let key = "/start/";
-    db.insert(key, None);
+    db.insert(key, None::<Vec<u8>>);
     // Grouping at root picks up first '/'
     let mut root_grp: Vec<Entry> = db.list("", Some('/')).collect();
     root_grp.sort();
@@ -307,7 +307,7 @@ fn delimiter_at_start_and_end() {
 #[test]
 fn multiple_leading_delimiters() {
     let mut db = Database::new();
-    db.insert("//foo", None);
+    db.insert("//foo", None::<Vec<u8>>);
     // At root, first slash groups '/'
     let mut r1: Vec<Entry> = db.list("", Some('/')).collect();
     r1.sort();

@@ -6,8 +6,7 @@ use std::time::{Instant, Duration};
 // On-disk index support moved to library
 use foliant::{Database, DatabaseBuilder, Entry};
 use foliant::Streamer;
-use serde_cbor;
-use serde_json;
+use serde_json::{self, ser};
 
 /// A simple CLI for building and querying a Trie index.
 #[derive(Parser)]
@@ -51,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Index { index, input, json } => {
             // Build the database on-disk via builder, measuring throughput
-            let mut builder = DatabaseBuilder::new(&index)?;
+            let mut builder = DatabaseBuilder::<serde_json::Value>::new(&index)?;
             let reader: Box<dyn BufRead> = if let Some(input_path) = input {
                 Box::new(BufReader::new(File::open(input_path)?))
             } else {
@@ -78,10 +77,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .ok_or_else(|| format!("missing key field '{}'", keyname))?;
                     let key_str = key_val.as_str()
                         .ok_or_else(|| format!("key field '{}' is not a string", keyname))?;
-                    // Serialize remaining object to CBOR bytes
-                    let cbor = serde_cbor::to_vec(&jv)?;
-                    builder.insert(key_str, Some(cbor));
+                    // Serialize remaining JSON object to CBOR bytes and insert
+                    builder.insert(key_str, Some(jv));
                 } else {
+                    // No JSON key: insert without payload
                     builder.insert(&line, None);
                 }
                 // periodic progress report

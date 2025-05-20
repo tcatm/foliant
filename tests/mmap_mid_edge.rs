@@ -8,8 +8,8 @@ use tempfile::tempdir;
 fn mid_edge_prefix_mmap() {
     // Build a small trie with a compressed edge "abcd"
     let mut db = Database::new();
-    db.insert("abcdx", None);
-    db.insert("abcde", None);
+    db.insert("abcdx", None::<Vec<u8>>);
+    db.insert("abcde", None::<Vec<u8>>);
 
     // Serialize to disk and load via mmap
     let dir = tempdir().expect("temp dir");
@@ -25,12 +25,12 @@ fn mid_edge_prefix_mmap() {
     ];
 
     // In-memory listing
-    let mut mem: Vec<Entry> = db.list("abc", None).collect();
+    let mut mem: Vec<Entry> = db.list("abc", None::<char>).collect();
     mem.sort();
     assert_eq!(mem, expected, "in-memory trie mismatch");
 
     // Mmap listing
-    let mut mm: Vec<Entry> = mtrie.list("abc", None).collect();
+    let mut mm: Vec<Entry> = mtrie.list("abc", None::<char>).collect();
     mm.sort();
     assert_eq!(mm, expected, "mmap trie mismatch");
 

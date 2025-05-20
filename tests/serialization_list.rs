@@ -16,7 +16,7 @@ fn serialize_and_mmap_list() {
         "gamma/epsilon",
     ];
     for &k in &keys {
-        db.insert(k, None);
+        db.insert(k, None::<Vec<u8>>);
     }
 
     // Serialize to disk and load via mmap
@@ -26,8 +26,8 @@ fn serialize_and_mmap_list() {
     let mdb = Database::open(&base).unwrap();
 
     // Compare listings without delimiter
-    let mut list_mem: Vec<Entry> = db.list("", None).collect();
-    let mut list_mmap: Vec<Entry> = mdb.list("", None).collect();
+    let mut list_mem: Vec<Entry> = db.list("", None::<char>).collect();
+    let mut list_mmap: Vec<Entry> = mdb.list("", None::<char>).collect();
     list_mem.sort();
     list_mmap.sort();
     assert_eq!(list_mem, list_mmap);
@@ -47,7 +47,7 @@ fn serialize_and_mmap_list_prefix_a() {
     let mut db = Database::new();
     let keys = ["a1", "a2", "a3", "b1"];
     for &k in &keys {
-    db.insert(k, None);
+    db.insert(k, None::<Vec<u8>>);
     }
 
     // Serialize to disk and load via mmap
@@ -57,8 +57,8 @@ fn serialize_and_mmap_list_prefix_a() {
     let mdb = Database::open(&base).unwrap();
 
     // List entries with prefix "a"
-    let mut list_mem: Vec<Entry> = db.list("a", None).collect();
-    let mut list_mmap: Vec<Entry> = mdb.list("a", None).collect();
+    let mut list_mem: Vec<Entry> = db.list("a", None::<char>).collect();
+    let mut list_mmap: Vec<Entry> = mdb.list("a", None::<char>).collect();
     list_mem.sort();
     list_mmap.sort();
 

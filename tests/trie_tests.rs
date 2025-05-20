@@ -6,9 +6,9 @@ fn insert_and_list_no_delimiter() {
     let mut trie = Database::new();
     let words = ["app", "apple", "appetite", "banana", "band", "bandage", "bandana"];
     for &w in &words {
-        trie.insert(w, None);
+        trie.insert(w, None::<Vec<u8>>);
     }
-    let mut result: Vec<Entry> = trie.list("", None).collect();
+    let mut result: Vec<Entry> = trie.list("", None::<char>).collect();
     result.sort();
     let mut expected: Vec<Entry> = words
         .iter()
@@ -17,7 +17,7 @@ fn insert_and_list_no_delimiter() {
     expected.sort();
     assert_eq!(result, expected);
 
-    let mut app_list: Vec<Entry> = trie.list("app", None).collect();
+    let mut app_list: Vec<Entry> = trie.list("app", None::<char>).collect();
     app_list.sort();
     let mut expected_app: Vec<Entry> = ["app", "apple", "appetite"]
         .iter()
@@ -30,11 +30,11 @@ fn insert_and_list_no_delimiter() {
 #[test]
 fn list_with_delimiter() {
     let mut trie = Database::new();
-    trie.insert("foo/bar/1", None);
-    trie.insert("foo/bar/2", None);
-    trie.insert("foo/baz/1", None);
-    trie.insert("foobar", None);
-    let mut list_all: Vec<Entry> = trie.list("foo", None).collect();
+    trie.insert("foo/bar/1", None::<Vec<u8>>);
+    trie.insert("foo/bar/2", None::<Vec<u8>>);
+    trie.insert("foo/baz/1", None::<Vec<u8>>);
+    trie.insert("foobar", None::<Vec<u8>>);
+    let mut list_all: Vec<Entry> = trie.list("foo", None::<char>).collect();
     list_all.sort();
     let expected_all: Vec<Entry> = vec![
         Entry::Key("foo/bar/1".to_string()),
@@ -56,8 +56,8 @@ fn list_with_delimiter() {
 #[test]
 fn nonexistent_prefix() {
     let mut trie = Database::new();
-    trie.insert("hello", None);
-    let mut result: Vec<Entry> = trie.list("world", None).collect();
+    trie.insert("hello", None::<Vec<u8>>);
+    let mut result: Vec<Entry> = trie.list("world", None::<char>).collect();
     result.sort();
     assert!(result.is_empty());
 }
@@ -72,7 +72,7 @@ fn sample_path_delimiter_query() {
         "readme.md",
     ];
     for &p in &paths {
-        trie.insert(p, None);
+        trie.insert(p, None::<Vec<u8>>);
     }
     let mut top: Vec<Entry> = trie.list("", Some('/')).collect();
     top.sort();

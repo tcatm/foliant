@@ -6,17 +6,15 @@ use tempfile::tempdir;
 #[test]
 fn in_memory_value_roundtrip() {
     let mut db = Database::new();
-    // Insert an integer and a string as CBOR values
-    let v_int = serde_cbor::to_vec(&42u8).unwrap();
-    let v_str = serde_cbor::to_vec(&"hello".to_string()).unwrap();
-    db.insert("alpha", Some(v_int));
-    db.insert("beta", Some(v_str));
-    db.insert("gamma", None);
+    // Insert integer and string values directly
+    db.insert("alpha", Some(Value::Integer(42)));
+    db.insert("beta", Some(Value::Text("hello".to_string())));
+    db.insert("gamma", None::<Value>);
     // Retrieve decoded values
     assert_eq!(db.get_value("alpha").unwrap(), Some(Value::Integer(42)));
     assert_eq!(db.get_value("beta").unwrap(), Some(Value::Text("hello".to_string())));
-    assert_eq!(db.get_value("gamma").unwrap(), None);
-    assert_eq!(db.get_value("delta").unwrap(), None);
+    assert_eq!(db.get_value("gamma").unwrap(), None::<Value>);
+    assert_eq!(db.get_value("delta").unwrap(), None::<Value>);
     // Serialize to disk and read back via mmap
     let dir = tempdir().expect("temp dir");
     let base = dir.path().join("db");
@@ -24,7 +22,7 @@ fn in_memory_value_roundtrip() {
     let db2 = Database::open(&base).unwrap();
     assert_eq!(db2.get_value("alpha").unwrap(), Some(Value::Integer(42)));
     assert_eq!(db2.get_value("beta").unwrap(), Some(Value::Text("hello".to_string())));
-    assert_eq!(db2.get_value("gamma").unwrap(), None);
+    assert_eq!(db2.get_value("gamma").unwrap(), None::<Value>);
 }
 
 /// Test retrieving CBOR values via memory-mapped trie.
@@ -35,11 +33,16 @@ fn mmap_value_access() {
     let base = dir.path().join("db");
     // Initialize database builder
     let mut builder = DatabaseBuilder::new(&base).unwrap();
-    // Boolean and array types
-    let v_bool = serde_cbor::to_vec(&true).unwrap();
-    let v_arr = serde_cbor::to_vec(&vec![1u8,2,3]).unwrap();
-    builder.insert("x", Some(v_bool));
-    builder.insert("y", Some(v_arr));
+    // Boolean and array types inserted directly
+    builder.insert("x", Some(Value::Bool(true)));
+    builder.insert(
+        "y",
+        Some(Value::Array(vec![
+            Value::Integer(1),
+            Value::Integer(2),
+            Value::Integer(3),
+        ])),
+    );
     // Serialize to disk and load via mmap
     builder.close().unwrap();
     let mdb = Database::open(&base).unwrap();
@@ -48,5 +51,5 @@ fn mmap_value_access() {
     assert_eq!(mdb.get_value("y").unwrap(), Some(Value::Array(vec![
         Value::Integer(1), Value::Integer(2), Value::Integer(3)
     ])));
-    assert_eq!(mdb.get_value("z").unwrap(), None);
+    assert_eq!(mdb.get_value("z").unwrap(), None::<Value>);
 }
