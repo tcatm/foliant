@@ -52,7 +52,9 @@ impl From<io::Error> for IndexError {
 /// Result type for index operations.
 pub type Result<T> = std::result::Result<T, IndexError>;
 mod storage;
+mod payload_store;
 use storage::{NodeStorage, generic_find_prefix, generic_children};
+use payload_store::{PayloadStore, MmapPayloadStore};
 
 // Magic header for the new indexed format: 4 bytes, 'I','D','X','1'
 // Followed by 8-byte payload section start offset (u64 LE)
@@ -226,37 +228,39 @@ where
 ///
 /// Supports both in-memory construction and on-disk memory-mapped queries.
 #[derive(Clone)]
-pub enum Index {
-    /// In-memory index built via `new()`, `insert()`, etc.
+/// Database structure for strings, backed by a radix trie.
+/// Supports both in-memory construction and on-disk memory-mapped queries.
+pub enum Database {
+    /// In-memory database built via `new()` and `insert()`.
     InMemory { root: TrieNode },
-    /// Read-only memory-mapped index loaded via `open()`, zero-copy listing.
-    Mmap { buf: Arc<Mmap>, payload_offset: usize },
+    /// Read-only memory-mapped database loaded via `open()`, zero-copy listing.
+    Mmap { idx: Arc<Mmap>, payload: Arc<Mmap> },
 }
 
-// Unified NodeStorage implementation for both in-memory and memory-mapped Index
-impl NodeStorage for Index {
+// Unified NodeStorage implementation for both in-memory and memory-mapped Database
+impl NodeStorage for Database {
     type Handle = Handle;
     fn root_handle(&self) -> Self::Handle {
         match self {
-            Index::InMemory { root } => Handle::Mem(root as *const TrieNode),
-            Index::Mmap { .. } => Handle::Mmap(HEADER_LEN),
+            Database::InMemory { root } => Handle::Mem(root as *const TrieNode),
+            Database::Mmap { .. } => Handle::Mmap(HEADER_LEN),
         }
     }
     fn is_terminal(&self, handle: &Self::Handle) -> io::Result<bool> {
         match (self, handle) {
-            (Index::InMemory { .. }, Handle::Mem(ptr)) => {
+            (Database::InMemory { .. }, Handle::Mem(ptr)) => {
                 let node = unsafe { &**ptr };
                 Ok(node.is_end)
             }
-            (Index::Mmap { buf, payload_offset: _ }, Handle::Mmap(offset)) => {
-                Ok(buf.get(*offset).copied().unwrap_or(0) != 0)
+            (Database::Mmap { idx, .. }, Handle::Mmap(offset)) => {
+                Ok(idx.get(*offset).copied().unwrap_or(0) != 0)
             }
             _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid handle")),
         }
     }
     fn read_children(&self, handle: &Self::Handle) -> io::Result<Vec<(String, Self::Handle)>> {
         match (self, handle) {
-            (Index::InMemory { .. }, Handle::Mem(ptr)) => {
+            (Database::InMemory { .. }, Handle::Mem(ptr)) => {
                 let node = unsafe { &**ptr };
                 let mut out = Vec::with_capacity(node.children.len());
                 for (label, child) in &node.children {
@@ -266,24 +270,24 @@ impl NodeStorage for Index {
                 out.sort_by(|a, b| b.0.cmp(&a.0));
                 Ok(out)
             }
-            (Index::Mmap { buf, payload_offset: _ }, Handle::Mmap(mut pos)) => {
+            (Database::Mmap { idx, .. }, Handle::Mmap(mut pos)) => {
                 // ensure we can read node header
-                if pos + NODE_HEADER_LEN > buf.len() {
+                if pos + NODE_HEADER_LEN > idx.len() {
                     return Ok(Vec::new());
                 }
                 // read child count
-                let count = u16::from_le_bytes([buf[pos + 1], buf[pos + 2]]) as usize;
+                let count = u16::from_le_bytes([idx[pos + 1], idx[pos + 2]]) as usize;
                 // skip header (is_end + child_count + payload ptr)
                 pos += NODE_HEADER_LEN;
                 // read index entries: each is [first_byte (1), child_offset (8)]
                 let mut offsets = Vec::with_capacity(count);
                 for i in 0..count {
                     let ent = pos + i * INDEX_ENTRY_LEN;
-                    if ent + INDEX_ENTRY_LEN > buf.len() {
+                    if ent + INDEX_ENTRY_LEN > idx.len() {
                         break;
                     }
                     let off = u64::from_le_bytes(
-                        buf[ent + 1..ent + 9]
+                        idx[ent + 1..ent + 9]
                             .try_into()
                             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "truncated index entry"))?
                     ) as usize;
@@ -292,15 +296,15 @@ impl NodeStorage for Index {
                 let mut out = Vec::with_capacity(offsets.len());
                 for off in offsets {
                     let mut p = off;
-                    if p + LABEL_LEN_LEN > buf.len() {
+                    if p + LABEL_LEN_LEN > idx.len() {
                         continue;
                     }
-                    let l = u16::from_le_bytes([buf[p], buf[p + 1]]) as usize;
+                    let l = u16::from_le_bytes([idx[p], idx[p + 1]]) as usize;
                     p += LABEL_LEN_LEN;
-                    if p + l > buf.len() {
+                    if p + l > idx.len() {
                         continue;
                     }
-                    let label = std::str::from_utf8(&buf[p..p + l])
+                    let label = std::str::from_utf8(&idx[p..p + l])
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
                         .to_string();
                     out.push((label, Handle::Mmap(p + l)));
@@ -312,8 +316,8 @@ impl NodeStorage for Index {
         }
     }
 }
-// Implement the generic TrieBackend trait for the unified Index
-impl TrieBackend for Index {
+// Implement the generic TrieBackend trait for the unified Database
+impl TrieBackend for Database {
     type Handle = Handle;
     fn find_prefix(&self, prefix: &str) -> Option<GenericFindResult<Self::Handle>> {
         generic_find_prefix(self, prefix).ok().flatten()
@@ -327,34 +331,32 @@ impl TrieBackend for Index {
 }
 
 // Inherent implementation of Index methods
-impl Index {
+impl Database {
     /// Create a new, empty in-memory Trie.
     pub fn new() -> Self {
-        Index::InMemory { root: TrieNode::default() }
+        Database::InMemory { root: TrieNode::default() }
     }
     
-    /// Open a serialized indexed radix trie from disk via mmap.
-    /// Expects the file to begin with the 4-byte MAGIC header "IDX1".
+    /// Open an indexed radix trie via mmap.
+    /// If separate index (.idx) and payload (.payload) files are present under the given base path, they will be opened.
+    /// Otherwise, a combined index file is expected at the given path, beginning with the 4-byte MAGIC header "IDX1",
+    /// followed by an 8-byte payload section start offset (u64 LE).
+    /// Open a read-only database via mmap. Expects separate index (.idx) and payload (.payload) files.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let file = File::open(path)?;
-        // SAFETY: file is not modified
-        let mmap = unsafe { Mmap::map(&file)? };
-        // Check magic
-        if mmap.len() < MAGIC.len() || &mmap[..MAGIC.len()] != &MAGIC {
+        let base = path.as_ref();
+        let idx_path = base.with_extension("idx");
+        let payload_path = base.with_extension("payload");
+        // Open and map index file
+        let idx_file = File::open(&idx_path)?;
+        let idx_mmap = unsafe { Mmap::map(&idx_file)? };
+        // Check magic header in index file
+        if idx_mmap.len() < MAGIC.len() || &idx_mmap[..MAGIC.len()] != &MAGIC {
             return Err(IndexError::InvalidFormat("missing or corrupt magic header"));
         }
-        // Read payload section start offset (u64 LE) after magic
-        if mmap.len() < HEADER_LEN {
-            return Err(IndexError::InvalidFormat("truncated header"));
-        }
-        let off_bytes: [u8; 8] = mmap[MAGIC.len()..HEADER_LEN]
-            .try_into()
-            .map_err(|_| IndexError::InvalidFormat("invalid payload offset"))?;
-        let payload_offset = u64::from_le_bytes(off_bytes) as usize;
-        if payload_offset > mmap.len() {
-            return Err(IndexError::InvalidFormat("payload offset out of range"));
-        }
-        Ok(Index::Mmap { buf: Arc::new(mmap), payload_offset })
+        // Open and map payload file
+        let payload_file = File::open(&payload_path)?;
+        let payload_mmap = unsafe { Mmap::map(&payload_file)? };
+        Ok(Database::Mmap { idx: Arc::new(idx_mmap), payload: Arc::new(payload_mmap) })
     }
     
     /// Streaming interface over entries under `prefix`, grouping at the first `delimiter`.
@@ -367,7 +369,7 @@ impl Index {
         // Prepare payload and insertion pointers
         let mut payload = value;
         match self {
-            Index::InMemory { root } => {
+            Database::InMemory { root } => {
                 // raw pointer to root for payload attachment
                 let root_ptr: *mut TrieNode = root;
                 let mut node = root;
@@ -443,13 +445,13 @@ impl Index {
                     }
                 }
             }
-            Index::Mmap { .. } => panic!("cannot insert into a memory-mapped trie"),
+            Database::Mmap { .. } => panic!("cannot insert into a memory-mapped database"),
         }
     }
     /// Get the CBOR-decoded Value stored under `key`, if any.
     pub fn get_value(&self, key: &str) -> Result<Option<Value>> {
         match self {
-            Index::InMemory { root } => {
+            Database::InMemory { root } => {
                 if let Some(node) = Self::find_node(root, key) {
                     if let Some(bytes) = node.value.as_deref() {
                         let v: Value = serde_cbor::from_slice(bytes)
@@ -462,41 +464,28 @@ impl Index {
                     Ok(None)
                 }
             }
-            Index::Mmap { buf, payload_offset } => {
+            Database::Mmap { idx, payload } => {
                 if let Some(GenericFindResult::Node(handle)) = <Self as TrieBackend>::find_prefix(self, key) {
-                    // Compute node header start
+                    // Create payload-reader for mmaped payload data
+                    let mps = MmapPayloadStore::new(&payload[..], 0);
+                    // Locate pointer in node header: is_end (1) + child_count (2)
                     let off = if let Handle::Mmap(o) = handle { o } else { return Ok(None) };
-                    // Read payload pointer from node header: offset + 1 (is_end) + 2 (child_count)
                     let ptr_pos = off + 1 + 2;
-                    if ptr_pos + 8 > buf.len() {
+                    if ptr_pos + 8 > idx.len() {
                         return Err(IndexError::InvalidFormat("truncated payload pointer"));
                     }
-                    let ptr_bytes: [u8; 8] = buf[ptr_pos..ptr_pos + 8]
+                    let ptr_bytes: [u8; 8] = idx[ptr_pos..ptr_pos + 8]
                         .try_into()
                         .map_err(|_| IndexError::InvalidFormat("invalid payload pointer"))?;
-                    let ptr_val = u64::from_le_bytes(ptr_bytes) as usize;
-                    if ptr_val == 0 {
-                        return Ok(None);
+                    let ptr_val = u64::from_le_bytes(ptr_bytes);
+                    // Retrieve payload data if present
+                    if let Some(bytes) = mps.get(ptr_val)? {
+                        let v: Value = serde_cbor::from_slice(bytes)
+                            .map_err(|_| IndexError::InvalidFormat("invalid CBOR payload"))?;
+                        Ok(Some(v))
+                    } else {
+                        Ok(None)
                     }
-                    // Compute relative offset: stored as offset+1
-                    let rel = ptr_val - 1;
-                    // Locate payload in payload section
-                    let mut p = payload_offset + rel;
-                    if p + 4 > buf.len() {
-                        return Err(IndexError::InvalidFormat("truncated payload length"));
-                    }
-                    let len_bytes: [u8; 4] = buf[p..p + 4]
-                        .try_into()
-                        .map_err(|_| IndexError::InvalidFormat("invalid payload length"))?;
-                    let val_len = u32::from_le_bytes(len_bytes) as usize;
-                    p += 4;
-                    if p + val_len > buf.len() {
-                        return Err(IndexError::InvalidFormat("truncated payload data"));
-                    }
-                    let bytes = &buf[p..p + val_len];
-                    let v: Value = serde_cbor::from_slice(bytes)
-                        .map_err(|_| IndexError::InvalidFormat("invalid CBOR payload"))?;
-                    Ok(Some(v))
                 } else {
                     Ok(None)
                 }
@@ -576,29 +565,26 @@ impl Index {
     /// - child blobs: label_len (u16 LE) + label bytes + subtree
     pub fn write_index<W: Write>(&self, w: &mut W) -> Result<()> {
         match self {
-            Index::InMemory { root } => {
-                // Build node and payload buffers in memory, then dump to writer
+            Database::InMemory { root } => {
+                // Build trie and payload section buffers, then dump to writer
                 let mut buf = Cursor::new(Vec::new());
                 // Write magic and placeholder for payload section offset
                 buf.write_all(&MAGIC)?;
                 buf.write_all(&0u64.to_le_bytes())?;
-                // Buffer for payload data
-                let mut payload_buf: Vec<u8> = Vec::new();
-                // Write trie nodes, recording payloads into payload_buf
-                Self::write_node_with_pointers(root, &mut buf, &mut payload_buf)?;
-                // Compute payload section start offset
-                let payload_offset = buf.stream_position()?;
-                // Patch payload offset into header
+                // Payload store for collecting CBOR payloads
+                let mut ps = PayloadStore::new();
+                // Write trie nodes with payload pointers
+                Self::write_node_with_pointers(root, &mut buf, &mut ps)?;
+                // Write payload section and get its start offset
+                let payload_offset = ps.finish(&mut buf)?;
+                // Patch payload offset into header after magic
                 buf.seek(SeekFrom::Start(MAGIC.len() as u64))?;
                 buf.write_all(&(payload_offset as u64).to_le_bytes())?;
-                // Append payload data
-                buf.seek(SeekFrom::Start(payload_offset))?;
-                buf.write_all(&payload_buf)?;
                 // Flush entire buffer to output
                 w.write_all(&buf.into_inner())?;
                 Ok(())
             }
-            Index::Mmap { .. } => panic!("cannot write a memory-mapped trie"),
+            Database::Mmap { .. } => panic!("cannot write a memory-mapped database"),
         }
     }
 
@@ -607,7 +593,7 @@ impl Index {
     fn write_node_with_pointers<W: Write + Seek>(
         node: &TrieNode,
         w: &mut W,
-        payload_buf: &mut Vec<u8>,
+        payload_store: &mut crate::payload_store::PayloadStore,
     ) -> io::Result<()> {
         // header: is_end (1 byte) + child_count (2 bytes LE)
         w.write_all(&[node.is_end as u8])?;
@@ -615,12 +601,9 @@ impl Index {
         w.write_all(&(count as u16).to_le_bytes())?;
         // payload pointer (u64 LE): offset into payload_buf, or 0 if none
         // Store payload in payload_buf; encode pointer as offset+1, 0 means no payload
+        // Append payload and get pointer id (u64)
         let ptr = if let Some(ref data) = node.value {
-            let off = payload_buf.len() as u64;
-            // store length prefix + data
-            payload_buf.extend(&(data.len() as u32).to_le_bytes());
-            payload_buf.extend(data);
-            off + 1
+            payload_store.append(data)
         } else {
             0u64
         };
@@ -644,7 +627,7 @@ impl Index {
             w.write_all(&len.to_le_bytes())?;
             w.write_all(label.as_bytes())?;
             // write subtree recursively
-            Self::write_node_with_pointers(child, w, payload_buf)?;
+            Self::write_node_with_pointers(child, w, payload_store)?;
             entries.push((first_byte, child_offset));
         }
         // go back and fill in the index table
@@ -656,6 +639,33 @@ impl Index {
         }
         w.seek(SeekFrom::Start(after_pos))?;
         Ok(())
+    }
+    /// Save an in-memory database, writing separate index (.idx) and payload (.payload) files.
+    /// For a read-only memory-mapped database, returns an error.
+    pub fn save<P: AsRef<Path>>(&self, base: P) -> Result<()> {
+        match self {
+            Database::InMemory { .. } => {
+                // Serialize into combined buffer
+                let mut buf = Vec::new();
+                self.write_index(&mut buf)?;
+                // Parse payload offset from header
+                let off_pos = MAGIC.len();
+                let mut off_bytes = [0u8; 8];
+                off_bytes.copy_from_slice(&buf[off_pos..off_pos + 8]);
+                let payload_offset = u64::from_le_bytes(off_bytes) as usize;
+                // Split buffer into idx and payload
+                let (idx_buf, payload_buf) = buf.split_at(payload_offset);
+                // Write to files
+                let idx_path = base.as_ref().with_extension("idx");
+                let payload_path = base.as_ref().with_extension("payload");
+                std::fs::write(idx_path, idx_buf)?;
+                std::fs::write(payload_path, payload_buf)?;
+                Ok(())
+            }
+            Database::Mmap { .. } => Err(IndexError::InvalidFormat(
+                "cannot save a read-only database",
+            )),
+        }
     }
 
 

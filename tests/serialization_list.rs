@@ -1,7 +1,6 @@
-use foliant::{Index, Entry};
+use foliant::{Database, Entry};
 use foliant::Streamer;
-use std::io::Write;
-use tempfile::NamedTempFile;
+use tempfile::tempdir;
 
 /// This test builds a small trie of file-like paths, serializes it to disk,
 /// then memory-maps the file and verifies that both the in-memory and
@@ -9,7 +8,7 @@ use tempfile::NamedTempFile;
 #[test]
 fn serialize_and_mmap_list() {
     // Build a sample trie
-    let mut trie = Index::new();
+    let mut db = Database::new();
     let keys = [
         "alpha",
         "beta",
@@ -17,30 +16,25 @@ fn serialize_and_mmap_list() {
         "gamma/epsilon",
     ];
     for &k in &keys {
-        trie.insert(k, None);
+        db.insert(k, None);
     }
 
-    // Serialize into an in-memory buffer
-    let mut buf = Vec::new();
-    trie.write_index(&mut buf).unwrap();
-
-    // Write to a NamedTempFile
-    let mut tmp = NamedTempFile::new().expect("temp file");
-    tmp.as_file_mut().write_all(&buf).unwrap();
-
-    // Load via memory-mapped trie
-    let mtrie = Index::open(tmp.path()).unwrap();
+    // Serialize to disk and load via mmap
+    let dir = tempdir().expect("temp dir");
+    let base = dir.path().join("db");
+    db.save(&base).unwrap();
+    let mdb = Database::open(&base).unwrap();
 
     // Compare listings without delimiter
-    let mut list_mem: Vec<Entry> = trie.list("", None).collect();
-    let mut list_mmap: Vec<Entry> = mtrie.list("", None).collect();
+    let mut list_mem: Vec<Entry> = db.list("", None).collect();
+    let mut list_mmap: Vec<Entry> = mdb.list("", None).collect();
     list_mem.sort();
     list_mmap.sort();
     assert_eq!(list_mem, list_mmap);
 
     // Compare listings grouped by '/'
-    let mut grp_mem: Vec<Entry> = trie.list("", Some('/')).collect();
-    let mut grp_mmap: Vec<Entry> = mtrie.list("", Some('/')).collect();
+    let mut grp_mem: Vec<Entry> = db.list("", Some('/')).collect();
+    let mut grp_mmap: Vec<Entry> = mdb.list("", Some('/')).collect();
     grp_mem.sort();
     grp_mmap.sort();
     assert_eq!(grp_mem, grp_mmap);
@@ -49,27 +43,22 @@ fn serialize_and_mmap_list() {
 
 #[test]
 fn serialize_and_mmap_list_prefix_a() {
-    // Build a trie with some keys, including ones not matching the prefix
-    let mut trie = Index::new();
+    // Build a database in-memory with some keys, including ones not matching the prefix
+    let mut db = Database::new();
     let keys = ["a1", "a2", "a3", "b1"];
     for &k in &keys {
-        trie.insert(k, None);
+    db.insert(k, None);
     }
 
-    // Serialize into an in-memory buffer
-    let mut buf = Vec::new();
-    trie.write_index(&mut buf).unwrap();
-
-    // Write to a NamedTempFile
-    let mut tmp = NamedTempFile::new().expect("temp file");
-    tmp.as_file_mut().write_all(&buf).unwrap();
-
-    // Load via memory-mapped trie
-    let mtrie = Index::open(tmp.path()).unwrap();
+    // Serialize to disk and load via mmap
+    let dir = tempdir().expect("temp dir");
+    let base = dir.path().join("db");
+    db.save(&base).unwrap();
+    let mdb = Database::open(&base).unwrap();
 
     // List entries with prefix "a"
-    let mut list_mem: Vec<Entry> = trie.list("a", None).collect();
-    let mut list_mmap: Vec<Entry> = mtrie.list("a", None).collect();
+    let mut list_mem: Vec<Entry> = db.list("a", None).collect();
+    let mut list_mmap: Vec<Entry> = mdb.list("a", None).collect();
     list_mem.sort();
     list_mmap.sort();
 

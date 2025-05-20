@@ -4,7 +4,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::time::{Instant, Duration};
 // On-disk index support moved to library
-use foliant::{Index, Entry};
+use foliant::{Database, Entry};
 use foliant::Streamer;
 use serde_cbor;
 use serde_json;
@@ -50,8 +50,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::Index { index, input, json } => {
-            // Build the trie, measuring throughput
-            let mut trie = Index::new();
+            // Build the database in-memory, measuring throughput
+            let mut db = Database::new();
             let reader: Box<dyn BufRead> = if let Some(input_path) = input {
                 Box::new(BufReader::new(File::open(input_path)?))
             } else {
@@ -80,9 +80,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .ok_or_else(|| format!("key field '{}' is not a string", keyname))?;
                     // Serialize remaining object to CBOR bytes
                     let cbor = serde_cbor::to_vec(&jv)?;
-                    trie.insert(key_str, Some(cbor));
+                    db.insert(key_str, Some(cbor));
                 } else {
-                    trie.insert(&line, None);
+                    db.insert(&line, None);
                 }
                 // periodic progress report
                 let now = Instant::now();
@@ -107,17 +107,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // finish progress line
             eprintln!();
             let duration = start.elapsed();
-            // Serialize compressed radix trie to binary
+            // Write out database files (.idx and .payload)
             let write_start = Instant::now();
-            let mut writer = io::BufWriter::new(File::create(&index)?);
-            trie.write_index(&mut writer)?;
-            writer.flush()?;
+            db.save(&index)?;
             let write_duration = write_start.elapsed();
             // Metrics
             let secs = duration.as_secs_f64();
             let eps = entries as f64 / secs;
             let bps = bytes_in as f64 / secs;
-            let idx_size = std::fs::metadata(&index)?.len();
+            let idx_path = index.with_extension("idx");
+            let payload_path = index.with_extension("payload");
+            let idx_size = std::fs::metadata(&idx_path)?.len();
+            let payload_size = std::fs::metadata(&payload_path)?.len();
             eprintln!(
                 "Indexed {} entries ({} bytes in) in {:.3} ms: {:.0} entries/s, {:.0} bytes/s",
                 entries,
@@ -127,20 +128,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bps
             );
             eprintln!(
-                "Wrote index file {} bytes in {:.3} ms",
+                "Wrote index file {} bytes and payload file {} bytes in {:.3} ms",
                 idx_size,
+                payload_size,
                 write_duration.as_secs_f64() * 1000.0
             );
         }
         Commands::List { index, prefix, delimiter } => {
-            // Memory-map and lazily open the index
+            // Open read-only database via mmap
             let load_start = Instant::now();
-            let trie = Index::open(&index)?;
+            let db = Database::open(&index)?;
             let load_duration = load_start.elapsed();
-            eprint!("Loaded index in {:.3} ms\n", load_duration.as_secs_f64() * 1000.0);
+            eprintln!("Loaded database in {:.3} ms", load_duration.as_secs_f64() * 1000.0);
             // Stream and print entries with realtime progress
             let stream_start = Instant::now();
-            let mut stream = trie.list(&prefix, delimiter);
+            let mut stream = db.list(&prefix, delimiter);
             let stream_duration = stream_start.elapsed();
             eprintln!("Stream creation time: {:.3} ms", stream_duration.as_secs_f64() * 1000.0);
             let mut printed = 0usize;
@@ -150,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match entry {
                     Entry::Key(s) => {
                         // print key, followed by optional CBOR-decoded JSON Value in dim color
-                        if let Some(val) = trie.get_value(&s)? {
+                        if let Some(val) = db.get_value(&s)? {
                             let val_str = serde_json::to_string(&val)?;
                             println!("📄 {} \x1b[2m{}\x1b[0m", s, val_str);
                         } else {
@@ -166,10 +168,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!();
             let list_duration = list_start.elapsed();
             // Output metrics
-            let idx_size = std::fs::metadata(&index)?.len();
+            let idx_size = std::fs::metadata(index.with_extension("idx"))?.len();
             eprintln!("Index size: {} bytes", idx_size);
             eprintln!(
-                "Load time: {:.3} ms, Stream creation time: {:.3} ms, List time: {:.3} ms, Printed {} entries",
+                "Load time: {:.3} ms, Stream time: {:.3} ms, List time: {:.3} ms, Printed {} entries",
                 load_duration.as_secs_f64() * 1000.0,
                 stream_duration.as_secs_f64() * 1000.0,
                 list_duration.as_secs_f64() * 1000.0,

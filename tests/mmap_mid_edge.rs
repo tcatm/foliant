@@ -1,27 +1,22 @@
-use foliant::{Index, Entry};
+use foliant::{Database, Entry};
 use foliant::Streamer;
-use std::io::Write;
-use tempfile::NamedTempFile;
+use tempfile::tempdir;
 
 /// Test that listing with a prefix that falls in the middle of an edge
 /// correctly finds the subtree via the indexed mmap reader.
 #[test]
 fn mid_edge_prefix_mmap() {
     // Build a small trie with a compressed edge "abcd"
-    let mut trie = Index::new();
-    trie.insert("abcdx", None);
-    trie.insert("abcde", None);
+    let mut db = Database::new();
+    db.insert("abcdx", None);
+    db.insert("abcde", None);
 
-    // Serialize to a buffer
-    let mut buf = Vec::new();
-    trie.write_index(&mut buf).unwrap();
+    // Serialize to disk and load via mmap
+    let dir = tempdir().expect("temp dir");
+    let base = dir.path().join("db");
+    db.save(&base).expect("save failed");
+    let mtrie = Database::open(&base).expect("mmap load failed");
 
-    // Write to a NamedTempFile for mmap loading
-    let mut tmp = NamedTempFile::new().expect("temp file");
-    tmp.as_file_mut().write_all(&buf).unwrap();
-
-    // Load via mmap-based trie
-    let mtrie = Index::open(tmp.path()).expect("mmap load failed");
 
     // Expected results for prefix "abc"
     let expected = vec![
@@ -30,7 +25,7 @@ fn mid_edge_prefix_mmap() {
     ];
 
     // In-memory listing
-    let mut mem: Vec<Entry> = trie.list("abc", None).collect();
+    let mut mem: Vec<Entry> = db.list("abc", None).collect();
     mem.sort();
     assert_eq!(mem, expected, "in-memory trie mismatch");
 

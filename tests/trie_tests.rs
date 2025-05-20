@@ -1,9 +1,9 @@
-use foliant::{Index, Entry};
+use foliant::{Database, Entry};
 use foliant::Streamer;
 
 #[test]
 fn insert_and_list_no_delimiter() {
-    let mut trie = Index::new();
+    let mut trie = Database::new();
     let words = ["app", "apple", "appetite", "banana", "band", "bandage", "bandana"];
     for &w in &words {
         trie.insert(w, None);
@@ -29,7 +29,7 @@ fn insert_and_list_no_delimiter() {
 
 #[test]
 fn list_with_delimiter() {
-    let mut trie = Index::new();
+    let mut trie = Database::new();
     trie.insert("foo/bar/1", None);
     trie.insert("foo/bar/2", None);
     trie.insert("foo/baz/1", None);
@@ -55,7 +55,7 @@ fn list_with_delimiter() {
 
 #[test]
 fn nonexistent_prefix() {
-    let mut trie = Index::new();
+    let mut trie = Database::new();
     trie.insert("hello", None);
     let mut result: Vec<Entry> = trie.list("world", None).collect();
     result.sort();
@@ -64,7 +64,7 @@ fn nonexistent_prefix() {
 
 #[test]
 fn sample_path_delimiter_query() {
-    let mut trie = Index::new();
+    let mut trie = Database::new();
     let paths = [
         "dir1/file1.txt",
         "dir1/subdir/file2.txt",
