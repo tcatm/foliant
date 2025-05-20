@@ -55,10 +55,12 @@ mod storage;
 use storage::{NodeStorage, generic_find_prefix, generic_children};
 
 // Magic header for the new indexed format: 4 bytes, 'I','D','X','1'
+// Followed by 8-byte payload section start offset (u64 LE)
 const MAGIC: [u8; 4] = *b"IDX1";
 // Named length constants for header parsing
-const HEADER_LEN: usize = MAGIC.len();            // 4
-const NODE_HEADER_LEN: usize = 1 + 2;             // is_end + child_count (u16)
+const HEADER_LEN: usize = MAGIC.len() + 8;         // 4 + payload_offset (8)
+// Node header: is_end (1) + child_count (2) + payload pointer (8)
+const NODE_HEADER_LEN: usize = 1 + 2 + 8;
 const INDEX_ENTRY_LEN: usize = 1 + 8;             // first_byte (u8) + child_offset (u64)
 const LABEL_LEN_LEN: usize = 2;                   // u16 label length
 
@@ -228,7 +230,7 @@ pub enum Index {
     /// In-memory index built via `new()`, `insert()`, etc.
     InMemory { root: TrieNode },
     /// Read-only memory-mapped index loaded via `open()`, zero-copy listing.
-    Mmap { buf: Arc<Mmap> },
+    Mmap { buf: Arc<Mmap>, payload_offset: usize },
 }
 
 // Unified NodeStorage implementation for both in-memory and memory-mapped Index
@@ -246,7 +248,7 @@ impl NodeStorage for Index {
                 let node = unsafe { &**ptr };
                 Ok(node.is_end)
             }
-            (Index::Mmap { buf }, Handle::Mmap(offset)) => {
+            (Index::Mmap { buf, payload_offset: _ }, Handle::Mmap(offset)) => {
                 Ok(buf.get(*offset).copied().unwrap_or(0) != 0)
             }
             _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid handle")),
@@ -264,23 +266,16 @@ impl NodeStorage for Index {
                 out.sort_by(|a, b| b.0.cmp(&a.0));
                 Ok(out)
             }
-            (Index::Mmap { buf }, Handle::Mmap(mut pos)) => {
+            (Index::Mmap { buf, payload_offset: _ }, Handle::Mmap(mut pos)) => {
                 // ensure we can read node header
                 if pos + NODE_HEADER_LEN > buf.len() {
                     return Ok(Vec::new());
                 }
+                // read child count
                 let count = u16::from_le_bytes([buf[pos + 1], buf[pos + 2]]) as usize;
+                // skip header (is_end + child_count + payload ptr)
                 pos += NODE_HEADER_LEN;
-                // skip TLV payload: tag + length + data
-                if pos + 5 <= buf.len() {
-                    let _tag = buf[pos]; pos += 1;
-                    let len_bytes: [u8; 4] = buf[pos..pos + 4]
-                        .try_into()
-                        .unwrap_or([0, 0, 0, 0]);
-                    let val_len = u32::from_le_bytes(len_bytes) as usize;
-                    pos += 4;
-                    pos = pos.saturating_add(val_len);
-                }
+                // read index entries: each is [first_byte (1), child_offset (8)]
                 let mut offsets = Vec::with_capacity(count);
                 for i in 0..count {
                     let ent = pos + i * INDEX_ENTRY_LEN;
@@ -344,10 +339,22 @@ impl Index {
         let file = File::open(path)?;
         // SAFETY: file is not modified
         let mmap = unsafe { Mmap::map(&file)? };
-        if mmap.len() < HEADER_LEN || &mmap[..HEADER_LEN] != &MAGIC {
+        // Check magic
+        if mmap.len() < MAGIC.len() || &mmap[..MAGIC.len()] != &MAGIC {
             return Err(IndexError::InvalidFormat("missing or corrupt magic header"));
         }
-        Ok(Index::Mmap { buf: Arc::new(mmap) })
+        // Read payload section start offset (u64 LE) after magic
+        if mmap.len() < HEADER_LEN {
+            return Err(IndexError::InvalidFormat("truncated header"));
+        }
+        let off_bytes: [u8; 8] = mmap[MAGIC.len()..HEADER_LEN]
+            .try_into()
+            .map_err(|_| IndexError::InvalidFormat("invalid payload offset"))?;
+        let payload_offset = u64::from_le_bytes(off_bytes) as usize;
+        if payload_offset > mmap.len() {
+            return Err(IndexError::InvalidFormat("payload offset out of range"));
+        }
+        Ok(Index::Mmap { buf: Arc::new(mmap), payload_offset })
     }
     
     /// Streaming interface over entries under `prefix`, grouping at the first `delimiter`.
@@ -455,34 +462,43 @@ impl Index {
                     Ok(None)
                 }
             }
-            Index::Mmap { buf } => {
-                match <Self as TrieBackend>::find_prefix(self, key) {
-                    Some(GenericFindResult::Node(handle)) => {
-                        let mut pos = if let Handle::Mmap(off) = handle { off } else { return Ok(None) };
-                        pos += NODE_HEADER_LEN;
-                        // Read TLV tag and length
-                        if pos + 5 > buf.len() {
-                            return Err(IndexError::InvalidFormat("truncated payload TLV"));
-                        }
-                        let tag = buf[pos]; pos += 1;
-                        let len_bytes: [u8; 4] = buf[pos..pos+4]
-                            .try_into()
-                            .map_err(|_| IndexError::InvalidFormat("truncated payload length"))?;
-                        let val_len = u32::from_le_bytes(len_bytes) as usize;
-                        pos += 4;
-                        if tag == 1 {
-                            if pos + val_len > buf.len() {
-                                return Err(IndexError::InvalidFormat("truncated payload data"));
-                            }
-                            let bytes = &buf[pos..pos+val_len];
-                            let v: Value = serde_cbor::from_slice(bytes)
-                                .map_err(|_| IndexError::InvalidFormat("invalid CBOR payload"))?;
-                            Ok(Some(v))
-                        } else {
-                            Ok(None)
-                        }
+            Index::Mmap { buf, payload_offset } => {
+                if let Some(GenericFindResult::Node(handle)) = <Self as TrieBackend>::find_prefix(self, key) {
+                    // Compute node header start
+                    let off = if let Handle::Mmap(o) = handle { o } else { return Ok(None) };
+                    // Read payload pointer from node header: offset + 1 (is_end) + 2 (child_count)
+                    let ptr_pos = off + 1 + 2;
+                    if ptr_pos + 8 > buf.len() {
+                        return Err(IndexError::InvalidFormat("truncated payload pointer"));
                     }
-                    _ => Ok(None),
+                    let ptr_bytes: [u8; 8] = buf[ptr_pos..ptr_pos + 8]
+                        .try_into()
+                        .map_err(|_| IndexError::InvalidFormat("invalid payload pointer"))?;
+                    let ptr_val = u64::from_le_bytes(ptr_bytes) as usize;
+                    if ptr_val == 0 {
+                        return Ok(None);
+                    }
+                    // Compute relative offset: stored as offset+1
+                    let rel = ptr_val - 1;
+                    // Locate payload in payload section
+                    let mut p = payload_offset + rel;
+                    if p + 4 > buf.len() {
+                        return Err(IndexError::InvalidFormat("truncated payload length"));
+                    }
+                    let len_bytes: [u8; 4] = buf[p..p + 4]
+                        .try_into()
+                        .map_err(|_| IndexError::InvalidFormat("invalid payload length"))?;
+                    let val_len = u32::from_le_bytes(len_bytes) as usize;
+                    p += 4;
+                    if p + val_len > buf.len() {
+                        return Err(IndexError::InvalidFormat("truncated payload data"));
+                    }
+                    let bytes = &buf[p..p + val_len];
+                    let v: Value = serde_cbor::from_slice(bytes)
+                        .map_err(|_| IndexError::InvalidFormat("invalid CBOR payload"))?;
+                    Ok(Some(v))
+                } else {
+                    Ok(None)
                 }
             }
         }
@@ -561,10 +577,24 @@ impl Index {
     pub fn write_index<W: Write>(&self, w: &mut W) -> Result<()> {
         match self {
             Index::InMemory { root } => {
-                // write magic header + node data into a cursor, then dump to w
+                // Build node and payload buffers in memory, then dump to writer
                 let mut buf = Cursor::new(Vec::new());
+                // Write magic and placeholder for payload section offset
                 buf.write_all(&MAGIC)?;
-                Self::write_node(root, &mut buf)?;
+                buf.write_all(&0u64.to_le_bytes())?;
+                // Buffer for payload data
+                let mut payload_buf: Vec<u8> = Vec::new();
+                // Write trie nodes, recording payloads into payload_buf
+                Self::write_node_with_pointers(root, &mut buf, &mut payload_buf)?;
+                // Compute payload section start offset
+                let payload_offset = buf.stream_position()?;
+                // Patch payload offset into header
+                buf.seek(SeekFrom::Start(MAGIC.len() as u64))?;
+                buf.write_all(&(payload_offset as u64).to_le_bytes())?;
+                // Append payload data
+                buf.seek(SeekFrom::Start(payload_offset))?;
+                buf.write_all(&payload_buf)?;
+                // Flush entire buffer to output
                 w.write_all(&buf.into_inner())?;
                 Ok(())
             }
@@ -572,46 +602,49 @@ impl Index {
         }
     }
 
-    fn write_node<W: Write + Seek>(node: &TrieNode, w: &mut W) -> io::Result<()> {
+    /// Write a trie node, recording its payload in payload_buf and writing
+    /// a pointer to that payload.
+    fn write_node_with_pointers<W: Write + Seek>(
+        node: &TrieNode,
+        w: &mut W,
+        payload_buf: &mut Vec<u8>,
+    ) -> io::Result<()> {
         // header: is_end (1 byte) + child_count (2 bytes LE)
         w.write_all(&[node.is_end as u8])?;
         let count = node.children.len() as usize;
         w.write_all(&(count as u16).to_le_bytes())?;
-        // payload TLV: tag (1 byte), length (4 bytes LE), [CBOR payload]
-        if let Some(ref data) = node.value {
-            // tag = 1 indicates CBOR payload
-            w.write_all(&[1u8])?;
-            let len = data.len() as u32;
-            w.write_all(&len.to_le_bytes())?;
-            w.write_all(data)?;
+        // payload pointer (u64 LE): offset into payload_buf, or 0 if none
+        // Store payload in payload_buf; encode pointer as offset+1, 0 means no payload
+        let ptr = if let Some(ref data) = node.value {
+            let off = payload_buf.len() as u64;
+            // store length prefix + data
+            payload_buf.extend(&(data.len() as u32).to_le_bytes());
+            payload_buf.extend(data);
+            off + 1
         } else {
-            // tag = 0 indicates no value
-            w.write_all(&[0u8])?;
-            w.write_all(&0u32.to_le_bytes())?;
-        }
+            0u64
+        };
+        w.write_all(&ptr.to_le_bytes())?;
         // reserve space for index table (count × (1 byte + 8 bytes))
         let index_pos = w.stream_position()?;
         for _ in 0..count {
-            // first_byte placeholder + child_offset placeholder
             w.write_all(&[0u8])?;
             w.write_all(&0u64.to_le_bytes())?;
         }
         // sort children by first byte for binary-searchable index
         let mut children: Vec<_> = node.children.iter().collect();
-        // sort by first byte (empty label => 0) for binary-searchable index
         children.sort_by_key(|(label, _)| label.as_bytes().first().cloned().unwrap_or(0));
         // write each child blob and record its offset
         let mut entries: Vec<(u8, u64)> = Vec::with_capacity(count);
         for (label, child) in children {
-            // determine first_byte (empty label => 0)
             let first_byte = label.as_bytes().first().cloned().unwrap_or(0);
             let child_offset = w.stream_position()?;
             // write label
             let len = label.len() as u16;
             w.write_all(&len.to_le_bytes())?;
             w.write_all(label.as_bytes())?;
-            // write subtree
-            Self::write_node(&*child, w)?;
+            // write subtree recursively
+            Self::write_node_with_pointers(child, w, payload_buf)?;
             entries.push((first_byte, child_offset));
         }
         // go back and fill in the index table
@@ -621,7 +654,6 @@ impl Index {
             w.write_all(&[first_byte])?;
             w.write_all(&offset.to_le_bytes())?;
         }
-        // rewind to after child blobs
         w.seek(SeekFrom::Start(after_pos))?;
         Ok(())
     }
