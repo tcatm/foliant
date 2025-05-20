@@ -1,13 +1,42 @@
 use clap::{Parser, Subcommand};
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader};
 use std::path::PathBuf;
 use std::time::{Instant, Duration};
-// On-disk index support moved to library
 use foliant::{Database, DatabaseBuilder, Entry};
 use foliant::Streamer;
-use serde_json;
+use serde_json::{self, Value};
+use indicatif::ProgressBar;
+use indicatif::ProgressStyle;
 
+// Cross-platform resident set size (RSS) in KB; uses getrusage on UNIX.
+#[cfg(unix)]
+fn get_rss_kb() -> Option<usize> {
+    use libc::{getrusage, rusage, RUSAGE_SELF};
+    unsafe {
+        let mut usage: rusage = std::mem::zeroed();
+        if getrusage(RUSAGE_SELF, &mut usage) != 0 {
+            return None;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // Linux: ru_maxrss is in kilobytes
+            Some(usage.ru_maxrss as usize)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // macOS: ru_maxrss is in bytes
+            Some((usage.ru_maxrss as usize) / 1024)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            // Other UNIX: assume bytes
+            Some((usage.ru_maxrss as usize) / 1024)
+        }
+    }
+}
+#[cfg(not(unix))]
+fn get_rss_kb() -> Option<usize> { None }
 /// A simple CLI for building and querying a Trie index.
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -50,7 +79,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Index { index, input, json } => {
             // Build the database on-disk via builder, measuring throughput
-            let mut builder = DatabaseBuilder::<serde_json::Value>::new(&index)?;
+            let mut builder = DatabaseBuilder::<Value>::new(&index)?;
+            // Setup progress bar using indicatif
+            let total_bytes = input.as_ref().and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len());
+            let pb = if let Some(total) = total_bytes {
+                let pb = ProgressBar::new(total);
+                pb.set_style(
+                    ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) {msg}")?
+                        .progress_chars("#>-")
+                );
+                pb
+            } else {
+                let pb = ProgressBar::new_spinner();
+                pb.enable_steady_tick(Duration::from_millis(100));
+                let style = ProgressStyle::with_template("{spinner:.green} {bytes} bytes {msg}")?;
+                pb.set_style(style);
+                pb
+            };
             let reader: Box<dyn BufRead> = if let Some(input_path) = input {
                 Box::new(BufReader::new(File::open(input_path)?))
             } else {
@@ -68,6 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 bytes_in += line.len();
                 entries += 1;
+
                 if let Some(ref keyname) = json {
                     // Parse JSON object and extract key/value
                     let mut jv: serde_json::Value = serde_json::from_str(&line)?;
@@ -83,30 +129,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // No JSON key: insert without payload
                     builder.insert(&line, None);
                 }
-                // periodic progress report
+
+                // periodic throttled progress update
                 let now = Instant::now();
                 if now.duration_since(last_report) >= report_interval {
-                    let total = now.duration_since(start);
-                    let secs = total.as_secs_f64();
-                    let eps = entries as f64 / secs;
-                    let bps = bytes_in as f64 / secs;
-                    // Carriage-return progress line
-                    eprint!(
-                        "\rProgress: {} entries, {} bytes, elapsed {:.3} ms, {:.0} entries/s, {:.0} bytes/s",
-                        entries,
-                        bytes_in,
-                        secs * 1000.0,
-                        eps,
-                        bps
-                    );
-                    io::stderr().flush()?;
+                    let elapsed = now.duration_since(start).as_secs_f64();
+                    let eps = if elapsed > 0.0 { (entries as f64 / elapsed).round() } else { 0.0 };
+                    pb.set_position(bytes_in as u64);
+                    pb.set_message(format!("{} entries, {:.0}/s, mem {}KB", entries, eps, get_rss_kb().unwrap_or(0)));
                     last_report = now;
                 }
             }
-            // finish progress line
-            eprintln!();
+            // finish progress bar
+            pb.finish();
             let duration = start.elapsed();
             // Write out database files (.idx and .payload)
+            eprintln!("Writing index...");
             let write_start = Instant::now();
             builder.close()?;
             let write_duration = write_start.elapsed();
@@ -132,11 +170,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 payload_size,
                 write_duration.as_secs_f64() * 1000.0
             );
+            // report memory usage after build
+            if let Some(mem_after) = get_rss_kb() {
+                eprintln!("Memory usage: {} KB", mem_after);
+            }
         }
         Commands::List { index, prefix, delimiter } => {
             // Open read-only database via mmap
             let load_start = Instant::now();
-            let db = Database::<serde_json::Value>::open(&index)?;
+            let db = Database::<Value>::open(&index)?;
             let load_duration = load_start.elapsed();
             eprintln!("Loaded database in {:.3} ms", load_duration.as_secs_f64() * 1000.0);
             // Stream and print entries with realtime progress
