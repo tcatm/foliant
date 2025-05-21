@@ -80,8 +80,8 @@ enum Commands {
         /// Path to the serialized index
         #[arg(short, long, value_name = "FILE")]
         index: PathBuf,
-        /// Delimiter character for grouping
-        #[arg(short, long, value_name = "DELIM")]
+        /// Delimiter character for grouping (default: '/')
+        #[arg(short, long, value_name = "DELIM", default_value = "/")]
         delimiter: char,
     },
 }
