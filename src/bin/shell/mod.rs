@@ -10,6 +10,9 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 
 use foliant::{Database, Entry, Streamer};
+use ctrlc;
+use std::sync::{mpsc::{channel, Receiver, TryRecvError}, Arc, atomic::{AtomicU64, Ordering}};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 struct ShellState<V: DeserializeOwned> {
     db: Database<V>,
@@ -117,9 +120,38 @@ pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) 
     let helper = ShellHelper { state: Rc::clone(&state) };
     let mut rl = Editor::new()?;
     rl.set_helper(Some(helper));
+    // Setup Ctrl-C handler: first press aborts listing, second within 2s exits shell
+    let (sig_tx, sig_rx): (std::sync::mpsc::Sender<()>, Receiver<()>) = channel();
+    let last_sig = Arc::new(AtomicU64::new(0));
+    {
+        let sig_tx = sig_tx.clone();
+        let last_sig = Arc::clone(&last_sig);
+        ctrlc::set_handler(move || {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+            let prev = last_sig.swap(now, Ordering::SeqCst);
+            if now.saturating_sub(prev) < 2000 {
+                std::process::exit(0);
+            }
+            let _ = sig_tx.send(());
+        })?;
+    }
 
     println!("Database contains {} entries", state.borrow().db.len());
-    let help_text = "Available commands: ls [path], cd [dir], pwd, exit, quit, help";
+    // Help text for interactive shell commands and Ctrl-C behavior
+    let help_text = "\
+Available commands:
+  ls [-rck] [-d DELIM] [prefix]   list entries
+    -r       recursive (no delimiter grouping)
+    -c       only directories (common prefixes)
+    -k       only keys
+    -d <c>   one-off custom delimiter character
+  cd [dir]                        change directory
+  pwd                             print working directory
+  exit, quit                      exit shell
+  help                            show this help
+
+Ctrl-C once aborts a running ls; twice within 2s exits the shell
+";
     println!("{}", help_text);
 
     loop {
@@ -149,48 +181,110 @@ pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) 
 
                 match cmd {
                     "ls" => {
-                        // Read-only borrow for state
-                        let (prefix, delim) = {
-                            let state_ref = state.borrow();
-                            // Build listing prefix
-                            let mut p = state_ref.cwd.clone();
-                            if !p.is_empty() && p.chars().last() != Some(state_ref.delim) {
-                                p.push(state_ref.delim);
-                            }
-                            if let Some(target) = parts.next() {
-                                if !target.is_empty() {
-                                    p.push_str(target);
+                        // Parse flags: -r recursive, -c only directories, -k only keys, -d custom delimiter
+                        let mut recursive = false;
+                        let mut only_prefix = false;
+                        let mut only_keys = false;
+                        let mut custom_delim: Option<char> = None;
+                        let mut prefix_str = String::new();
+                        while let Some(tok) = parts.next() {
+                            if tok == "-d" {
+                                if let Some(dtok) = parts.next() {
+                                    if dtok.chars().count() == 1 {
+                                        custom_delim = dtok.chars().next();
+                                    } else {
+                                        println!("Invalid delimiter '{}'; must be single char", dtok);
+                                    }
+                                } else {
+                                    println!("Flag -d requires a delimiter argument");
                                 }
+                                continue;
+                            } else if tok.starts_with("-d") {
+                                // e.g. -d:
+                                let ds: Vec<char> = tok.chars().collect();
+                                if ds.len() == 3 {
+                                    custom_delim = Some(ds[2]);
+                                } else {
+                                    println!("Invalid -d flag '{}'; use -d<DELIM>", tok);
+                                }
+                                continue;
+                            } else if tok.starts_with('-') && tok.len() > 1 {
+                                for ch in tok.chars().skip(1) {
+                                    match ch {
+                                        'r' => recursive = true,
+                                        'c' => only_prefix = true,
+                                        'k' => only_keys = true,
+                                        _ => println!("Unknown flag -{}", ch),
+                                    }
+                                }
+                                continue;
+                            } else {
+                                prefix_str = tok.to_string();
+                                break;
                             }
-                            (p, state_ref.delim)
+                        }
+                        if only_prefix && only_keys {
+                            println!("Cannot use -c and -k together");
+                            continue;
+                        }
+                        // Build listing prefix and delimiter option
+                        let (list_prefix, list_delim) = {
+                            let state_ref = state.borrow();
+                            let mut p = state_ref.cwd.clone();
+                            if !prefix_str.is_empty() {
+                                p.push_str(&prefix_str);
+                            }
+                            // Determine delimiter to use: None for recursive, custom if set, else default
+                            let d = if recursive {
+                                None
+                            } else if let Some(cd) = custom_delim {
+                                Some(cd)
+                            } else {
+                                Some(state_ref.delim)
+                            };
+                            (p, d)
                         };
-
-                        // Perform listing
-                        let state_borrow = state.borrow();
-                        let mut stream = state_borrow.db.list(&prefix, Some(delim));
+                        // Stream entries with abort support
                         let mut printed = 0usize;
-                        while let Some(entry) = stream.next() {
-                            match entry {
-                                Entry::Key(s, val_opt) => {
-                                    // print key, followed by optional CBOR-decoded JSON Value in dim color
+                        let state_borrow = state.borrow();
+                        let mut stream = state_borrow.db.list(&list_prefix, list_delim);
+                        let mut aborted = false;
+                        loop {
+                            // Check for Ctrl-C to abort listing
+                            match sig_rx.try_recv() {
+                                Ok(_) => {
+                                    println!("\nListing aborted");
+                                    aborted = true;
+                                    break;
+                                }
+                                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => {}
+                            }
+                            match stream.next() {
+                                Some(Entry::CommonPrefix(s)) if !only_keys => {
+                                    println!("📁 {}", s);
+                                    printed += 1;
+                                }
+                                Some(Entry::Key(s, val_opt)) if !only_prefix => {
                                     if let Some(val) = val_opt {
                                         let val_str = serde_json::to_string(&val)?;
                                         println!("📄 {} \x1b[2m{}\x1b[0m", s, val_str);
                                     } else {
                                         println!("📄 {}", s);
                                     }
+                                    printed += 1;
                                 }
-                                Entry::CommonPrefix(s) => println!("📁 {}", s),
+                                Some(_) => {}
+                                None => break,
                             }
-                            printed += 1;
                         }
-
+                        if aborted {
+                            continue;
+                        }
+                        // Summary
                         if printed > 0 {
                             println!("\n{} {} listed", printed, if printed == 1 { "entry" } else { "entries" });
-                        } else if let Some(target) = parts.next() {
-                            println!("No entries found for prefix '{}'", target);
-                        } else if !prefix.is_empty() {
-                            println!("No entries found for prefix '{}'", prefix);
+                        } else if !prefix_str.is_empty() {
+                            println!("No entries found for prefix '{}'", prefix_str);
                         } else {
                             println!("No entries found");
                         }
@@ -236,7 +330,16 @@ pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) 
                     _ => println!("Unknown command: {}", cmd),
                 }
             }
-            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
+            Err(ReadlineError::Interrupted) => {
+                // Handle double Ctrl-C at prompt: exit if within 2s
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+                let prev = last_sig.swap(now, Ordering::SeqCst);
+                if now.saturating_sub(prev) < 2000 {
+                    break;
+                }
+                continue;
+            }
+            Err(ReadlineError::Eof) => break,
             Err(err) => {
                 eprintln!("Error: {:?}", err);
                 break;
