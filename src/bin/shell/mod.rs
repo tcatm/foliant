@@ -11,8 +11,58 @@ use std::collections::HashSet;
 
 use foliant::{Database, Entry, Streamer};
 use ctrlc;
-use std::sync::{mpsc::{channel, Receiver, TryRecvError}, Arc, atomic::{AtomicU64, Ordering}};
+use std::sync::{mpsc::{channel, Receiver}, Arc, atomic::{AtomicU64, Ordering}};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Result of printing a stream: either completed or aborted via Ctrl-C.
+enum PrintResult {
+    Count(usize),
+    Aborted,
+}
+
+/// Print entries from the given stream according to the flags, optionally abortable.
+fn print_entries<S, V>(
+    stream: &mut S,
+    only_prefix: bool,
+    only_keys: bool,
+    abort_rx: Option<&Receiver<()>>,
+) -> Result<PrintResult, Box<dyn std::error::Error>>
+where
+    S: Streamer<Item = Entry<V>>,
+    V: DeserializeOwned + Serialize,
+{
+    let mut printed = 0usize;
+    loop {
+        // Check for abort
+        if let Some(rx) = abort_rx {
+            if let Ok(_) = rx.try_recv() {
+                println!("\nListing aborted");
+                return Ok(PrintResult::Aborted);
+            }
+        }
+        // Fetch next entry
+        match stream.next() {
+            Some(Entry::CommonPrefix(s)) if !only_keys => {
+                println!("📁 {}", s);
+                printed += 1;
+            }
+            Some(Entry::Key(s, val_opt)) if !only_prefix => {
+                if let Some(val) = val_opt {
+                    let val_str = serde_json::to_string(&val)?;
+                    println!("📄 {} \x1b[2m{}\x1b[0m", s, val_str);
+                } else {
+                    println!("📄 {}", s);
+                }
+                printed += 1;
+            }
+            Some(_) => {
+                // Skip other entries
+            }
+            None => break,
+        }
+    }
+    Ok(PrintResult::Count(printed))
+}
 
 struct ShellState<V: DeserializeOwned> {
     db: Database<V>,
@@ -34,7 +84,7 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
         let word = &before[start..];
         let mut candidates = Vec::new();
         if start == 0 {
-            let cmds = ["cd", "ls", "pwd", "exit", "quit", "help"];
+            let cmds = ["cd", "ls", "find", "pwd", "exit", "quit", "help"];
             for cmd in cmds {
                 if cmd.starts_with(word) {
                     candidates.push(Pair { display: cmd.to_string(), replacement: cmd.to_string() });
@@ -146,6 +196,7 @@ Available commands:
     -k       only keys
     -d <c>   one-off custom delimiter character
   cd [dir]                        change directory
+  find <regex>                    search entries matching regex
   pwd                             print working directory
   exit, quit                      exit shell
   help                            show this help
@@ -245,48 +296,54 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
                             (p, d)
                         };
                         // Stream entries with abort support
-                        let mut printed = 0usize;
-                        let state_borrow = state.borrow();
-                        let mut stream = state_borrow.db.list(&list_prefix, list_delim);
-                        let mut aborted = false;
-                        loop {
-                            // Check for Ctrl-C to abort listing
-                            match sig_rx.try_recv() {
-                                Ok(_) => {
-                                    println!("\nListing aborted");
-                                    aborted = true;
-                                    break;
-                                }
-                                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => {}
-                            }
-                            match stream.next() {
-                                Some(Entry::CommonPrefix(s)) if !only_keys => {
-                                    println!("📁 {}", s);
-                                    printed += 1;
-                                }
-                                Some(Entry::Key(s, val_opt)) if !only_prefix => {
-                                    if let Some(val) = val_opt {
-                                        let val_str = serde_json::to_string(&val)?;
-                                        println!("📄 {} \x1b[2m{}\x1b[0m", s, val_str);
+                        {
+                            let state_borrow = state.borrow();
+                            let mut stream = state_borrow.db.list(&list_prefix, list_delim);
+                            match print_entries(&mut stream, only_prefix, only_keys, Some(&sig_rx))? {
+                                PrintResult::Aborted => continue,
+                                PrintResult::Count(printed) => {
+                                    // Summary
+                                    if printed > 0 {
+                                        println!("\n{} {} listed", printed,
+                                            if printed == 1 { "entry" } else { "entries" });
+                                    } else if !prefix_str.is_empty() {
+                                        println!("No entries found for prefix '{}'", prefix_str);
                                     } else {
-                                        println!("📄 {}", s);
+                                        println!("No entries found");
                                     }
-                                    printed += 1;
                                 }
-                                Some(_) => {}
-                                None => break,
                             }
                         }
-                        if aborted {
-                            continue;
-                        }
-                        // Summary
-                        if printed > 0 {
-                            println!("\n{} {} listed", printed, if printed == 1 { "entry" } else { "entries" });
-                        } else if !prefix_str.is_empty() {
-                            println!("No entries found for prefix '{}'", prefix_str);
+                    }
+                    "find" => {
+                        // Search for keys by regex under current cwd
+                        let pattern = match parts.next() {
+                            Some(p) => p,
+                            None => { println!("Usage: find <regex>"); continue; }
+                        };
+                        let state_ref = state.borrow();
+                        // Determine prefix: None if at root, else Some(cwd)
+                        let cwd_opt = if state_ref.cwd.is_empty() {
+                            None
                         } else {
-                            println!("No entries found");
+                            Some(state_ref.cwd.as_str())
+                        };
+                        match state_ref.db.grep(cwd_opt, pattern) {
+                            Ok(mut stream) => {
+                                // Only keys, skip directories
+                                match print_entries(&mut stream, false, true, Some(&sig_rx))? {
+                                    PrintResult::Aborted => continue,
+                                    PrintResult::Count(printed) => {
+                                        if printed > 0 {
+                                            println!("\n{} {} found", printed,
+                                                if printed == 1 { "entry" } else { "entries" });
+                                        } else {
+                                            println!("No entries matching '{}'", pattern);
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => println!("Error running find: {}", e),
                         }
                     }
                     "cd" => {

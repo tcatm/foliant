@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 indicatif = "0.17"
 fst       = "0.4"
-fst-regex = "0.3"
+regex-automata = { version = "0.1.10", default-features = false, features = ["transducer"] }
 clap = { version = "4", features = ["derive"] }
 memmap2 = "0.9"
 serde = { version = "1.0", features = ["derive"] }

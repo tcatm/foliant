@@ -9,7 +9,8 @@ use fst::IntoStreamer;
 use fst::Streamer as FstStreamer;
 use fst::Automaton;
 use fst::map::Stream as MapStream;
-use fst::automaton::{Str, StartsWith};
+use fst::automaton::{Str, StartsWith, Intersection};
+use regex_automata::sparse::SparseDFA;
 use std::fmt;
 use serde::Serialize;
 mod payload_store;
@@ -240,6 +241,26 @@ where
         })
     }
 
+    /// Search for keys matching a regular expression, optionally restricted to a prefix.
+    ///
+    /// `prefix`: if `Some(s)`, only keys starting with `s` are considered.
+    /// `re`: a regex string; matches are anchored to the full key.
+    pub fn grep<'a>(&'a self, prefix: Option<&'a str>, re: &str) -> Result<GrepStream<'a, V>> {
+        // Compile the regex into a sparse-DFA transducer.
+        let dfa = SparseDFA::new(re)
+            .map_err(|e| IndexError::Io(io::Error::new(
+                io::ErrorKind::Other,
+                format!("regex error: {}", e),
+            )))?;
+        // Build a prefix automaton (empty string matches all keys).
+        let start = Str::new(prefix.unwrap_or("")).starts_with();
+        // Intersect the regex DFA with the prefix automaton.
+        let automaton = dfa.intersection(start);
+        // Search the FST and stream matching entries.
+        let stream = self.fst_idx.search(automaton).into_stream();
+        Ok(GrepStream { stream, payload: &self.payload })
+    }
+
     /// Get the deserialized payload of type V stored under `key`, if any.
     pub fn get_value(&self, key: &str) -> Result<Option<V>> {
         // Lookup the key in the FST index
@@ -400,6 +421,35 @@ where
             self.prefix.truncate(new_len);
         }
         None
+    }
+}
+
+/// Stream of entries matching a regex (and optional prefix) via FST.
+///
+/// Yields only complete keys with their payloads.
+pub struct GrepStream<'a, V>
+where
+    V: DeserializeOwned,
+{
+    stream: MapStream<'a, Intersection<SparseDFA<Vec<u8>, usize>, StartsWith<Str<'a>>>>,
+    payload: &'a PayloadStore<V>,
+}
+
+impl<V> Streamer for GrepStream<'_, V>
+where
+    V: DeserializeOwned,
+{
+    type Item = Entry<V>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some((key_bytes, ptr)) = self.stream.next() {
+            let key = String::from_utf8(key_bytes.to_vec())
+                .expect("invalid utf8 in key");
+            let value = self.payload.get(ptr)
+                .expect("failed to get payload in grep");
+            Some(Entry::Key(key, value))
+        } else {
+            None
+        }
     }
 }
 
