@@ -128,8 +128,8 @@ pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) 
             // At root: show single delimiter
             format!("{}> ", delim_char)
         } else {
-            // Non-root: /cwd/
-            format!("{}{}{}> ", delim_char, cwd, delim_char)
+            // Non-root: /cwd
+            format!("{}{}> ", delim_char, cwd)
         };
 
         match rl.readline(&prompt) {
@@ -200,23 +200,23 @@ pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) 
                         let mut state_mut = state.borrow_mut();
                         let delim_char = state_mut.delim;
                         if arg == ".." {
-                            // Up one level
+                            // Go up one level
                             if let Some(idx) = state_mut.cwd.rfind(delim_char) {
                                 state_mut.cwd.truncate(idx);
                             } else {
                                 state_mut.cwd.clear();
                             }
                         } else if arg.is_empty() {
-                            // Root
+                            // Reset to root
                             state_mut.cwd.clear();
                         } else {
-                            // Append the specified segment to the current prefix
-                            let segment = arg.trim_matches(delim_char);
+                            // Append segment: if arg begins with delimiter, don't insert extra delimiter
                             if state_mut.cwd.is_empty() {
-                                state_mut.cwd = segment.to_string();
+                                state_mut.cwd = arg.to_string();
+                            } else if arg.starts_with(delim_char) {
+                                state_mut.cwd.push_str(arg);
                             } else {
-                                state_mut.cwd.push(delim_char);
-                                state_mut.cwd.push_str(segment);
+                                state_mut.cwd.push_str(arg);
                             }
                         }
                     }
