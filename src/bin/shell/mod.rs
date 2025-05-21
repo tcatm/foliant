@@ -3,6 +3,7 @@
 // Commands: ls, cd, pwd, help, exit/quit
 
 use rustyline::{Editor, error::ReadlineError, completion::{Completer, Pair}, hint::Hinter, highlight::Highlighter, validate::Validator, Helper, Context};
+use std::borrow::Cow;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::rc::Rc;
@@ -85,9 +86,15 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
         let mut candidates = Vec::new();
         if start == 0 {
             let cmds = ["cd", "ls", "find", "pwd", "exit", "quit", "help"];
-            for cmd in cmds {
+            for &cmd in &cmds {
                 if cmd.starts_with(word) {
-                    candidates.push(Pair { display: cmd.to_string(), replacement: cmd.to_string() });
+                    // Commands that take an argument get a trailing space
+                    let replacement = if ["cd", "ls", "find"].contains(&cmd) {
+                        format!("{} ", cmd)
+                    } else {
+                        cmd.to_string()
+                    };
+                    candidates.push(Pair { display: cmd.to_string(), replacement });
                 }
             }
             return Ok((start, candidates));
@@ -101,15 +108,13 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
         } else {
             ("", word)
         };
+        // Build the FST search prefix: literal cwd plus any parent segment (no extra slash for cwd alone)
         let mut prefix = cwd.clone();
-        if !prefix.is_empty() && !prefix.ends_with(delim) {
-            prefix.push(delim);
-        }
         if !parent.is_empty() {
-            prefix.push_str(parent);
-            if !parent.ends_with(delim) {
+            if !prefix.is_empty() {
                 prefix.push(delim);
             }
+            prefix.push_str(parent);
         }
         let mut stream = state.db.list(&prefix, Some(delim));
         let mut seen = HashSet::new();
@@ -158,11 +163,34 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
 
 impl<V: DeserializeOwned> Hinter for ShellHelper<V> {
     type Hint = String;
-    fn hint(&self, _line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<Self::Hint> {
+    fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<Self::Hint> {
+        // Use the first completion candidate as an inline hint, minus any trailing delimiter
+        if let Ok((start, candidates)) = self.complete(line, pos, ctx) {
+            if candidates.len() == 1 {
+                let Pair { replacement, .. } = &candidates[0];
+                let word = &line[start..pos];
+                if replacement.len() > word.len() {
+                    // Compute the raw hint suffix
+                    let mut hint = &replacement[word.len()..];
+                    // If the hint ends with our delimiter, drop it for the inline preview
+                    let delim = self.state.borrow().delim;
+                    if hint.ends_with(delim) {
+                        hint = &hint[..hint.len() - delim.len_utf8()];
+                    }
+                    return Some(hint.to_string());
+                }
+            }
+        }
         None
     }
 }
-impl<V: DeserializeOwned> Highlighter for ShellHelper<V> {}
+impl<V: DeserializeOwned> Highlighter for ShellHelper<V> {
+    /// Render the inline hint in a dim color (ANSI escape).
+    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
+        // Wrap hint in ANSI dim escape codes, resetting at end
+        Cow::Owned(format!("\x1b[2m{}\x1b[0m", hint))
+    }
+}
 impl<V: DeserializeOwned> Validator for ShellHelper<V> {}
 
 pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) -> Result<(), Box<dyn std::error::Error>> {
