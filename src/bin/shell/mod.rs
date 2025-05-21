@@ -118,6 +118,10 @@ pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) 
     let mut rl = Editor::new()?;
     rl.set_helper(Some(helper));
 
+    println!("Database contains {} entries", state.borrow().db.len());
+    let help_text = "Available commands: ls [path], cd [dir], pwd, exit, quit, help";
+    println!("{}", help_text);
+
     loop {
         // Build prompt: virtual leading delimiter; show cwd between delimiters
         let (cwd, delim_char) = {
@@ -185,7 +189,7 @@ pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) 
                         }
 
                         if printed > 0 {
-                            println!("\n{} {} listings", printed, if printed == 1 { "entry" } else { "entries" });
+                            println!("\n{} {} listed", printed, if printed == 1 { "entry" } else { "entries" });
                         } else if let Some(target) = parts.next() {
                             println!("No entries found for prefix '{}'", target);
                         } else if !prefix.is_empty() {
@@ -229,7 +233,7 @@ pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) 
                         println!("{}", state.borrow().cwd);
                     }
                     "help" => {
-                        println!("Available commands: ls [path], cd [dir], pwd, exit, quit, help");
+                        println!("{}", help_text);
                     }
                     "exit" | "quit" => break,
                     _ => println!("Unknown command: {}", cmd),

@@ -252,6 +252,11 @@ where
             Ok(None)
         }
     }
+
+    // Get total number of keys in the database
+    pub fn len(&self) -> usize {
+        self.fst_idx.len()
+    }
 } // end impl Trie
 
 /// Streamer for direct prefix listing when no delimiter grouping is needed
