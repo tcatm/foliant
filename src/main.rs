@@ -106,6 +106,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut last_report = Instant::now();
             let mut entries = 0usize;
             let mut bytes_in = 0usize;
+            // Capture any JSON parsing errors to exit gracefully after saving index
+            let mut parse_error: Option<String> = None;
             for line in reader.lines() {
                 let line = line?;
                 if line.is_empty() {
@@ -115,18 +117,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 entries += 1;
 
                 if let Some(ref keyname) = json {
-                    // Parse JSON object and extract key/value
-                    let mut jv: serde_json::Value = serde_json::from_str(&line)?;
-                    let obj = jv.as_object_mut()
-                        .ok_or_else(|| "expected JSON object per line".to_string())?;
-                    let key_val = obj.remove(keyname)
-                        .ok_or_else(|| format!("missing key field '{}'", keyname))?;
-                    let key_str = key_val.as_str()
-                        .ok_or_else(|| format!("key field '{}' is not a string", keyname))?;
-                    // Serialize remaining JSON object to CBOR bytes and insert
-                    builder.insert(key_str, Some(jv));
+                    // Attempt to parse JSON and extract the key; on error, record and break
+                    let res = (|| -> Result<(), String> {
+                        let mut jv: serde_json::Value = serde_json::from_str(&line)
+                            .map_err(|e| format!("JSON parse error: {}", e))?;
+                        let obj = jv.as_object_mut()
+                            .ok_or_else(|| "expected JSON object per line".to_string())?;
+                        let key_val = obj.remove(keyname)
+                            .ok_or_else(|| format!("missing key field '{}'", keyname))?;
+                        let key_str = key_val.as_str()
+                            .ok_or_else(|| format!("key field '{}' is not a string", keyname))?;
+                        builder.insert(key_str, Some(jv));
+                        Ok(())
+                    })();
+                    if let Err(err) = res {
+                        parse_error = Some(err);
+                        break;
+                    }
                 } else {
-                    // No JSON key: insert without payload
                     builder.insert(&line, None);
                 }
 
@@ -147,6 +155,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("Writing index...");
             let write_start = Instant::now();
             builder.close()?;
+            // If a JSON parsing error occurred, exit now after saving indexed data
+            if let Some(err_msg) = parse_error {
+                eprintln!("Error processing entry {}: {}", entries, err_msg);
+                std::process::exit(1);
+            }
             let write_duration = write_start.elapsed();
             // Metrics
             let secs = duration.as_secs_f64();
