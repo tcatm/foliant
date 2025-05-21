@@ -199,7 +199,13 @@ pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) 
                         let arg = parts.next().unwrap_or("");
                         let mut state_mut = state.borrow_mut();
                         let delim_char = state_mut.delim;
-                        if arg == ".." {
+
+                        // If no argument, go to root
+                        if arg.is_empty() {
+                            state_mut.cwd.clear();
+
+                        } else if arg == ".." {
+                            // Move up one directory
                             if let Some(end) = state_mut.cwd.rfind(|c| c != delim_char) {
                                 if let Some(idx) = state_mut.cwd[..=end].rfind(delim_char) {
                                     state_mut.cwd.truncate(idx + 1);
@@ -209,12 +215,11 @@ pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) 
                             } else {
                                 state_mut.cwd.clear();
                             }
+
                         } else {
-                            // Append segment: if arg begins with delimiter, don't insert extra delimiter
+                            // Append segment: if cwd is empty or arg begins with the delimiter, just push it
                             if state_mut.cwd.is_empty() {
                                 state_mut.cwd = arg.to_string();
-                            } else if arg.starts_with(delim_char) {
-                                state_mut.cwd.push_str(arg);
                             } else {
                                 state_mut.cwd.push_str(arg);
                             }
