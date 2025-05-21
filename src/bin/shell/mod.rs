@@ -160,9 +160,6 @@ pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) 
                             if let Some(target) = parts.next() {
                                 if !target.is_empty() {
                                     p.push_str(target);
-                                    if target.chars().last() != Some(state_ref.delim) {
-                                        p.push(state_ref.delim);
-                                    }
                                 }
                             }
                             (p, state_ref.delim)
