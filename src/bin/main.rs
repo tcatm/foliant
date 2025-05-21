@@ -3,8 +3,11 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::PathBuf;
 use std::time::{Instant, Duration};
-use foliant::{Database, DatabaseBuilder, Entry};
+use foliant::{Database, DatabaseBuilder, Entry, DatabaseGroup, DatabaseAccess};
+use std::rc::Rc;
 use foliant::Streamer;
+use foliant::IndexError;
+use serde::de::DeserializeOwned;
 use serde_json::{self, Value};
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
@@ -89,6 +92,20 @@ enum Commands {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
+    // Helper to open either a single database or a directory of shards, with optional delimiter
+    fn load_db<V>(path: &std::path::PathBuf, delim_opt: Option<char>) -> Result<Rc<dyn DatabaseAccess<V>>, IndexError>
+    where V: DeserializeOwned + 'static {
+        // Determine delimiter, defaulting to '/'
+        let d = delim_opt.unwrap_or('/');
+        if path.is_dir() {
+            let grp = DatabaseGroup::open_dir(path, d)?;
+            Ok(Rc::new(grp))
+        } else {
+            let db = Database::<V>::open(path)?;
+            Ok(Rc::new(db))
+        }
+    }
+    
     match cli.command {
         Commands::Index { index, input, json } => {
             // Build the database on-disk via builder, measuring throughput
@@ -202,13 +219,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::List { index, prefix, delimiter } => {
-            // Open read-only database via mmap
+            // Open read-only database or sharded directory via mmap
             let load_start = Instant::now();
-            let db = Database::<Value>::open(&index)?;
+            let db_handle: Rc<dyn DatabaseAccess<Value>> = load_db(&index, delimiter)?;
             let load_duration = load_start.elapsed();
             // Stream and print entries with realtime progress
             let stream_start = Instant::now();
-            let mut stream = db.list(&prefix, delimiter);
+            let mut stream = db_handle.list(&prefix, delimiter);
             let stream_duration = stream_start.elapsed();
             let mut printed = 0usize;
             let list_start = Instant::now();
@@ -242,8 +259,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Commands::Shell { index, delimiter } => {
-            let db = Database::<Value>::open(&index)?;
-            run_shell(db, delimiter)?;
+            // Open single DB or sharded directory for interactive shell
+            // Reuse the same helper as List
+            let db_handle: Rc<dyn DatabaseAccess<Value>> = load_db(&index, Some(delimiter))?;
+            run_shell(db_handle, delimiter)?;
         }
     }
 

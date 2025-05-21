@@ -15,6 +15,9 @@ use std::fmt;
 use serde::Serialize;
 mod payload_store;
 use payload_store::{PayloadStoreBuilder, PayloadStore};
+// Optional sharded database support
+mod database_group;
+pub use database_group::{DatabaseGroup, DatabaseAccess};
 use serde::de::DeserializeOwned;
 use std::path::PathBuf;
 use serde_cbor::Value as Value;
@@ -93,6 +96,16 @@ pub trait Streamer {
             v.push(item);
         }
         v
+    }
+}
+// Blanket impl so that Box<dyn Streamer> itself implements Streamer
+impl<S> Streamer for Box<S>
+where
+    S: Streamer + ?Sized,
+{
+    type Item = S::Item;
+    fn next(&mut self) -> Option<Self::Item> {
+        (**self).next()
     }
 }
 

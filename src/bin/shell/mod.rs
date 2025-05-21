@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::collections::HashSet;
 
-use foliant::{Database, Entry, Streamer};
+use foliant::{Entry, Streamer, DatabaseAccess};
 use ctrlc;
 use std::sync::{mpsc::{channel, Receiver}, Arc, atomic::{AtomicU64, Ordering}};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -65,7 +65,7 @@ where
 }
 
 struct ShellState<V: DeserializeOwned> {
-    db: Database<V>,
+    db: Rc<dyn DatabaseAccess<V>>,
     delim: char,
     cwd: String,
 }
@@ -169,7 +169,7 @@ impl<V: DeserializeOwned> Hinter for ShellHelper<V> {
 impl<V: DeserializeOwned> Highlighter for ShellHelper<V> {}
 impl<V: DeserializeOwned> Validator for ShellHelper<V> {}
 
-pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_shell<V: DeserializeOwned + Serialize>(db: Rc<dyn DatabaseAccess<V>>, delim: char) -> Result<(), Box<dyn std::error::Error>> {
     let state = Rc::new(RefCell::new(ShellState { db, delim, cwd: String::new() }));
     let helper = ShellHelper { state: Rc::clone(&state) };
     let mut rl = Editor::new()?;
@@ -191,6 +191,8 @@ pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) 
     }
 
     println!("Database contains {} entries", state.borrow().db.len());
+    // Clone the database handle for use in commands (avoids borrow conflicts)
+    let db_global = state.borrow().db.clone();
     // Help text for interactive shell commands and Ctrl-C behavior
     let help_text = "\
 Available commands:
@@ -320,34 +322,40 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
                         }
                     }
                     "find" => {
-                        // Search for keys by regex under current cwd
+                        // Search for keys matching a regex under the current working directory
                         let pattern = match parts.next() {
                             Some(p) => p,
                             None => { println!("Usage: find <regex>"); continue; }
                         };
-                        let state_ref = state.borrow();
-                        // Determine prefix: None if at root, else Some(cwd)
-                        let cwd_opt = if state_ref.cwd.is_empty() {
+                        // Clone the database handle and snapshot cwd
+                        let db_rc = db_global.clone();
+                        let cwd_owned = state.borrow().cwd.clone();
+                        // Compute optional prefix and display string from cwd
+                        let prefix_opt: Option<&str> = if cwd_owned.is_empty() {
                             None
                         } else {
-                            Some(state_ref.cwd.as_str())
+                            Some(cwd_owned.as_str())
                         };
-                        match state_ref.db.grep(cwd_opt, pattern) {
-                            Ok(mut stream) => {
-                                // Only keys, skip directories
-                                match print_entries(&mut stream, false, true, Some(&sig_rx))? {
-                                    PrintResult::Aborted => continue,
-                                    PrintResult::Count(printed) => {
-                                        if printed > 0 {
-                                            println!("\n{} {} found", printed,
-                                                if printed == 1 { "entry" } else { "entries" });
-                                        } else {
-                                            println!("No entries matching '{}'", pattern);
-                                        }
-                                    }
+                        let display_cwd: &str = if cwd_owned.is_empty() {
+                            "/"
+                        } else {
+                            cwd_owned.as_str()
+                        };
+                        // Run grep with optional prefix
+                        let mut stream = match db_rc.grep(prefix_opt, pattern) {
+                            Ok(s) => s,
+                            Err(e) => { println!("Error running find: {}", e); continue; }
+                        };
+                        match print_entries(&mut stream, false, true, Some(&sig_rx))? {
+                            PrintResult::Aborted => continue,
+                            PrintResult::Count(printed) => {
+                                if printed > 0 {
+                                    println!("\n{} {} found", printed,
+                                        if printed == 1 { "entry" } else { "entries" });
+                                } else {
+                                    println!("No entries matching '{}' in '{}'", pattern, display_cwd);
                                 }
                             }
-                            Err(e) => println!("Error running find: {}", e),
                         }
                     }
                     "cd" => {
