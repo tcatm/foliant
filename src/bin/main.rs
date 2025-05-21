@@ -9,6 +9,9 @@ use serde_json::{self, Value};
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
 
+mod shell;
+use shell::run_shell;
+
 // Cross-platform resident set size (RSS) in KB; uses getrusage on UNIX.
 #[cfg(unix)]
 fn get_rss_kb() -> Option<usize> {
@@ -35,6 +38,7 @@ fn get_rss_kb() -> Option<usize> {
         }
     }
 }
+
 #[cfg(not(unix))]
 fn get_rss_kb() -> Option<usize> { None }
 /// A simple CLI for building and querying a Trie index.
@@ -71,6 +75,15 @@ enum Commands {
         #[arg(short, long, value_name = "DELIM")]
         delimiter: Option<char>,
     },
+    /// Interactive shell for browsing the index
+    Shell {
+        /// Path to the serialized index
+        #[arg(short, long, value_name = "FILE")]
+        index: PathBuf,
+        /// Delimiter character for grouping
+        #[arg(short, long, value_name = "DELIM")]
+        delimiter: char,
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -85,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let pb = if let Some(total) = total_bytes {
                 let pb = ProgressBar::new(total);
                 pb.set_style(
-                    ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%) {msg}")?
+                    ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] [{eta_precise}] {bytes}/{total_bytes} ({percent}%) {msg}")?
                         .progress_chars("#>-")
                 );
                 pb
@@ -227,6 +240,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 total_duration.as_secs_f64() * 1000.0,
                 printed,
             );
+        }
+        Commands::Shell { index, delimiter } => {
+            let db = Database::<Value>::open(&index)?;
+            run_shell(db, delimiter)?;
         }
     }
 
