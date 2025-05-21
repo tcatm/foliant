@@ -1,13 +1,21 @@
-use std::collections::HashSet;
-use std::io::{self, Write, Seek, SeekFrom};
+use std::io::{self};
 use std::fs::File;
 use std::path::Path;
-use std::sync::Arc;
+use fst::raw::Output;
 use memmap2::Mmap;
-use std::convert::TryInto;
+use std::io::BufWriter;
+use fst::MapBuilder;
 use std::fmt;
 use serde::Serialize;
-pub use serde_cbor::Value as Value;
+mod payload_store;
+use payload_store::{PayloadStoreBuilder, PayloadStore};
+use serde::de::DeserializeOwned;
+use std::path::PathBuf;
+use serde_cbor::Value as Value;
+pub type Result<T> = std::result::Result<T, IndexError>;
+
+// Create a buffered writer for the index file
+const CHUNK_SIZE: usize = 128 * 1024;
 
 /// Error type for the index library.
 #[derive(Debug)]
@@ -42,14 +50,11 @@ impl From<io::Error> for IndexError {
     }
 }
 
-/// Result type for index operations.
-pub type Result<T> = std::result::Result<T, IndexError>;
-mod storage;
-mod payload_store;
-use storage::{NodeStorage, generic_find_prefix, generic_children};
-use payload_store::{PayloadStoreBuilder, PayloadStore};
-use serde::de::DeserializeOwned;
-use std::path::PathBuf;
+impl From<fst::Error> for IndexError {
+    fn from(err: fst::Error) -> IndexError {
+        IndexError::Io(io::Error::new(io::ErrorKind::Other, format!("fst error: {}", err)))
+    }
+}
 
 /// Opaque handle for navigating the on-disk trie
 #[derive(Clone, Copy, Debug)]
@@ -63,157 +68,8 @@ pub struct Database<V = Value>
 where
     V: DeserializeOwned,
 {
-    idx: Arc<Mmap>,
+    fst_idx: fst::Map<Mmap>,
     payload: PayloadStore<V>,
-}
-// Manually implement Clone since derived bounds are too strict
-impl<V> Clone for Database<V>
-where
-    V: DeserializeOwned,
-{
-    fn clone(&self) -> Self {
-        Database { idx: self.idx.clone(), payload: self.payload.clone() }
-    }
-}
-
-// Magic header for the new indexed format: 4 bytes, 'I','D','X','1'
-// Followed by 8-byte payload section start offset (u64 LE)
-const MAGIC: [u8; 4] = *b"IDX1";
-// Named length constants for header parsing
-const HEADER_LEN: usize = MAGIC.len() + 8;         // 4 + payload_offset (8)
-// Node header: is_end (1) + child_count (2) + payload pointer (8)
-const NODE_HEADER_LEN: usize = 1 + 2 + 8;
-const INDEX_ENTRY_LEN: usize = 1 + 8;             // first_byte (u8) + child_offset (u64)
-const LABEL_LEN_LEN: usize = 2;                   // u16 label length
-
-/// A node in the trie.
-#[derive(Default, Debug, Clone)]
-struct TrieNode {
-    /// Optional pointer (offset+1) into the payload file; 0 means no payload.
-    payload_ptr: Option<u64>,
-    /// Each edge is labeled by a (possibly multi-character) string
-    children: Vec<(String, Box<TrieNode>)>,
-    is_end: bool,
-}
-
-// --- Generic trie backend abstraction to unify both in-memory and mmap implementations ---
-/// Result of finding a prefix in a trie backend.
-enum GenericFindResult<H> {
-    Node(H),
-    EdgeMid(H, String),
-}
-
-/// Trait for a trie backend that can find prefixes, check terminal nodes, and list children.
-/// Backend abstraction for generic trie traversal and grouping.
-trait TrieBackend: Clone {
-    type Handle: Clone;
-    fn find_prefix(&self, prefix: &str) -> Option<GenericFindResult<Self::Handle>>;
-    fn is_end(&self, handle: &Self::Handle) -> bool;
-    fn children(&self, handle: &Self::Handle) -> Vec<(String, Self::Handle)>;
-
-    /// Streaming iterator over entries under `prefix`, grouping at the first `delimiter`.
-    fn list_iter(&self, prefix: &str, delimiter: Option<char>) -> GenericTrieIter<Self>
-    where Self: Sized
-    {
-        let pref = prefix.to_string();
-        match self.find_prefix(prefix) {
-            Some(GenericFindResult::Node(h)) =>
-                GenericTrieIter::new(self.clone(), pref.clone(), delimiter, h),
-            Some(GenericFindResult::EdgeMid(h, tail)) => {
-                let mut init = pref.clone(); init.push_str(&tail);
-                GenericTrieIter::with_init(self.clone(), pref.clone(), delimiter,
-                    vec![(h, init)])
-            }
-            None =>
-                GenericTrieIter::empty(self.clone(), pref.clone(), delimiter),
-        }
-    }
-
-}
-
-
-/// A generic grouped-iterator over a trie backend.
-#[derive(Clone)]
-struct GenericTrieIter<B: TrieBackend> {
-    backend: B,
-    stack: Vec<(B::Handle, String)>,
-    prefix: String,
-    delimiter: Option<char>,
-    seen: HashSet<String>,
-}
-impl<B: TrieBackend> GenericTrieIter<B> {
-    fn new(backend: B, prefix: String, delimiter: Option<char>, handle: B::Handle) -> Self {
-        GenericTrieIter {
-            backend,
-            stack: vec![(handle, prefix.clone())],
-            prefix,
-            delimiter,
-            seen: HashSet::new(),
-        }
-    }
-    fn with_init(
-        backend: B,
-        prefix: String,
-        delimiter: Option<char>,
-        init: Vec<(B::Handle, String)>,
-    ) -> Self {
-        GenericTrieIter {
-            backend,
-            stack: init,
-            prefix,
-            delimiter,
-            seen: HashSet::new(),
-        }
-    }
-    fn empty(backend: B, prefix: String, delimiter: Option<char>) -> Self {
-        GenericTrieIter {
-            backend,
-            stack: Vec::new(),
-            prefix,
-            delimiter,
-            seen: HashSet::new(),
-        }
-    }
-}
-impl<B: TrieBackend> Iterator for GenericTrieIter<B> {
-    type Item = Entry;
-    fn next(&mut self) -> Option<Self::Item> {
-        while let Some((h, path)) = self.stack.pop() {
-            if let Some(d) = self.delimiter {
-                if path.starts_with(&self.prefix) {
-                    let suffix = &path[self.prefix.len()..];
-                    if let Some(i) = suffix.find(d) {
-                        let group = path[..self.prefix.len() + i + 1].to_string();
-                        if self.seen.insert(group.clone()) {
-                            return Some(Entry::CommonPrefix(group));
-                        }
-                        continue;
-                    }
-                    if !suffix.is_empty() && path.ends_with(d)
-                        && self.seen.insert(path.clone())
-                    {
-                        return Some(Entry::CommonPrefix(path.clone()));
-                    }
-                }
-            }
-            let is_term = self.backend.is_end(&h);
-            // Children are pre-sorted by NodeStorage implementations
-            for (lbl, child) in self.backend.children(&h) {
-                let mut np = path.clone();
-                np.push_str(&lbl);
-                self.stack.push((child, np));
-            }
-            if is_term && path.starts_with(&self.prefix) {
-                if let Some(d) = self.delimiter {
-                    if path.ends_with(d) {
-                        return Some(Entry::CommonPrefix(path.clone()));
-                    }
-                }
-                return Some(Entry::Key(path.clone()));
-            }
-        }
-        None
-    }
 }
 
 /// Trait for streaming items, similar to `Iterator`.
@@ -234,30 +90,17 @@ pub trait Streamer {
     }
 }
 
-impl<B> Streamer for GenericTrieIter<B>
-where
-    B: TrieBackend,
-{
-    type Item = Entry;
-    fn next(&mut self) -> Option<Self::Item> {
-        Iterator::next(self)
-    }
-}
-
-/// Builder for creating a new on-disk database. Use `new(path)` to begin,
-/// call `insert(key, value)` as needed, then `close()` to write index and payload files.
-/// Builder for creating a new on-disk database with values of type V.
-/// Insert keys and optional V payloads, then call `close()` to write index and payload files.
 /// Builder for creating a new on-disk database with values of type V.
 /// Insert keys with `insert()`, then call `close()` or `into_database()`.
 pub struct DatabaseBuilder<V = Value>
 where
     V: Serialize,
 {
-    /// Base path (without extension) for .idx and .payload files
+    /// Base path for .idx (fst) and .payload files
     base: PathBuf,
-    root: TrieNode,
-    idx_file: File,
+    /// FST index builder (writes to <base>.idx)
+    fst_builder: MapBuilder<BufWriter<File>>,
+    /// Payload store builder (writes to <base>.payload)
     payload_store: PayloadStoreBuilder<V>,
 }
 
@@ -267,200 +110,40 @@ impl<V: Serialize> DatabaseBuilder<V> {
         let base = base.as_ref().to_path_buf();
         let idx_path = base.with_extension("idx");
         let payload_path = base.with_extension("payload");
-        // Truncate or create files
-        let idx_file = File::create(&idx_path)?;
+
+        let fst_file = File::create(&idx_path)
+            .map_err(|e| IndexError::Io(io::Error::new(e.kind(), format!("failed to create index file: {}", e))))?;
+
+        let fst_writer = BufWriter::with_capacity(CHUNK_SIZE, fst_file);
+        let fst_builder = MapBuilder::new(fst_writer)
+            .map_err(|e| IndexError::Io(io::Error::new(io::ErrorKind::Other, format!("failed to create index builder: {}", e))))?;
+
+        // Create payload store for writing
         let payload_store = PayloadStoreBuilder::<V>::open(&payload_path)?;
         Ok(DatabaseBuilder {
             base,
-            root: TrieNode::default(),
-            idx_file,
+            fst_builder,
             payload_store,
         })
     }
 
-
-    /// Mutable lookup of a node by exact key.
-    fn find_node_mut<'a>(mut node: &'a mut TrieNode, mut rem: &str) -> Option<&'a mut TrieNode> {
-        if rem.is_empty() {
-            return Some(node);
-        }
-        loop {
-            let mut matched = false;
-            // Iterate by index to avoid borrowing entire children vector
-            for i in 0..node.children.len() {
-                let label = &node.children[i].0;
-                if rem.starts_with(label.as_str()) {
-                    rem = &rem[label.len()..];
-                    let child = &mut node.children[i].1;
-                    node = child.as_mut();
-                    matched = true;
-                    break;
-                }
-            }
-            if !matched {
-                return None;
-            }
-            if rem.is_empty() {
-                return Some(node);
-            }
-        }
-    }
-
-
-    /// Compute the byte-length of the common prefix of `a` and `b`.
-    fn common_prefix_len(a: &str, b: &str) -> usize {
-        let mut prefix_len = 0;
-        let mut b_chars = b.chars();
-        for (i, ac) in a.char_indices() {
-            if let Some(bc) = b_chars.next() {
-                if ac == bc {
-                    prefix_len = i + ac.len_utf8();
-                    continue;
-                }
-            }
-            break;
-        }
-        prefix_len
-    }
-
-    /// Write a trie node, recording its payload in payload_buf and writing
-    /// a pointer to that payload.
-    fn write_node_with_pointers<W: Write + Seek>(
-        node: &TrieNode,
-        w: &mut W,
-        payload_store: &mut crate::payload_store::PayloadStoreBuilder<V>,
-    ) -> io::Result<()> {
-        // header: is_end (1 byte) + child_count (2 bytes LE)
-        w.write_all(&[node.is_end as u8])?;
-        let count = node.children.len() as usize;
-        w.write_all(&(count as u16).to_le_bytes())?;
-        // payload pointer (u64 LE): offset into payload file (0 if none)
-        let ptr = node.payload_ptr.unwrap_or(0);
-        w.write_all(&ptr.to_le_bytes())?;
-        // Reserve space for the index table (count entries × INDEX_ENTRY_LEN bytes)
-        let index_pos = w.stream_position()?;
-        let zero_table = vec![0u8; count * INDEX_ENTRY_LEN];
-        w.write_all(&zero_table)?;
-        // sort children by first byte for binary-searchable index
-        let mut children: Vec<_> = node.children.iter().collect();
-        children.sort_by_key(|(label, _)| label.as_bytes().first().cloned().unwrap_or(0));
-        // write each child blob and record its offset
-        let mut entries: Vec<(u8, u64)> = Vec::with_capacity(count);
-        for (label, child) in children {
-            let first_byte = label.as_bytes().first().cloned().unwrap_or(0);
-            let child_offset = w.stream_position()?;
-            // write label
-            let len = label.len() as u16;
-            w.write_all(&len.to_le_bytes())?;
-            w.write_all(label.as_bytes())?;
-            // write subtree recursively
-            Self::write_node_with_pointers(child, w, payload_store)?;
-            entries.push((first_byte, child_offset));
-        }
-        // Fill in the index table in one buffered write
-        let after_pos = w.stream_position()?;
-        w.seek(SeekFrom::Start(index_pos))?;
-        let mut table_buf = Vec::with_capacity(entries.len() * INDEX_ENTRY_LEN);
-        for (first_byte, offset) in &entries {
-            table_buf.push(*first_byte);
-            table_buf.extend_from_slice(&offset.to_le_bytes());
-        }
-        w.write_all(&table_buf)?;
-        w.seek(SeekFrom::Start(after_pos))?;
-        Ok(())
-    }
-
-
-    /// Insert a key with an optional value `V`, storing the payload and splitting edges on partial matches.
-    /// The value is serialized into the payload store and referenced by the node.
+    /// Insert a key with an optional value `V` into the database.
     pub fn insert(&mut self, key: &str, value: Option<V>) {
         // Append payload via PayloadStoreBuilder; returns offset+1 (0 means no payload)
         let ptr = self.payload_store.append(value)
             .expect("payload append failed");
-  
-        // raw pointer to root for payload attachment
-        let root_ptr: *mut TrieNode = &mut self.root as *mut TrieNode;
-        let mut node: &mut TrieNode = &mut self.root;
-        let mut suffix = key;
-        loop {
-            let mut matched = false;
-            for i in 0..node.children.len() {
-                let (ref label, _) = node.children[i];
-                let lcp = Self::common_prefix_len(label, suffix);
-                if lcp == 0 {
-                    continue;
-                }
-                let (orig_label, orig_child) = node.children.remove(i);
-                if lcp < orig_label.len() {
-                    // Split edge into intermediate node
-                    let mut intermediate = TrieNode::default();
-                    let label_rem = &orig_label[lcp..];
-                    intermediate.children.push((label_rem.to_string(), orig_child));
-                    let key_rem = &suffix[lcp..];
-                    if key_rem.is_empty() {
-                        intermediate.is_end = true;
-                    } else {
-                        let mut leaf = TrieNode::default();
-                        leaf.is_end = true;
-                        intermediate.children.push((key_rem.to_string(), Box::new(leaf)));
-                    }
-                    let prefix_label = &orig_label[..lcp];
-                    node.children.insert(i, (prefix_label.to_string(), Box::new(intermediate)));
-                    // attach payload pointer to this node
-                    unsafe {
-                        if let Some(n) = Self::find_node_mut(&mut *root_ptr, key) {
-                            n.payload_ptr = Some(ptr);
-                        }
-                    }
-                    return;
-                } else {
-                    // Consume full edge label
-                    suffix = &suffix[lcp..];
-                    node.children.insert(i, (orig_label, orig_child));
-                    if suffix.is_empty() {
-                        node.children[i].1.is_end = true;
-                        // attach payload pointer to this node
-                        unsafe {
-                            if let Some(n) = Self::find_node_mut(&mut *root_ptr, key) {
-                                n.payload_ptr = Some(ptr);
-                            }
-                        }
-                        return;
-                    }
-                    node = &mut node.children[i].1;
-                    matched = true;
-                    break;
-                }
-            }
-            if !matched {
-                // No matching edge; append new leaf
-                let mut leaf = TrieNode::default();
-                leaf.is_end = true;
-                node.children.push((suffix.to_string(), Box::new(leaf)));
-                // attach payload pointer to this node
-                unsafe {
-                    if let Some(n) = Self::find_node_mut(&mut *root_ptr, key) {
-                        n.payload_ptr = Some(ptr);
-                    }
-                }
-                return;
-            }
-        }
+        // Insert key into the FST builder, with a pointer to the payload
+        self.fst_builder.insert(key, ptr)
+            .expect("FST insert failed");
     }
 
     /// Finalize and write index and payload files to disk, batching writes via a buffer.
-    pub fn close(mut self) -> Result<()> {
-        use std::io::BufWriter;
-        const CHUNK_SIZE: usize = 128 * 1024;
-        // Wrap the index file in a buffered writer (128KiB) to batch writes
-        let mut w = BufWriter::with_capacity(CHUNK_SIZE, self.idx_file);
-        // Write magic header and placeholder payload offset
-        w.write_all(&MAGIC)?;
-        w.write_all(&0u64.to_le_bytes())?;
-        // Write trie nodes and payload pointers via our generic writer
-        Self::write_node_with_pointers(&self.root, &mut w, &mut self.payload_store)?;
-        // Flush buffered writes to disk
-        w.flush().map_err(IndexError::Io)?;
+    pub fn close(self) -> Result<()> {
+        // Finalize the FST builder
+        self.fst_builder
+            .finish()
+            .map_err(|e| IndexError::Io(io::Error::new(io::ErrorKind::Other, format!("failed to finalize index builder: {}", e))))?;
+
         // Flush payload store
         self.payload_store.close()?;
         Ok(())
@@ -478,175 +161,223 @@ impl<V: Serialize> DatabaseBuilder<V> {
 
 }
 
-// NodeStorage implementation for on-disk, mmap-backed Database<V>
-impl<V> NodeStorage for Database<V>
-where
-    V: DeserializeOwned,
-{
-    type Handle = Handle;
-    fn root_handle(&self) -> Self::Handle {
-        // root node begins immediately after the 4-byte magic + 8-byte header
-        Handle::Mmap(HEADER_LEN)
-    }
-
-    fn is_terminal(&self, handle: &Self::Handle) -> io::Result<bool> {
-        // Only mmap-backed handles are supported
-        let Handle::Mmap(offset) = *handle;
-        Ok(self.idx.get(offset).copied().unwrap_or(0) != 0)
-    }
-
-    fn read_children(&self, handle: &Self::Handle) -> io::Result<Vec<(String, Self::Handle)>> {
-        // Only mmap-backed handles are supported
-        let Handle::Mmap(mut pos) = *handle;
-        let buf = &*self.idx;
-        // ensure we can read node header
-        if pos + NODE_HEADER_LEN > buf.len() {
-            return Ok(Vec::new());
-        }
-        // read child count (u16 LE) at byte 1..3
-        let count = u16::from_le_bytes([buf[pos + 1], buf[pos + 2]]) as usize;
-        // skip header (is_end + child_count + payload ptr)
-        pos += NODE_HEADER_LEN;
-        // read index entries: each is [first_byte (1), child_offset (8)]
-        let mut offsets = Vec::with_capacity(count);
-        for i in 0..count {
-            let ent = pos + i * INDEX_ENTRY_LEN;
-            if ent + INDEX_ENTRY_LEN > buf.len() {
-                break;
-            }
-            let off = u64::from_le_bytes(
-                buf[ent + 1..ent + 9]
-                    .try_into()
-                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "truncated index entry"))?
-            ) as usize;
-            offsets.push(off);
-        }
-        // collect children: read label and sub-node offset
-        let mut out = Vec::with_capacity(offsets.len());
-        for off in offsets {
-            let mut p = off;
-            if p + LABEL_LEN_LEN > buf.len() {
-                continue;
-            }
-            let l = u16::from_le_bytes([buf[p], buf[p + 1]]) as usize;
-            p += LABEL_LEN_LEN;
-            if p + l > buf.len() {
-                continue;
-            }
-            let label = std::str::from_utf8(&buf[p..p + l])
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-                .to_string();
-            // next byte offset marks the start of this child's subtree
-            out.push((label, Handle::Mmap(p + l)));
-        }
-        out.sort_by(|a, b| b.0.cmp(&a.0));
-        Ok(out)
-    }
-}
-
-// Implement the generic TrieBackend trait for the mmap-backed Database<V>
-impl<V> TrieBackend for Database<V>
-where
-    V: DeserializeOwned,
-{
-    type Handle = Handle;
-    fn find_prefix(&self, prefix: &str) -> Option<GenericFindResult<Self::Handle>> {
-        generic_find_prefix(self, prefix).ok().flatten()
-    }
-    fn is_end(&self, handle: &Self::Handle) -> bool {
-        NodeStorage::is_terminal(self, handle).unwrap_or(false)
-    }
-    fn children(&self, handle: &Self::Handle) -> Vec<(String, Self::Handle)> {
-        generic_children(self, handle).unwrap_or_default()
-    }
-}
-
-// Inherent implementation of Index methods
 impl<V> Database<V>
 where
     V: DeserializeOwned,
 {
-    /// Open an indexed radix trie via mmap.
-    /// If separate index (.idx) and payload (.payload) files are present under the given base path, they will be opened.
-    /// Otherwise, a combined index file is expected at the given path, beginning with the 4-byte MAGIC header "IDX1",
-    /// followed by an 8-byte payload section start offset (u64 LE).
-    /// Open a read-only database via mmap. Expects separate index (.idx) and payload (.payload) files.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let base = path.as_ref();
         let idx_path = base.with_extension("idx");
         let payload_path = base.with_extension("payload");
-        // Open and map index file
-        let idx_file = File::open(&idx_path)?;
-        let idx_mmap = unsafe { Mmap::map(&idx_file)? };
-        // Check magic header in index file
-        if idx_mmap.len() < MAGIC.len() || &idx_mmap[..MAGIC.len()] != &MAGIC {
-            return Err(IndexError::InvalidFormat("missing or corrupt magic header"));
-        }
-        // Open payload store for reading
-        let payload_store = PayloadStore::open(&payload_path)?;
-        Ok(Database { idx: Arc::new(idx_mmap), payload: payload_store })
+        
+        // Open the index file
+        let idx_file = File::open(&idx_path)
+            .map_err(|e| IndexError::Io(io::Error::new(e.kind(), format!("failed to open index file: {}", e))))?;
+        let idx_mmap = unsafe { Mmap::map(&idx_file) }
+            .map_err(|e| IndexError::Io(io::Error::new(e.kind(), format!("failed to mmap index file: {}", e))))?;
+  
+        // Create the payload store from the memory-mapped file 
+        let payload_store = PayloadStore::<V>::open(payload_path)?;
+        // Create the FST index from the memory-mapped file
+        let fst_idx = fst::Map::new(idx_mmap)
+            .map_err(|e| IndexError::Io(io::Error::new(io::ErrorKind::Other, format!("failed to create index map: {}", e))))?;
+        // Return the database
+        Ok(Database {
+            fst_idx,
+            payload: payload_store,
+        })
     }
     
-    /// Streaming interface over entries under `prefix`, grouping at the first `delimiter`.
-    pub fn list(&self, prefix: &str, delimiter: Option<char>) -> impl Streamer<Item = Entry> {
-        <Self as TrieBackend>::list_iter(self, prefix, delimiter)
+    pub fn list(&self, prefix: &str, delimiter: Option<char>) -> impl Streamer<Item = Entry<V>> + '_ {
+        let raw_fst = self.fst_idx.as_fst();
+        let delim = delimiter.map(|c| c as u8);
+        // Navigate to the node corresponding to `prefix`, accumulate outputs
+        let mut node = raw_fst.root();
+        let mut output: Output = node.final_output();
+        for &b in prefix.as_bytes() {
+            if let Some(idx) = node.find_input(b) {
+                let tr = node.transition(idx);
+                output = output.cat(tr.out);
+                node = raw_fst.node(tr.addr);
+            } else {
+                // Prefix not present: empty
+                return ListStreamer {
+                    fst: raw_fst,
+                    payload: &self.payload,
+                    delim,
+                    prefix: Vec::new(),
+                    stack: Vec::new(),
+                };
+            }
+        }
+        // Set up shared prefix buffer and initial frame
+        let mut prefix_buf = Vec::with_capacity(prefix.len() + 8);
+        prefix_buf.extend_from_slice(prefix.as_bytes());
+        let stack = vec![Frame {
+            node,
+            output,
+            transition_idx: 0,
+            yielded_final: false,
+            prefix_len: prefix_buf.len(),
+        }];
+        ListStreamer {
+            fst: raw_fst,
+            payload: &self.payload,
+            delim,
+            prefix: prefix_buf,
+            stack,
+        }
     }
 
     /// Get the deserialized payload of type V stored under `key`, if any.
     pub fn get_value(&self, key: &str) -> Result<Option<V>> {
-        if let Some(GenericFindResult::Node(handle)) = <Self as TrieBackend>::find_prefix(self, key) {
-            // Locate pointer in node header: is_end (1) + child_count (2)
-            // payload pointer is at off + 1 + 2
-            let Handle::Mmap(off) = handle;
-            let ptr_pos = off + 1 + 2;
-            if ptr_pos + 8 > self.idx.len() {
-                return Err(IndexError::InvalidFormat("truncated payload pointer"));
-            }
-            let ptr_bytes: [u8; 8] = self.idx[ptr_pos..ptr_pos + 8]
-                .try_into()
-                .map_err(|_| IndexError::InvalidFormat("invalid payload pointer"))?;
-            let ptr_val = u64::from_le_bytes(ptr_bytes);
-            // Retrieve payload data via payload store
-            let v_opt = self.payload.get(ptr_val)
-                .map_err(IndexError::Io)?;
-            Ok(v_opt)
+        // Lookup the key in the FST index
+        let handle = self.fst_idx.get(key);
+        // If found, retrieve the payload from the payload store
+        if let Some(ptr) = handle {
+            self.payload.get(ptr)
+                .map_err(|e| IndexError::Io(io::Error::new(io::ErrorKind::Other, format!("failed to get payload: {}", e))))
         } else {
             Ok(None)
         }
     }
 } // end impl Trie
 
+// Frame for tracking traversal state in ListStreamer
+struct Frame<'a> {
+    node: fst::raw::Node<'a>,
+    /// accumulated output through this node
+    output: Output,
+    /// next transition index to visit
+    transition_idx: usize,
+    /// whether we've yielded the final key at this node
+    yielded_final: bool,
+    /// prefix buffer length when this frame was pushed
+    prefix_len: usize,
+}
+
+/// Streamer for lazily listing entries under a prefix
+pub struct ListStreamer<'a, V>
+where
+    V: DeserializeOwned,
+{
+    fst: &'a fst::raw::Fst<Mmap>,
+    payload: &'a PayloadStore<V>,
+    delim: Option<u8>,
+    /// shared buffer of current key prefix bytes
+    prefix: Vec<u8>,
+    /// DFS stack of frames
+    stack: Vec<Frame<'a>>,
+}
+
+impl<V> Streamer for ListStreamer<'_, V>
+where
+    V: DeserializeOwned,
+{
+    type Item = Entry<V>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(frame) = self.stack.last_mut() {
+            // First, yield the complete key at this node if not yet done
+            if !frame.yielded_final {
+                frame.yielded_final = true;
+                if frame.node.is_final() {
+                    let ptr = frame.output.value();
+                    let value = self.payload.get(ptr)
+                        .expect("failed to get payload in list");
+                    // current prefix buffer holds this key
+                    let key = String::from_utf8(self.prefix.clone())
+                        .expect("invalid utf8 in key");
+                    return Some(Entry::Key(key, value));
+                }
+            }
+            // Next, explore transitions
+            if frame.transition_idx < frame.node.len() {
+                // take next transition
+                let tr = frame.node.transition(frame.transition_idx);
+                frame.transition_idx += 1;
+                let b = tr.inp;
+                let out = frame.output.cat(tr.out);
+                if Some(b) == self.delim {
+                    // group at delimiter: yield prefix+delim
+                    let mut buf = self.prefix.clone();
+                    buf.push(b);
+                    let s = String::from_utf8(buf)
+                        .expect("invalid utf8 in prefix");
+                    return Some(Entry::CommonPrefix(s));
+                } else {
+                    // descend into child
+                    self.prefix.push(b);
+                    let new_node = self.fst.node(tr.addr);
+                    // if only one child, flatten in-place (reuse frame)
+                    if frame.node.len() == 1 {
+                        frame.node = new_node;
+                        frame.output = out;
+                        frame.transition_idx = 0;
+                        frame.yielded_final = false;
+                        frame.prefix_len = self.prefix.len();
+                        continue;
+                    }
+                    // else, push new frame for branching
+                    let prefix_len = self.prefix.len();
+                    self.stack.push(Frame {
+                        node: new_node,
+                        output: out,
+                        transition_idx: 0,
+                        yielded_final: false,
+                        prefix_len,
+                    });
+                    continue;
+                }
+            }
+            // Done with this node: backtrack to parent prefix length
+            self.stack.pop();
+            let new_len = self.stack.last().map(|f| f.prefix_len).unwrap_or(0);
+            self.prefix.truncate(new_len);
+        }
+        None
+    }
+}
+
 /// A listing entry returned by `Database::list`: either a key or a grouped prefix.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Entry {
+#[derive(Debug, Clone)]
+pub enum Entry<V: DeserializeOwned = Value> {
     /// A complete key (an inserted string).
-    Key(String),
+    Key(String, Option<V>),
     /// A common prefix up through the delimiter.
     CommonPrefix(String),
 }
 
-impl Entry {
+impl<V: DeserializeOwned> Entry<V> {
     pub fn as_str(&self) -> &str {
         match self {
-            Entry::Key(s) | Entry::CommonPrefix(s) => s,
+            Entry::Key(s, _) | Entry::CommonPrefix(s) => s,
         }
     }
     pub fn kind(&self) -> &'static str {
         match self {
-            Entry::Key(_) => "Key",
+            Entry::Key(_, _) => "Key",
             Entry::CommonPrefix(_) => "CommonPrefix",
         }
     }
 }
 
-impl std::cmp::PartialOrd for Entry {
-    fn partial_cmp(&self, other: &Entry) -> Option<std::cmp::Ordering> {
+impl<V: DeserializeOwned> PartialEq for Entry<V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl<V: DeserializeOwned> Eq for Entry<V> {}
+
+impl<V: DeserializeOwned> std::cmp::PartialOrd for Entry<V> {
+    fn partial_cmp(&self, other: &Entry<V>) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl std::cmp::Ord for Entry {
-    fn cmp(&self, other: &Entry) -> std::cmp::Ordering {
+impl<V: DeserializeOwned> std::cmp::Ord for Entry<V> {
+    fn cmp(&self, other: &Entry<V>) -> std::cmp::Ordering {
         self.as_str().cmp(other.as_str())
     }
 }

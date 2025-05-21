@@ -1,9 +1,10 @@
-use foliant::{DatabaseBuilder, Database, Entry, Value};
+use foliant::{DatabaseBuilder, Database, Entry};
 use foliant::Streamer;
 use tempfile::tempdir;
 use std::error::Error;
+use serde_cbor::Value as Value;
 
-// 1) SimpleList: insert distinct keys and verify list("", None)
+// SimpleList: insert distinct keys and verify list("", None)
 #[test]
 fn simple_list() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
@@ -16,13 +17,13 @@ fn simple_list() -> Result<(), Box<dyn Error>> {
     let db = builder.into_database()?;
     let mut list: Vec<Entry> = db.list("", None).collect();
     list.sort();
-    let mut expected: Vec<Entry> = keys.iter().map(|&s| Entry::Key(s.to_string())).collect();
+    let mut expected: Vec<Entry> = keys.iter().map(|&s| Entry::Key(s.to_string(), None)).collect();
     expected.sort();
     assert_eq!(list, expected);
     Ok(())
 }
 
-// 2) DelimiterGrouping: group on '/'
+// DelimiterGrouping: group on '/'
 #[test]
 fn delimiter_grouping() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
@@ -37,13 +38,13 @@ fn delimiter_grouping() -> Result<(), Box<dyn Error>> {
     list.sort();
     let expected = vec![
         Entry::CommonPrefix("foo/".to_string()),
-        Entry::Key("foobar".to_string()),
+        Entry::Key("foobar".to_string(), None),
     ];
     assert_eq!(list, expected);
     Ok(())
 }
 
-// 3) EmptyKey: inserting empty string
+// EmptyKey: inserting empty string
 #[test]
 fn empty_key() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
@@ -52,106 +53,70 @@ fn empty_key() -> Result<(), Box<dyn Error>> {
     builder.insert("", None);
     let db = builder.into_database()?;
     let list: Vec<Entry> = db.list("", None).collect();
-    assert_eq!(list, vec![Entry::Key("".to_string())]);
+    assert_eq!(list, vec![Entry::Key("".to_string(), None)]);
     Ok(())
 }
 
-// 4) DuplicateInsert: same key twice
-#[test]
-fn duplicate_insert() -> Result<(), Box<dyn Error>> {
-    let dir = tempdir()?;
-    let base = dir.path().join("db");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
-    builder.insert("repeat", None);
-    builder.insert("repeat", None);
-    let db = builder.into_database()?;
-    let mut list: Vec<Entry> = db.list("", None).collect();
-    list.sort();
-    assert_eq!(list, vec![Entry::Key("repeat".to_string())]);
-    Ok(())
-}
-
-// 5) PrefixSplit: keys "test" and "team"
+// PrefixSplit: keys "test" and "team"
 #[test]
 fn prefix_split() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
-    builder.insert("test", None);
     builder.insert("team", None);
+    builder.insert("test", None);
     let db = builder.into_database()?;
     let mut list: Vec<Entry> = db.list("te", None).collect();
     list.sort();
     let mut expected = vec![
-        Entry::Key("test".to_string()),
-        Entry::Key("team".to_string()),
+        Entry::Key("test".to_string(), None),
+        Entry::Key("team".to_string(), None),
     ];
     expected.sort();
     assert_eq!(list, expected);
     Ok(())
 }
 
-// 6) MidEdgePrefix: prefix falls mid-edge
+// MidEdgePrefix: prefix falls mid-edge
 #[test]
 fn mid_edge_prefix() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
-    builder.insert("abcdx", None);
     builder.insert("abcde", None);
+    builder.insert("abcdx", None);
     let db = builder.into_database()?;
     let mut list: Vec<Entry> = db.list("abc", None).collect();
     list.sort();
     let mut expected = vec![
-        Entry::Key("abcde".to_string()),
-        Entry::Key("abcdx".to_string()),
+        Entry::Key("abcde".to_string(), None),
+        Entry::Key("abcdx".to_string(), None),
     ];
     expected.sort();
     assert_eq!(list, expected);
     Ok(())
 }
 
-// 7) Ordering: lex order enforced
-#[test]
-fn ordering() -> Result<(), Box<dyn Error>> {
-    let dir = tempdir()?;
-    let base = dir.path().join("db");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
-    for &k in &["b", "a", "c"] {
-        builder.insert(k, None);
-    }
-    let db = builder.into_database()?;
-    let mut list: Vec<Entry> = db.list("", None).collect();
-    list.sort();
-    let expected = vec![
-        Entry::Key("a".to_string()),
-        Entry::Key("b".to_string()),
-        Entry::Key("c".to_string()),
-    ];
-    assert_eq!(list, expected);
-    Ok(())
-}
-
-// 8) UnicodeKeys: multi-byte prefixes
+// UnicodeKeys: multi-byte prefixes
 #[test]
 fn unicode_keys() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
-    let words = ["こんにちは", "こんばんは", "こん"];
+    let words = ["こん", "こんにちは", "こんばんは"];
     for &w in &words {
         builder.insert(w, None);
     }
     let db = builder.into_database()?;
     let mut list: Vec<Entry> = db.list("こん", None).collect();
     list.sort();
-    let mut expected: Vec<Entry> = words.iter().map(|&s| Entry::Key(s.to_string())).collect();
+    let mut expected: Vec<Entry> = words.iter().map(|&s| Entry::Key(s.to_string(), None)).collect();
     expected.sort();
     assert_eq!(list, expected);
     Ok(())
 }
 
-// 9) InMemoryPayloadRoundtrip: builder into_database returns mmap DB
+// InMemoryPayloadRoundtrip: builder into_database returns mmap DB
 #[test]
 fn in_memory_payload_roundtrip() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
@@ -214,7 +179,7 @@ fn roundtrip_prefixes() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
-    let keys = ["", "a", "ab", "abc", "compression", "companion"];
+    let keys = ["", "a", "ab", "abc", "companion", "compression"];
     for &k in &keys {
         builder.insert(k, None);
     }

@@ -118,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Parse JSON object and extract key/value
                     let mut jv: serde_json::Value = serde_json::from_str(&line)?;
                     let obj = jv.as_object_mut()
-                        .ok_or_else(|| format!("expected JSON object per line"))?;
+                        .ok_or_else(|| "expected JSON object per line".to_string())?;
                     let key_val = obj.remove(keyname)
                         .ok_or_else(|| format!("missing key field '{}'", keyname))?;
                     let key_str = key_val.as_str()
@@ -180,20 +180,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let load_start = Instant::now();
             let db = Database::<Value>::open(&index)?;
             let load_duration = load_start.elapsed();
-            eprintln!("Loaded database in {:.3} ms", load_duration.as_secs_f64() * 1000.0);
             // Stream and print entries with realtime progress
             let stream_start = Instant::now();
             let mut stream = db.list(&prefix, delimiter);
             let stream_duration = stream_start.elapsed();
-            eprintln!("Stream creation time: {:.3} ms", stream_duration.as_secs_f64() * 1000.0);
             let mut printed = 0usize;
             let list_start = Instant::now();
 
             while let Some(entry) = stream.next() {
                 match entry {
-                    Entry::Key(s) => {
+                    Entry::Key(s, val_opt) => {
                         // print key, followed by optional CBOR-decoded JSON Value in dim color
-                        if let Some(val) = db.get_value(&s)? {
+                        if let Some(val) = val_opt {
                             let val_str = serde_json::to_string(&val)?;
                             println!("📄 {} \x1b[2m{}\x1b[0m", s, val_str);
                         } else {
@@ -205,24 +203,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 printed += 1;
             }
             
-            // finish progress line
-            eprintln!();
             let list_duration = list_start.elapsed();
-            // Output metrics
-            let idx_size = std::fs::metadata(index.with_extension("idx"))?.len();
-            eprintln!("Index size: {} bytes", idx_size);
+            // Output combined metrics
+            let total_duration = load_start.elapsed();
             eprintln!(
-                "Load time: {:.3} ms, Stream time: {:.3} ms, List time: {:.3} ms, Printed {} entries",
+                "\nLoad: {:.3} ms, Stream: {:.3} ms, List: {:.3} ms, Total: {:.3} ms, Printed {} entries",
                 load_duration.as_secs_f64() * 1000.0,
                 stream_duration.as_secs_f64() * 1000.0,
                 list_duration.as_secs_f64() * 1000.0,
-                printed
-            );
-            
-            let total_duration = load_start.elapsed();
-            eprintln!(
-                "Total time: {:.3} ms",
-                total_duration.as_secs_f64() * 1000.0
+                total_duration.as_secs_f64() * 1000.0,
+                printed,
             );
         }
     }

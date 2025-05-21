@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, Write, IoSlice, BufWriter};
+use std::io::{self, Write, BufWriter};
 use std::path::Path;
 use std::sync::Arc;
 use memmap2::Mmap;
@@ -30,8 +30,9 @@ impl<V: Serialize> PayloadStoreBuilder<V> {
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "CBOR serialize failed"))?;
             let current = self.offset;
             let len_bytes = (data.len() as u32).to_le_bytes();
-            let bufs = [IoSlice::new(&len_bytes), IoSlice::new(&data)];
-            self.writer.write_vectored(&bufs)?;
+            // Write length prefix and data
+            self.writer.write_all(&len_bytes)?;
+            self.writer.write_all(&data)?;
             self.offset += 4 + data.len() as u64;
             Ok(current + 1)
         } else {
