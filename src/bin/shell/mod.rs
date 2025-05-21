@@ -200,15 +200,15 @@ pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) 
                         let mut state_mut = state.borrow_mut();
                         let delim_char = state_mut.delim;
                         if arg == ".." {
-                            // Go up one level
-                            if let Some(idx) = state_mut.cwd.rfind(delim_char) {
-                                state_mut.cwd.truncate(idx);
+                            if let Some(end) = state_mut.cwd.rfind(|c| c != delim_char) {
+                                if let Some(idx) = state_mut.cwd[..=end].rfind(delim_char) {
+                                    state_mut.cwd.truncate(idx + 1);
+                                } else {
+                                    state_mut.cwd.clear();
+                                }
                             } else {
                                 state_mut.cwd.clear();
                             }
-                        } else if arg.is_empty() {
-                            // Reset to root
-                            state_mut.cwd.clear();
                         } else {
                             // Append segment: if arg begins with delimiter, don't insert extra delimiter
                             if state_mut.cwd.is_empty() {
