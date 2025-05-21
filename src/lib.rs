@@ -5,6 +5,11 @@ use fst::raw::Output;
 use memmap2::Mmap;
 use std::io::BufWriter;
 use fst::MapBuilder;
+use fst::IntoStreamer;
+use fst::Streamer as FstStreamer;
+use fst::Automaton;
+use fst::map::Stream as MapStream;
+use fst::automaton::{Str, StartsWith};
 use std::fmt;
 use serde::Serialize;
 mod payload_store;
@@ -188,7 +193,13 @@ where
         })
     }
     
-    pub fn list(&self, prefix: &str, delimiter: Option<char>) -> impl Streamer<Item = Entry<V>> + '_ {
+    pub fn list<'a>(&'a self, prefix: &'a str, delimiter: Option<char>) -> ListStream<'a, V> {
+        // Fast path for no delimiter: use FST prefix automaton
+        if delimiter.is_none() {
+            let automaton = Str::new(prefix).starts_with();
+            let stream = self.fst_idx.search(automaton).into_stream();
+            return ListStream::Prefix(PrefixStreamer { stream, payload: &self.payload });
+        }
         let raw_fst = self.fst_idx.as_fst();
         let delim = delimiter.map(|c| c as u8);
         // Navigate to the node corresponding to `prefix`, accumulate outputs
@@ -200,14 +211,14 @@ where
                 output = output.cat(tr.out);
                 node = raw_fst.node(tr.addr);
             } else {
-                // Prefix not present: empty
-                return ListStreamer {
+                // Prefix not present: return empty DFS streamer
+                return ListStream::DFS(ListStreamer {
                     fst: raw_fst,
                     payload: &self.payload,
                     delim,
                     prefix: Vec::new(),
                     stack: Vec::new(),
-                };
+                });
             }
         }
         // Set up shared prefix buffer and initial frame
@@ -220,13 +231,13 @@ where
             yielded_final: false,
             prefix_len: prefix_buf.len(),
         }];
-        ListStreamer {
+        ListStream::DFS(ListStreamer {
             fst: raw_fst,
             payload: &self.payload,
             delim,
             prefix: prefix_buf,
             stack,
-        }
+        })
     }
 
     /// Get the deserialized payload of type V stored under `key`, if any.
@@ -243,6 +254,54 @@ where
     }
 } // end impl Trie
 
+/// Streamer for direct prefix listing when no delimiter grouping is needed
+pub struct PrefixStreamer<'a, V>
+where
+    V: DeserializeOwned,
+{
+    stream: MapStream<'a, StartsWith<Str<'a>>>,
+    payload: &'a PayloadStore<V>,
+}
+
+impl<V> Streamer for PrefixStreamer<'_, V>
+where
+    V: DeserializeOwned,
+{
+    type Item = Entry<V>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some((key_bytes, ptr)) = self.stream.next() {
+            let key = String::from_utf8(key_bytes.to_vec())
+                .expect("invalid utf8 in key");
+            let value = self.payload.get(ptr)
+                .expect("failed to get payload in list");
+            Some(Entry::Key(key, value))
+        } else {
+            None
+        }
+    }
+}
+/// Combined stream type for `list()`, either direct prefix or DFS listing
+pub enum ListStream<'a, V>
+where
+    V: DeserializeOwned,
+{
+    /// Fast path: prefix-only streaming
+    Prefix(PrefixStreamer<'a, V>),
+    /// DFS-based listing with optional grouping
+    DFS(ListStreamer<'a, V>),
+}
+impl<V> Streamer for ListStream<'_, V>
+where
+    V: DeserializeOwned,
+{
+    type Item = Entry<V>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            ListStream::Prefix(s) => s.next(),
+            ListStream::DFS(s) => s.next(),
+        }
+    }
+}
 // Frame for tracking traversal state in ListStreamer
 struct Frame<'a> {
     node: fst::raw::Node<'a>,
