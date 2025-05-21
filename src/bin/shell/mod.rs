@@ -3,7 +3,6 @@
 // Commands: ls, cd, pwd, help, exit/quit
 
 use rustyline::{Editor, error::ReadlineError, completion::{Completer, Pair}, hint::Hinter, highlight::Highlighter, validate::Validator, Helper, Context};
-use std::borrow::Cow;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::rc::Rc;
@@ -161,36 +160,13 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
     }
 }
 
+// Disable inline hinting to avoid blocking on large trees
 impl<V: DeserializeOwned> Hinter for ShellHelper<V> {
+    // No inline hints
     type Hint = String;
-    fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<Self::Hint> {
-        // Use the first completion candidate as an inline hint, minus any trailing delimiter
-        if let Ok((start, candidates)) = self.complete(line, pos, ctx) {
-            if candidates.len() == 1 {
-                let Pair { replacement, .. } = &candidates[0];
-                let word = &line[start..pos];
-                if replacement.len() > word.len() {
-                    // Compute the raw hint suffix
-                    let mut hint = &replacement[word.len()..];
-                    // If the hint ends with our delimiter, drop it for the inline preview
-                    let delim = self.state.borrow().delim;
-                    if hint.ends_with(delim) {
-                        hint = &hint[..hint.len() - delim.len_utf8()];
-                    }
-                    return Some(hint.to_string());
-                }
-            }
-        }
-        None
-    }
 }
-impl<V: DeserializeOwned> Highlighter for ShellHelper<V> {
-    /// Render the inline hint in a dim color (ANSI escape).
-    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
-        // Wrap hint in ANSI dim escape codes, resetting at end
-        Cow::Owned(format!("\x1b[2m{}\x1b[0m", hint))
-    }
-}
+// Use default highlighter (no-op)
+impl<V: DeserializeOwned> Highlighter for ShellHelper<V> {}
 impl<V: DeserializeOwned> Validator for ShellHelper<V> {}
 
 pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) -> Result<(), Box<dyn std::error::Error>> {
@@ -199,7 +175,7 @@ pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) 
     let mut rl = Editor::new()?;
     rl.set_helper(Some(helper));
     // Setup Ctrl-C handler: first press aborts listing, second within 2s exits shell
-    let (sig_tx, sig_rx): (std::sync::mpsc::Sender<()>, Receiver<()>) = channel();
+    let (sig_tx, sig_rx) = channel::<()>();
     let last_sig = Arc::new(AtomicU64::new(0));
     {
         let sig_tx = sig_tx.clone();
