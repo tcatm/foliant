@@ -15,7 +15,7 @@ fn simple_list() -> Result<(), Box<dyn Error>> {
         builder.insert(k, None);
     }
     let db = builder.into_database()?;
-    let mut list: Vec<Entry> = db.list("", None).collect();
+    let mut list: Vec<Entry> = db.list("", None).unwrap().collect();
     list.sort();
     let mut expected: Vec<Entry> = keys.iter().map(|&s| Entry::Key(s.to_string(), None)).collect();
     expected.sort();
@@ -34,7 +34,7 @@ fn delimiter_grouping() -> Result<(), Box<dyn Error>> {
         builder.insert(p, None);
     }
     let db = builder.into_database()?;
-    let mut list: Vec<Entry> = db.list("foo", Some('/')).collect();
+    let mut list: Vec<Entry> = db.list("foo", Some('/')).unwrap().collect();
     list.sort();
     let expected = vec![
         Entry::CommonPrefix("foo/".to_string()),
@@ -52,7 +52,7 @@ fn empty_key() -> Result<(), Box<dyn Error>> {
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("", None);
     let db = builder.into_database()?;
-    let list: Vec<Entry> = db.list("", None).collect();
+    let list: Vec<Entry> = db.list("", None).unwrap().collect();
     assert_eq!(list, vec![Entry::Key("".to_string(), None)]);
     Ok(())
 }
@@ -66,7 +66,7 @@ fn prefix_split() -> Result<(), Box<dyn Error>> {
     builder.insert("team", None);
     builder.insert("test", None);
     let db = builder.into_database()?;
-    let mut list: Vec<Entry> = db.list("te", None).collect();
+    let mut list: Vec<Entry> = db.list("te", None).unwrap().collect();
     list.sort();
     let mut expected = vec![
         Entry::Key("test".to_string(), None),
@@ -86,7 +86,7 @@ fn mid_edge_prefix() -> Result<(), Box<dyn Error>> {
     builder.insert("abcde", None);
     builder.insert("abcdx", None);
     let db = builder.into_database()?;
-    let mut list: Vec<Entry> = db.list("abc", None).collect();
+    let mut list: Vec<Entry> = db.list("abc", None).unwrap().collect();
     list.sort();
     let mut expected = vec![
         Entry::Key("abcde".to_string(), None),
@@ -108,7 +108,7 @@ fn unicode_keys() -> Result<(), Box<dyn Error>> {
         builder.insert(w, None);
     }
     let db = builder.into_database()?;
-    let mut list: Vec<Entry> = db.list("こん", None).collect();
+    let mut list: Vec<Entry> = db.list("こん", None).unwrap().collect();
     list.sort();
     let mut expected: Vec<Entry> = words.iter().map(|&s| Entry::Key(s.to_string(), None)).collect();
     expected.sort();
@@ -133,7 +133,7 @@ fn in_memory_payload_roundtrip() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-// 10) MmapPayloadAccess: various CBOR types
+// MmapPayloadAccess: various CBOR types
 #[test]
 fn mmap_payload_access() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
@@ -154,7 +154,7 @@ fn mmap_payload_access() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-// 11) SerializeVsMmapListing: list direct vs reopened
+// SerializeVsMmapListing: list direct vs reopened
 #[test]
 fn serialize_vs_mmap_listing() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
@@ -166,14 +166,14 @@ fn serialize_vs_mmap_listing() -> Result<(), Box<dyn Error>> {
     }
     let db1 = builder.into_database()?;
     let db2 = Database::<Value>::open(&base)?;
-    let mut l1: Vec<Entry> = db1.list("", None).collect();
-    let mut l2: Vec<Entry> = db2.list("", None).collect();
+    let mut l1: Vec<Entry> = db1.list("", None).unwrap().collect();
+    let mut l2: Vec<Entry> = db2.list("", None).unwrap().collect();
     l1.sort(); l2.sort();
     assert_eq!(l1, l2);
     Ok(())
 }
 
-// 12) RoundtripPrefixes: check multiple prefixes
+// RoundtripPrefixes: check multiple prefixes
 #[test]
 fn roundtrip_prefixes() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
@@ -186,10 +186,25 @@ fn roundtrip_prefixes() -> Result<(), Box<dyn Error>> {
     let db1 = builder.into_database()?;
     let db2 = Database::<Value>::open(&base)?;
     for &pref in &["", "a", "ab", "comp"] {
-        let mut r1: Vec<Entry> = db1.list(pref, Some('/')).collect();
-        let mut r2: Vec<Entry> = db2.list(pref, Some('/')).collect();
+        let mut r1: Vec<Entry> = db1.list(pref, Some('/')).unwrap().collect();
+        let mut r2: Vec<Entry> = db2.list(pref, Some('/')).unwrap().collect();
         r1.sort(); r2.sort();
         assert_eq!(r1, r2);
     }
     Ok(())
+}
+
+// UTF8DelimiterListing: test multi-listing a key with multi-byte UTF-8 works without panic
+#[test]
+fn multi_list_utf8_truncate() {
+    let dir = tempdir().unwrap();
+    let base = dir.path().join("testdb");
+    let mut builder = DatabaseBuilder::<Value>::new(&base).unwrap();
+    builder.insert("é", None);
+    builder.close().unwrap();
+    let db: Database<Value> = Database::open(&base).unwrap();
+    let mut stream = db.list("", Some('/')).unwrap();
+    let first = stream.next().unwrap();
+    assert_eq!(first.as_str(), "é");
+    assert!(stream.next().is_none());
 }

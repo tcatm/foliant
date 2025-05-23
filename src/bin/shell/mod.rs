@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::collections::HashSet;
 
-use foliant::{Entry, Streamer, DatabaseAccess};
+use foliant::{Database, Entry, Streamer};
 use ctrlc;
 use std::sync::{mpsc::{channel, Receiver}, Arc, atomic::{AtomicU64, Ordering}};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -65,7 +65,7 @@ where
 }
 
 struct ShellState<V: DeserializeOwned> {
-    db: Rc<dyn DatabaseAccess<V>>,
+    db: Database<V>,
     delim: char,
     cwd: String,
 }
@@ -115,7 +115,10 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
             }
             prefix.push_str(parent);
         }
-        let mut stream = state.db.list(&prefix, Some(delim));
+        let mut stream = match state.db.list(&prefix, Some(delim)) {
+            Ok(s) => s,
+            Err(_) => return Ok((start, Vec::new())),
+        };
         let mut seen = HashSet::new();
         // If the user is completing after 'cd', only offer directory prefixes
         let suggest_dirs_only = line.split_whitespace().next() == Some("cd");
@@ -169,7 +172,7 @@ impl<V: DeserializeOwned> Hinter for ShellHelper<V> {
 impl<V: DeserializeOwned> Highlighter for ShellHelper<V> {}
 impl<V: DeserializeOwned> Validator for ShellHelper<V> {}
 
-pub fn run_shell<V: DeserializeOwned + Serialize>(db: Rc<dyn DatabaseAccess<V>>, delim: char) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) -> Result<(), Box<dyn std::error::Error>> {
     let state = Rc::new(RefCell::new(ShellState { db, delim, cwd: String::new() }));
     let helper = ShellHelper { state: Rc::clone(&state) };
     let mut rl = Editor::new()?;
@@ -190,9 +193,12 @@ pub fn run_shell<V: DeserializeOwned + Serialize>(db: Rc<dyn DatabaseAccess<V>>,
         })?;
     }
 
-    println!("Database contains {} entries", state.borrow().db.len());
-    // Clone the database handle for use in commands (avoids borrow conflicts)
-    let db_global = state.borrow().db.clone();
+    let num_entries = {
+        let state_ref = state.borrow();
+        state_ref.db.len()
+    };
+    println!("Database contains {} entries", num_entries);
+    // Database handle will be borrowed from state as needed within command handlers
     // Help text for interactive shell commands and Ctrl-C behavior
     let help_text = "\
 Available commands:
@@ -304,7 +310,10 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
                         // Stream entries with abort support
                         {
                             let state_borrow = state.borrow();
-                            let mut stream = state_borrow.db.list(&list_prefix, list_delim);
+                            let mut stream = match state_borrow.db.list(&list_prefix, list_delim) {
+                                Ok(s) => s,
+                                Err(e) => { println!("Error listing {}: {}", list_prefix, e); continue; }
+                            };
                             match print_entries(&mut stream, only_prefix, only_keys, Some(&sig_rx))? {
                                 PrintResult::Aborted => continue,
                                 PrintResult::Count(printed) => {
@@ -327,33 +336,32 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
                             Some(p) => p,
                             None => { println!("Usage: find <regex>"); continue; }
                         };
-                        // Clone the database handle and snapshot cwd
-                        let db_rc = db_global.clone();
-                        let cwd_owned = state.borrow().cwd.clone();
-                        // Compute optional prefix and display string from cwd
-                        let prefix_opt: Option<&str> = if cwd_owned.is_empty() {
-                            None
-                        } else {
-                            Some(cwd_owned.as_str())
-                        };
-                        let display_cwd: &str = if cwd_owned.is_empty() {
-                            "/"
-                        } else {
-                            cwd_owned.as_str()
-                        };
-                        // Run grep with optional prefix
-                        let mut stream = match db_rc.grep(prefix_opt, pattern) {
-                            Ok(s) => s,
-                            Err(e) => { println!("Error running find: {}", e); continue; }
-                        };
-                        match print_entries(&mut stream, false, true, Some(&sig_rx))? {
-                            PrintResult::Aborted => continue,
-                            PrintResult::Count(printed) => {
-                                if printed > 0 {
-                                    println!("\n{} {} found", printed,
-                                        if printed == 1 { "entry" } else { "entries" });
-                                } else {
-                                    println!("No entries matching '{}' in '{}'", pattern, display_cwd);
+                        {
+                            let state_ref = state.borrow();
+                            let cwd_owned = state_ref.cwd.clone();
+                            let prefix_opt = if cwd_owned.is_empty() {
+                                None
+                            } else {
+                                Some(cwd_owned.as_str())
+                            };
+                            let display_cwd = if cwd_owned.is_empty() {
+                                "/"
+                            } else {
+                                cwd_owned.as_str()
+                            };
+                            let mut stream = match state_ref.db.grep(prefix_opt, pattern) {
+                                Ok(s) => s,
+                                Err(e) => { println!("Error running find: {}", e); continue; }
+                            };
+                            match print_entries(&mut stream, false, true, Some(&sig_rx))? {
+                                PrintResult::Aborted => continue,
+                                PrintResult::Count(printed) => {
+                                    if printed > 0 {
+                                        println!("\n{} {} found", printed,
+                                            if printed == 1 { "entry" } else { "entries" });
+                                    } else {
+                                        println!("No entries matching '{}' in '{}'", pattern, display_cwd);
+                                    }
                                 }
                             }
                         }

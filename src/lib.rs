@@ -1,23 +1,20 @@
 use std::io::{self};
-use std::fs::File;
+use std::fs::{read_dir, File};
 use std::path::Path;
-use fst::raw::Output;
 use memmap2::Mmap;
 use std::io::BufWriter;
 use fst::MapBuilder;
 use fst::IntoStreamer;
 use fst::Streamer as FstStreamer;
 use fst::Automaton;
-use fst::map::Stream as MapStream;
-use fst::automaton::{Str, StartsWith, Intersection};
+use fst::automaton::Str;
+use fst::map::{OpBuilder, Union};
 use regex_automata::sparse::SparseDFA;
 use std::fmt;
 use serde::Serialize;
 mod payload_store;
+mod multi_list;
 use payload_store::{PayloadStoreBuilder, PayloadStore};
-// Optional sharded database support
-mod database_group;
-pub use database_group::{DatabaseGroup, DatabaseAccess};
 use serde::de::DeserializeOwned;
 use std::path::PathBuf;
 use serde_cbor::Value as Value;
@@ -42,6 +39,7 @@ impl fmt::Display for IndexError {
             IndexError::InvalidFormat(msg) => write!(f, "Invalid index format: {}", msg),
         }
     }
+
 }
 
 impl std::error::Error for IndexError {
@@ -64,21 +62,40 @@ impl From<fst::Error> for IndexError {
         IndexError::Io(io::Error::new(io::ErrorKind::Other, format!("fst error: {}", err)))
     }
 }
-
-/// Opaque handle for navigating the on-disk trie
-#[derive(Clone, Copy, Debug)]
-pub enum Handle {
-    /// Memory-mapped index offset
-    Mmap(usize),
+/// One shard of a database: a memory-mapped FST map and its payload store.
+pub struct Shard<V>
+where V: DeserializeOwned,
+{
+    fst: fst::Map<Mmap>,
+    payload: PayloadStore<V>,
 }
 
-/// Read-only database: mmap-backed index and payload store
+impl<V> Shard<V>
+where V: DeserializeOwned,
+{
+    /// Open a shard from `<base>.idx` and `<base>.payload` files.
+    pub fn open<P: AsRef<Path>>(base: P) -> Result<Self> {
+        let base = base.as_ref();
+        let idx_path = base.with_extension("idx");
+        let payload_path = base.with_extension("payload");
+        let idx_file = File::open(&idx_path)
+            .map_err(|e| IndexError::Io(io::Error::new(e.kind(), format!("failed to open index file {:?}: {}", idx_path, e))))?;
+        let idx_mmap = unsafe { Mmap::map(&idx_file) }
+            .map_err(|e| IndexError::Io(io::Error::new(e.kind(), format!("failed to mmap index file {:?}: {}", idx_path, e))))?;
+        let fst = fst::Map::new(idx_mmap)
+            .map_err(|e| IndexError::Io(io::Error::new(io::ErrorKind::Other, format!("fst map error: {}", e))))?;
+        let payload = PayloadStore::open(&payload_path)
+            .map_err(|e| IndexError::Io(io::Error::new(e.kind(), format!("failed to open payload file {:?}: {}", payload_path, e))))?;
+        Ok(Shard { fst, payload })
+    }
+}
+
+/// Read-only database: union of one or more shards (FST maps + payload stores)
 pub struct Database<V = Value>
 where
     V: DeserializeOwned,
 {
-    fst_idx: fst::Map<Mmap>,
-    payload: PayloadStore<V>,
+    shards: Vec<Shard<V>>,
 }
 
 /// Trait for streaming items, similar to `Iterator`.
@@ -180,284 +197,149 @@ impl<V: Serialize> DatabaseBuilder<V> {
 
 }
 
+// The multi-shard Database implementation lives in the following `impl Database<V>`.
 impl<V> Database<V>
-where
-    V: DeserializeOwned,
+where V: DeserializeOwned,
 {
+    /// Create an empty database (no shards).
+    pub fn new() -> Self {
+        Database { shards: Vec::new() }
+    }
+    /// Add one shard (opened from `<base>.idx` and `<base>.payload`).
+    pub fn add_shard<P: AsRef<Path>>(&mut self, base: P) -> Result<()> {
+        let shard = Shard::open(base)?;
+        self.shards.push(shard);
+        Ok(())
+    }
+    /// Open a database from either a single shard (file) or a directory of shards.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let base = path.as_ref();
-        let idx_path = base.with_extension("idx");
-        let payload_path = base.with_extension("payload");
-        
-        // Open the index file
-        let idx_file = File::open(&idx_path)
-            .map_err(|e| IndexError::Io(io::Error::new(e.kind(), format!("failed to open index file: {}", e))))?;
-        let idx_mmap = unsafe { Mmap::map(&idx_file) }
-            .map_err(|e| IndexError::Io(io::Error::new(e.kind(), format!("failed to mmap index file: {}", e))))?;
-  
-        // Create the payload store from the memory-mapped file 
-        let payload_store = PayloadStore::<V>::open(payload_path)?;
-        // Create the FST index from the memory-mapped file
-        let fst_idx = fst::Map::new(idx_mmap)
-            .map_err(|e| IndexError::Io(io::Error::new(io::ErrorKind::Other, format!("failed to create index map: {}", e))))?;
-        // Return the database
-        Ok(Database {
-            fst_idx,
-            payload: payload_store,
-        })
-    }
-    
-    pub fn list<'a>(&'a self, prefix: &'a str, delimiter: Option<char>) -> ListStream<'a, V> {
-        // Fast path for no delimiter: use FST prefix automaton
-        if delimiter.is_none() {
-            let automaton = Str::new(prefix).starts_with();
-            let stream = self.fst_idx.search(automaton).into_stream();
-            return ListStream::Prefix(PrefixStreamer { stream, payload: &self.payload });
-        }
-        let raw_fst = self.fst_idx.as_fst();
-        let delim = delimiter.map(|c| c as u8);
-        // Navigate to the node corresponding to `prefix`, accumulate outputs
-        let mut node = raw_fst.root();
-        let mut output: Output = node.final_output();
-        for &b in prefix.as_bytes() {
-            if let Some(idx) = node.find_input(b) {
-                let tr = node.transition(idx);
-                output = output.cat(tr.out);
-                node = raw_fst.node(tr.addr);
-            } else {
-                // Prefix not present: return empty DFS streamer
-                return ListStream::DFS(ListStreamer {
-                    fst: raw_fst,
-                    payload: &self.payload,
-                    delim,
-                    prefix: Vec::new(),
-                    stack: Vec::new(),
-                });
+        let mut db = Database::new();
+        if base.is_dir() {
+            for entry in read_dir(base)? {
+                let ent = entry?;
+                let p = ent.path();
+                if p.extension().and_then(|s| s.to_str()) != Some("idx") {
+                    continue;
+                }
+                let stem = p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .ok_or(IndexError::InvalidFormat("invalid shard file name"))?;
+                let b = base.join(stem);
+                if !b.with_extension("payload").exists() {
+                    continue;
+                }
+
+                if let Err(e) = db.add_shard(&b) {
+                    eprintln!("warning: failed to add shard {:?}: {}", b, e);
+                    continue;
+                }
             }
+        } else {
+            db.add_shard(base)?;
         }
-        // Set up shared prefix buffer and initial frame
-        let mut prefix_buf = Vec::with_capacity(prefix.len() + 8);
-        prefix_buf.extend_from_slice(prefix.as_bytes());
-        let stack = vec![Frame {
-            node,
-            output,
-            transition_idx: 0,
-            yielded_final: false,
-            prefix_len: prefix_buf.len(),
-        }];
-        ListStream::DFS(ListStreamer {
-            fst: raw_fst,
-            payload: &self.payload,
-            delim,
-            prefix: prefix_buf,
-            stack,
-        })
+        Ok(db)
+    }
+
+    /// List entries under `prefix`, grouping by `delimiter` if provided.
+    ///
+    /// Returns a stream of `Entry<V>` (keys or common prefixes), or an error if
+    /// listing cannot be constructed.
+    /// List entries under `prefix`, grouping by `delimiter` if provided.
+    /// Returns a boxed streamer yielding `Entry<V>` (keys or common prefixes).
+    pub fn list<'a>(&'a self, prefix: &'a str, delimiter: Option<char>) -> Result<Box<dyn Streamer<Item = Entry<V>> + 'a>> {
+        let delim_u8 = delimiter.map(|c| c as u8);
+        let prefix_buf = prefix.as_bytes().to_vec();
+        let ms = multi_list::MultiShardListStreamer::new(&self.shards, prefix_buf, delim_u8);
+        Ok(Box::new(ms))
     }
 
     /// Search for keys matching a regular expression, optionally restricted to a prefix.
     ///
     /// `prefix`: if `Some(s)`, only keys starting with `s` are considered.
     /// `re`: a regex string; matches are anchored to the full key.
-    pub fn grep<'a>(&'a self, prefix: Option<&'a str>, re: &str) -> Result<GrepStream<'a, V>> {
+    ///
+    /// Returns a stream of `Entry<V>` (keys matching the regex).
+    pub fn grep<'a>(&'a self, prefix: Option<&'a str>, re: &str) -> Result<PrefixStream<'a, V>> {
         // Compile the regex into a sparse-DFA transducer.
         let dfa = SparseDFA::new(re)
             .map_err(|e| IndexError::Io(io::Error::new(
                 io::ErrorKind::Other,
                 format!("regex error: {}", e),
             )))?;
-        // Build a prefix automaton (empty string matches all keys).
-        let start = Str::new(prefix.unwrap_or("")).starts_with();
-        // Intersect the regex DFA with the prefix automaton.
-        let automaton = dfa.intersection(start);
-        // Search the FST and stream matching entries.
-        let stream = self.fst_idx.search(automaton).into_stream();
-        Ok(GrepStream { stream, payload: &self.payload })
-    }
-
-    /// Get the deserialized payload of type V stored under `key`, if any.
-    pub fn get_value(&self, key: &str) -> Result<Option<V>> {
-        // Lookup the key in the FST index
-        let handle = self.fst_idx.get(key);
-        // If found, retrieve the payload from the payload store
-        if let Some(ptr) = handle {
-            self.payload.get(ptr)
-                .map_err(|e| IndexError::Io(io::Error::new(io::ErrorKind::Other, format!("failed to get payload: {}", e))))
+        // Split prefix for filtering; use empty string if None
+        let prefix_str = prefix.unwrap_or("");
+        let start = Str::new(prefix_str).starts_with();
+        // Filter shards: only those that contain any key under the prefix
+        let mut relevant_shards: Vec<&Shard<V>> = Vec::new();
+        if prefix_str.is_empty() {
+            for shard in &self.shards {
+                relevant_shards.push(shard);
+            }
         } else {
-            Ok(None)
+            for shard in &self.shards {
+                let mut s = shard.fst.search(start.clone()).into_stream();
+                if s.next().is_some() {
+                    relevant_shards.push(shard);
+                }
+            }
         }
+        // Build combined regex and prefix automaton
+        let automaton = dfa.intersection(start);
+        let mut op = OpBuilder::new();
+        for shard in &relevant_shards {
+            op = op.add(shard.fst.search(automaton.clone()));
+        }
+        let stream = op.union().into_stream();
+        Ok(PrefixStream { stream, shards: relevant_shards })
     }
 
-    // Get total number of keys in the database
-    pub fn len(&self) -> usize {
-        self.fst_idx.len()
+    /// Retrieve the payload for `key`, if any.
+    pub fn get_value(&self, key: &str) -> Result<Option<V>> {
+        for shard in &self.shards {
+            if let Some(ptr) = shard.fst.get(key) {
+                let v = shard.payload.get(ptr)
+                    .map_err(|e| IndexError::Io(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("payload error: {}", e),
+                    )))?;
+                return Ok(v);
+            }
+        }
+        Ok(None)
     }
-} // end impl Trie
+
+    /// Total number of keys across all shards.
+    pub fn len(&self) -> usize {
+        self.shards.iter().map(|s| s.fst.len()).sum()
+    }
+}
+
 
 /// Streamer for direct prefix listing when no delimiter grouping is needed
-pub struct PrefixStreamer<'a, V>
+pub struct PrefixStream<'a, V>
 where
     V: DeserializeOwned,
 {
-    stream: MapStream<'a, StartsWith<Str<'a>>>,
-    payload: &'a PayloadStore<V>,
+    stream: Union<'a>,
+    shards: Vec<&'a Shard<V>>,
 }
 
-impl<V> Streamer for PrefixStreamer<'_, V>
+impl<V> Streamer for PrefixStream<'_, V>
 where
     V: DeserializeOwned,
 {
     type Item = Entry<V>;
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some((key_bytes, ptr)) = self.stream.next() {
+        if let Some((key_bytes, ivs)) = self.stream.next() {
             let key = String::from_utf8(key_bytes.to_vec())
                 .expect("invalid utf8 in key");
-            let value = self.payload.get(ptr)
-                .expect("failed to get payload in list");
-            Some(Entry::Key(key, value))
-        } else {
-            None
-        }
-    }
-}
-/// Combined stream type for `list()`, either direct prefix or DFS listing
-pub enum ListStream<'a, V>
-where
-    V: DeserializeOwned,
-{
-    /// Fast path: prefix-only streaming
-    Prefix(PrefixStreamer<'a, V>),
-    /// DFS-based listing with optional grouping
-    DFS(ListStreamer<'a, V>),
-}
-impl<V> Streamer for ListStream<'_, V>
-where
-    V: DeserializeOwned,
-{
-    type Item = Entry<V>;
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            ListStream::Prefix(s) => s.next(),
-            ListStream::DFS(s) => s.next(),
-        }
-    }
-}
-// Frame for tracking traversal state in ListStreamer
-struct Frame<'a> {
-    node: fst::raw::Node<'a>,
-    /// accumulated output through this node
-    output: Output,
-    /// next transition index to visit
-    transition_idx: usize,
-    /// whether we've yielded the final key at this node
-    yielded_final: bool,
-    /// prefix buffer length when this frame was pushed
-    prefix_len: usize,
-}
 
-/// Streamer for lazily listing entries under a prefix
-pub struct ListStreamer<'a, V>
-where
-    V: DeserializeOwned,
-{
-    fst: &'a fst::raw::Fst<Mmap>,
-    payload: &'a PayloadStore<V>,
-    delim: Option<u8>,
-    /// shared buffer of current key prefix bytes
-    prefix: Vec<u8>,
-    /// DFS stack of frames
-    stack: Vec<Frame<'a>>,
-}
-
-impl<V> Streamer for ListStreamer<'_, V>
-where
-    V: DeserializeOwned,
-{
-    type Item = Entry<V>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while let Some(frame) = self.stack.last_mut() {
-            // First, yield the complete key at this node if not yet done
-            if !frame.yielded_final {
-                frame.yielded_final = true;
-                if frame.node.is_final() {
-                    let ptr = frame.output.value();
-                    let value = self.payload.get(ptr)
-                        .expect("failed to get payload in list");
-                    // current prefix buffer holds this key
-                    let key = String::from_utf8(self.prefix.clone())
-                        .expect("invalid utf8 in key");
-                    return Some(Entry::Key(key, value));
-                }
-            }
-            // Next, explore transitions
-            if frame.transition_idx < frame.node.len() {
-                // take next transition
-                let tr = frame.node.transition(frame.transition_idx);
-                frame.transition_idx += 1;
-                let b = tr.inp;
-                let out = frame.output.cat(tr.out);
-                if Some(b) == self.delim {
-                    // group at delimiter: yield prefix+delim
-                    let mut buf = self.prefix.clone();
-                    buf.push(b);
-                    let s = String::from_utf8(buf)
-                        .expect("invalid utf8 in prefix");
-                    return Some(Entry::CommonPrefix(s));
-                } else {
-                    // descend into child
-                    self.prefix.push(b);
-                    let new_node = self.fst.node(tr.addr);
-                    // if only one child, flatten in-place (reuse frame)
-                    if frame.node.len() == 1 {
-                        frame.node = new_node;
-                        frame.output = out;
-                        frame.transition_idx = 0;
-                        frame.yielded_final = false;
-                        frame.prefix_len = self.prefix.len();
-                        continue;
-                    }
-                    // else, push new frame for branching
-                    let prefix_len = self.prefix.len();
-                    self.stack.push(Frame {
-                        node: new_node,
-                        output: out,
-                        transition_idx: 0,
-                        yielded_final: false,
-                        prefix_len,
-                    });
-                    continue;
-                }
-            }
-            // Done with this node: backtrack to parent prefix length
-            self.stack.pop();
-            let new_len = self.stack.last().map(|f| f.prefix_len).unwrap_or(0);
-            self.prefix.truncate(new_len);
-        }
-        None
-    }
-}
-
-/// Stream of entries matching a regex (and optional prefix) via FST.
-///
-/// Yields only complete keys with their payloads.
-pub struct GrepStream<'a, V>
-where
-    V: DeserializeOwned,
-{
-    stream: MapStream<'a, Intersection<SparseDFA<Vec<u8>, usize>, StartsWith<Str<'a>>>>,
-    payload: &'a PayloadStore<V>,
-}
-
-impl<V> Streamer for GrepStream<'_, V>
-where
-    V: DeserializeOwned,
-{
-    type Item = Entry<V>;
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some((key_bytes, ptr)) = self.stream.next() {
-            let key = String::from_utf8(key_bytes.to_vec())
-                .expect("invalid utf8 in key");
-            let value = self.payload.get(ptr)
+            // Get the first shard and pointer from the iterator
+            // TODO error on multiple IndexValues?
+            let iv = ivs.into_iter().next()
+                .expect("failed to get first shard in grep");
+            let value = self.shards[iv.index].payload.get(iv.value)
                 .expect("failed to get payload in grep");
             Some(Entry::Key(key, value))
         } else {
@@ -465,6 +347,7 @@ where
         }
     }
 }
+/// Combined stream type for `list()`: direct prefix, DFS (single-shard), or multi-shard grouping
 
 /// A listing entry returned by `Database::list`: either a key or a grouped prefix.
 #[derive(Debug, Clone)]

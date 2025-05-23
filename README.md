@@ -38,6 +38,11 @@ foliant index -i data.idx input.txt
 foliant index -i data.idx -j path sample.jsonl
 ```
 
+### Build an index with a custom prefix
+```bash
+foliant index -i data.idx --json path --prefix foo/ sample.jsonl
+```
+
 ### List entries
 - List all keys:
   ```bash
@@ -86,7 +91,7 @@ Sample lines in `sample.jsonl`:
 - `Cargo.toml` / `Cargo.lock`: dependencies and metadata
 
 ### Key Types
-- `DatabaseBuilder<V>`: builder for creating on-disk index (`.idx`) and payload (`.payload`) files; insert keys with optional values (`V: Serialize`)
+- `DatabaseBuilder<V>`: builder for creating on-disk index (`.idx`) and payload (`.payload`) files; insert keys with optional values (`V: Serialize`). Automatically prepends an optional prefix to all keys on insert and writes it as a CBOR-encoded header if provided.
 - `Database<V>`: read-only handle (`V: DeserializeOwned`) for querying the index; supports prefix listing (`list`) and value lookup (`get_value`)
 - `Entry`: enum returned by `Database::list`, either `Entry::Key(String)` for full keys or `Entry::CommonPrefix(String)` for grouped prefixes
 - `PayloadStoreBuilder<V>` and `PayloadStore<V>`: internal types for writing and reading the `.payload` file
@@ -102,7 +107,7 @@ Sample lines in `sample.jsonl`:
 foliant produces two files per database:
 
 - `<base>.idx`: an FST map file (using the `fst` crate) containing keys mapped to `u64` payload pointers. Each pointer is `offset + 1` into the `.payload` file; a zero pointer indicates no payload.
-- `<base>.payload`: a flat file storing CBOR-encoded payloads. Each payload record consists of:
+- `<base>.payload`: a flat file storing CBOR-encoded payloads. Each payload record then consists of:
   1. A 4-byte little-endian length (`u32`)
   2. The CBOR-encoded value bytes
 

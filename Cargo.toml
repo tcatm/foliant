@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+smallvec = "1.12"
 indicatif = "0.17"
 fst       = "0.4"
 regex-automata = { version = "0.1.10", default-features = false, features = ["transducer"] }
