@@ -22,6 +22,7 @@ enum PrintResult {
 
 /// Print entries from the given stream according to the flags, optionally abortable.
 fn print_entries<S, V>(
+    prefix: &str,
     stream: &mut S,
     only_prefix: bool,
     only_keys: bool,
@@ -43,10 +44,12 @@ where
         // Fetch next entry
         match stream.next() {
             Some(Entry::CommonPrefix(s)) if !only_keys => {
+                let s = s.strip_prefix(prefix).unwrap_or(&s);
                 println!("📁 {}", s);
                 printed += 1;
             }
             Some(Entry::Key(s, val_opt)) if !only_prefix => {
+                let s = s.strip_prefix(prefix).unwrap_or(&s);
                 if let Some(val) = val_opt {
                     let val_str = serde_json::to_string(&val)?;
                     println!("📄 {} \x1b[2m{}\x1b[0m", s, val_str);
@@ -219,17 +222,7 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
 
     loop {
         // Build prompt: virtual leading delimiter; show cwd between delimiters
-        let (cwd, delim_char) = {
-            let state_ref = state.borrow();
-            (state_ref.cwd.clone(), state_ref.delim)
-        };
-        let prompt = if cwd.is_empty() {
-            // At root: show single delimiter
-            format!("{}> ", delim_char)
-        } else {
-            // Non-root: /cwd
-            format!("{}{}> ", delim_char, cwd)
-        };
+        let prompt = format!("{}> ", state.borrow().cwd);
 
         match rl.readline(&prompt) {
             Ok(line) => {
@@ -314,7 +307,7 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
                                 Ok(s) => s,
                                 Err(e) => { println!("Error listing {}: {}", list_prefix, e); continue; }
                             };
-                            match print_entries(&mut stream, only_prefix, only_keys, Some(&sig_rx))? {
+                            match print_entries(list_prefix.as_str(), &mut stream, only_prefix, only_keys, Some(&sig_rx))? {
                                 PrintResult::Aborted => continue,
                                 PrintResult::Count(printed) => {
                                     // Summary
@@ -353,7 +346,7 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
                                 Ok(s) => s,
                                 Err(e) => { println!("Error running find: {}", e); continue; }
                             };
-                            match print_entries(&mut stream, false, true, Some(&sig_rx))? {
+                            match print_entries(cwd_owned.as_str(), &mut stream, false, true, Some(&sig_rx))? {
                                 PrintResult::Aborted => continue,
                                 PrintResult::Count(printed) => {
                                     if printed > 0 {
