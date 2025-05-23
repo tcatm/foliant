@@ -7,14 +7,13 @@ Supported features:
 - Optional CBOR-encoded payloads extracted from JSON lines
 - Memory-mapped FST index for zero-copy, zero-allocation prefix listing
 - Grouped listings by custom delimiters
-- CLI tool with `index` and `list` commands
+- CLI tool with `index`, `list`, and `shell` commands
 
 # Table of Contents
 1. [Build & Test](#build--test)
 2. [CLI Usage Examples](#cli-usage-examples)
 3. [Generating Sample JSONL Input](#generating-sample-jsonl-input)
 4. [Developer Guide](#developer-guide)
-   - [Repository Layout](#repository-layout)
    - [Key Types](#key-types)
    - [Design Notes](#design-notes)
 5. [On-Disk Format](#on-disk-format)
@@ -30,17 +29,17 @@ cargo test
 
 ### Build an index from plain text lines
 ```
-foliant index -i data.idx input.txt
+foliant index -i data.idx --input input.txt
 ```
 
 ### Build an index from JSON lines
 ```
-foliant index -i data.idx -j path sample.jsonl
+foliant index -i data.idx -j path --input sample.jsonl
 ```
 
 ### Build an index with a custom prefix
 ```bash
-foliant index -i data.idx --json path --prefix foo/ sample.jsonl
+foliant index -i data.idx --json path --prefix foo/ --input sample.jsonl
 ```
 
 ### List entries
@@ -56,6 +55,11 @@ foliant index -i data.idx --json path --prefix foo/ sample.jsonl
   ```bash
   foliant list -i data.idx -d / prefix
   ```
+
+### Interactive shell
+```bash
+foliant shell -i data.idx
+```
 
 When values are present, they are shown after the key in dim ANSI color, serialized as one-line JSON.
 
@@ -84,14 +88,8 @@ Sample lines in `sample.jsonl`:
 
 ## Developer Guide
 
-### Repository Layout
-- `src/lib.rs`: core `DatabaseBuilder`, `Database`, and payload store implementations
-- `src/main.rs`: CLI (`foliant`) using `clap`
-- `tests/`: unit & integration tests
-- `Cargo.toml` / `Cargo.lock`: dependencies and metadata
-
 ### Key Types
-- `DatabaseBuilder<V>`: builder for creating on-disk index (`.idx`) and payload (`.payload`) files; insert keys with optional values (`V: Serialize`). Automatically prepends an optional prefix to all keys on insert and writes it as a CBOR-encoded header if provided.
+- `DatabaseBuilder<V>`: builder for creating a new on-disk database; insert keys with optional values (`V: Serialize`), then finalize to write the `.idx` and `.payload` files.
 - `Database<V>`: read-only handle (`V: DeserializeOwned`) for querying the index; supports prefix listing (`list`) and value lookup (`get_value`)
 - `Entry`: enum returned by `Database::list`, either `Entry::Key(String)` for full keys or `Entry::CommonPrefix(String)` for grouped prefixes
 - `PayloadStoreBuilder<V>` and `PayloadStore<V>`: internal types for writing and reading the `.payload` file
