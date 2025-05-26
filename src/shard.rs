@@ -23,7 +23,7 @@ impl<V> Shard<V>
 where
     V: DeserializeOwned,
 {
-    /// Open a shard from `<base>.idx` and `<base>.payload` files.
+    /// Open a shard from `<base>.idx`, `<base>.lookup`, and `<base>.payload` files.
     pub fn open<P: AsRef<Path>>(base: P) -> Result<Self> {
         let base = base.as_ref();
         let idx_path = base.with_extension("idx");

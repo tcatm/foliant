@@ -97,17 +97,17 @@ Sample lines in `sample.jsonl`:
 ### Design Notes
 - The index uses the `fst` crate's `MapBuilder` to store keys with `u64` lookup identifiers as weights, each pointing into the flat lookup table.
 - Lookup table entries are fixed-size records mapping lookup IDs to payload pointers, allowing the table to be reordered independently of the FST.
-- Payloads are encoded with CBOR and stored sequentially with a 4-byte little-endian length prefix
+- Payloads are encoded with CBOR and stored sequentially with a 2-byte little-endian length prefix
 - Memory-mapped I/O enables zero-copy, zero-allocation prefix listing and fast value lookup
 - Listings can be grouped by the first occurrence of a custom delimiter
 
 ## On-Disk Format
 foliant produces three files per database:
 
-- `<base>.idx`: an FST map file (using the `fst` crate) containing keys mapped to `u64` lookup identifiers. Each lookup ID is `index + 1` into the `.lookup` file; a zero ID indicates no payload.
-- `<base>.lookup`: a flat file storing fixed-size lookup table entries (`LookupEntry`), each mapping to a payload pointer. Each entry is an 8-byte little-endian `u64` payload pointer (`offset+1` into the `.payload` file).
+- `<base>.idx`: an FST map file (using the `fst` crate) containing keys mapped to `u64` lookup identifiers. Each lookup ID is `index + 1` into the `.lookup` file.
+- `<base>.lookup`: a flat file storing fixed-size lookup table entries (`LookupEntry`), each mapping to a payload pointer. Each entry is a 4-byte little-endian `u32` payload pointer (`offset+1` into the `.payload` file).
 - `<base>.payload`: a flat file storing CBOR-encoded payloads. Each payload record then consists of:
-  1. A 4-byte little-endian length (`u32`)
+  1. A 2-byte little-endian length (`u16`)
   2. The CBOR-encoded value bytes
 
 The `.idx` file begins with the magic header and structure defined by the `fst` crate. This format enables fast, memory-mapped prefix queries and efficient payload retrieval with minimal allocations.

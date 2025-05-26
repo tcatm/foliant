@@ -126,7 +126,7 @@ where
     pub fn get_value(&self, key: &str) -> Result<Option<V>> {
         for shard in &self.shards {
             if let Some(lut_ptr) = shard.fst.get(key) {
-                let lookup = shard.lookup.get(lut_ptr)
+                let lookup = shard.lookup.get(lut_ptr as u32)
                     .map_err(|e| IndexError::Io(io::Error::new(
                         io::ErrorKind::Other,
                         format!("lookup error: {}", e),

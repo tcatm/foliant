@@ -58,7 +58,7 @@ where
                 .expect("failed to get first shard in grep");
             let lookup_entry = self.shards[iv.index]
                 .lookup
-                .get(iv.value)
+                .get(iv.value as u32)
                 .expect("failed to get lookup entry in grep");
             let value = self.shards[iv.index]
                 .payload

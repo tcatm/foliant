@@ -52,7 +52,7 @@ impl<V: Serialize> DatabaseBuilder<V> {
             .expect("payload append failed");
         let lut_ptr = self.lookup_store.append(payload_ptr)
             .expect("lookup append failed");
-        self.fst_builder.insert(key, lut_ptr)
+        self.fst_builder.insert(key, lut_ptr as u64)
             .expect("FST insert failed");
     }
 

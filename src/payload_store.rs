@@ -24,17 +24,17 @@ impl<V: Serialize> PayloadStoreBuilder<V> {
     }
 
     /// Append an optional payload; returns an identifier (offset+1), 0 means no payload.
-    pub fn append(&mut self, value: Option<V>) -> io::Result<u64> {
+    pub fn append(&mut self, value: Option<V>) -> io::Result<u32> {
         if let Some(val) = value {
             let data = serde_cbor::to_vec(&val)
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "CBOR serialize failed"))?;
             let current = self.offset;
-            let len_bytes = (data.len() as u32).to_le_bytes();
+            let len_bytes = (data.len() as u16).to_le_bytes();
             // Write length prefix and data
             self.writer.write_all(&len_bytes)?;
             self.writer.write_all(&data)?;
-            self.offset += 4 + data.len() as u64;
-            Ok(current + 1)
+            self.offset += 2 + data.len() as u64;
+            Ok((current + 1) as u32)
         } else {
             Ok(0)
         }
@@ -63,20 +63,20 @@ impl<V: DeserializeOwned> PayloadStore<V> {
     }
 
     /// Retrieve the payload for a given identifier, deserializing to V.
-    pub fn get(&self, ptr_val: u64) -> io::Result<Option<V>> {
+    pub fn get(&self, ptr_val: u32) -> io::Result<Option<V>> {
         if ptr_val == 0 {
             return Ok(None);
         }
         let rel = (ptr_val - 1) as usize;
         let buf = &self.buf;
-        if rel + 4 > buf.len() {
+        if rel + 2 > buf.len() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated payload length"));
         }
-        let len_bytes: [u8; 4] = buf[rel..rel + 4]
+        let len_bytes: [u8; 2] = buf[rel..rel + 2]
             .try_into()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid payload length"))?;
-        let val_len = u32::from_le_bytes(len_bytes) as usize;
-        let start = rel + 4;
+        let val_len = u16::from_le_bytes(len_bytes) as usize;
+        let start = rel + 2;
         if start + val_len > buf.len() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated payload data"));
         }

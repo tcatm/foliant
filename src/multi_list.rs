@@ -165,7 +165,7 @@ where V: DeserializeOwned,
                     let shard_i = state.shard_idx;
                     let lookup_entry = self.shards[shard_i]
                         .lookup
-                        .get(lut_ptr)
+                        .get(lut_ptr as u32)
                         .ok()
                         .unwrap_or_default();
                     let val = self.shards[shard_i]

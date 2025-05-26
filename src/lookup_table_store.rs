@@ -11,8 +11,8 @@ const CHUNK_SIZE: usize = 128 * 1024;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LookupEntry {
-    /// Pointer into the payload file (offset+1); zero means no payload.
-    pub payload_ptr: u64,
+    /// 32-bit pointer into the payload file (offset+1); zero means no payload.
+    pub payload_ptr: u32,
 }
 
 const RECSZ: usize = std::mem::size_of::<LookupEntry>();
@@ -20,7 +20,7 @@ const RECSZ: usize = std::mem::size_of::<LookupEntry>();
 /// Builder for a flat lookup table storing `LookupEntry`s sequentially.
 pub struct LookupTableStoreBuilder {
     writer: BufWriter<File>,
-    count: u64,
+    count: u32,
 }
 
 impl LookupTableStoreBuilder {
@@ -31,18 +31,13 @@ impl LookupTableStoreBuilder {
         Ok(LookupTableStoreBuilder { writer, count: 0 })
     }
 
-    /// Append a `LookupEntry` with the given payload pointer; returns an identifier (index+1),
-    /// zero means no payload.
-    pub fn append(&mut self, payload_ptr: u64) -> io::Result<u64> {
-        if payload_ptr == 0 {
-            Ok(0)
-        } else {
-            let idx = self.count;
-            let entry = LookupEntry { payload_ptr };
-            self.writer.write_all(&entry.payload_ptr.to_le_bytes())?;
-            self.count += 1;
-            Ok(idx + 1)
-        }
+    /// Append a `LookupEntry` with the given payload pointer; returns an identifier (index+1).
+    pub fn append(&mut self, payload_ptr: u32) -> io::Result<u32> {
+        let idx = self.count;
+        let entry = LookupEntry { payload_ptr };
+        self.writer.write_all(&entry.payload_ptr.to_le_bytes())?;
+        self.count += 1;
+        Ok(idx + 1)
     }
 
     /// Flush buffered writes and sync to disk.
@@ -67,10 +62,7 @@ impl LookupTableStore {
     }
 
     /// Retrieve the `LookupEntry` for a given identifier.
-    pub fn get(&self, id: u64) -> io::Result<LookupEntry> {
-        if id == 0 {
-            return Ok(LookupEntry::default());
-        }
+    pub fn get(&self, id: u32) -> io::Result<LookupEntry> {
         let idx = (id - 1) as usize;
         let start = idx
             .checked_mul(RECSZ)
@@ -80,7 +72,7 @@ impl LookupTableStore {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated lookup table entry"));
         }
         let slice = &self.buf[start..end];
-        let payload_ptr = u64::from_le_bytes(slice[0..8].try_into().unwrap());
+        let payload_ptr = u32::from_le_bytes(slice[0..4].try_into().unwrap());
         Ok(LookupEntry { payload_ptr })
     }
 }
