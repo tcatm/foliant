@@ -146,4 +146,15 @@ where
     pub fn len(&self) -> usize {
         self.shards.iter().map(|s| s.fst.len()).sum()
     }
+
+    /// Given a lookup identifier (weight), return the corresponding key if present in any shard.
+    pub fn get_key(&self, lut_id: u64) -> Option<String> {
+        for shard in &self.shards {
+            let raw_fst = shard.fst.as_fst();
+            if let Some(bytes) = raw_fst.get_key(lut_id) {
+                return String::from_utf8(bytes).ok();
+            }
+        }
+        None
+    }
 }

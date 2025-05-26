@@ -87,11 +87,11 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
         let word = &before[start..];
         let mut candidates = Vec::new();
         if start == 0 {
-            let cmds = ["cd", "ls", "find", "pwd", "exit", "quit", "help"];
+            let cmds = ["cd", "ls", "find", "pwd", "val", "exit", "quit", "help"];
             for &cmd in &cmds {
                 if cmd.starts_with(word) {
                     // Commands that take an argument get a trailing space
-                    let replacement = if ["cd", "ls", "find"].contains(&cmd) {
+                    let replacement = if ["cd", "ls", "find", "val"].contains(&cmd) {
                         format!("{} ", cmd)
                     } else {
                         cmd.to_string()
@@ -213,6 +213,7 @@ Available commands:
   cd [dir]                        change directory
   find <regex>                    search entries matching regex
   pwd                             print working directory
+  val <value>                     get key by lookup id
   exit, quit                      exit shell
   help                            show this help
 
@@ -392,6 +393,24 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
                     }
                     "pwd" => {
                         println!("{}", state.borrow().cwd);
+                    }
+                    "val" => {
+                        let arg = parts.next().unwrap_or("");
+                        if arg.is_empty() {
+                            println!("Usage: val <value>");
+                            continue;
+                        }
+                        match arg.parse::<u64>() {
+                            Ok(id) => {
+                                let state_ref = state.borrow();
+                                if let Some(key) = state_ref.db.get_key(id) {
+                                    println!("{}", key);
+                                } else {
+                                    println!("No key found for lookup id {}", id);
+                                }
+                            }
+                            Err(_) => println!("Invalid number: {}", arg),
+                        }
                     }
                     "help" => {
                         println!("{}", help_text);
