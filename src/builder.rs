@@ -8,6 +8,7 @@ use serde::de::DeserializeOwned;
 use serde_cbor::Value;
 
 use crate::payload_store::PayloadStoreBuilder;
+use crate::lookup_table_store::LookupTableStoreBuilder;
 use crate::error::{IndexError, Result};
 use crate::database::Database;
 
@@ -21,14 +22,16 @@ where
 {
     base: PathBuf,
     fst_builder: MapBuilder<BufWriter<File>>,
+    lookup_store: LookupTableStoreBuilder,
     payload_store: PayloadStoreBuilder<V>,
 }
 
 impl<V: Serialize> DatabaseBuilder<V> {
-    /// Create a new database builder writing to `<base>.idx` and `<base>.payload` (truncating existing).
+    /// Create a new database builder writing to `<base>.idx`, `<base>.lookup`, and `<base>.payload` (truncating existing).
     pub fn new<P: AsRef<Path>>(base: P) -> Result<Self> {
         let base = base.as_ref().to_path_buf();
         let idx_path = base.with_extension("idx");
+        let lookup_path = base.with_extension("lookup");
         let payload_path = base.with_extension("payload");
 
         let fst_file = File::create(&idx_path)
@@ -38,15 +41,18 @@ impl<V: Serialize> DatabaseBuilder<V> {
         let fst_builder = MapBuilder::new(fst_writer)
             .map_err(|e| IndexError::Io(io::Error::new(io::ErrorKind::Other, format!("failed to create index builder: {}", e))))?;
 
+        let lookup_store = LookupTableStoreBuilder::open(&lookup_path)?;
         let payload_store = PayloadStoreBuilder::<V>::open(&payload_path)?;
-        Ok(DatabaseBuilder { base, fst_builder, payload_store })
+        Ok(DatabaseBuilder { base, fst_builder, lookup_store, payload_store })
     }
 
     /// Insert a key with an optional value `V` into the database.
     pub fn insert(&mut self, key: &str, value: Option<V>) {
-        let ptr = self.payload_store.append(value)
+        let payload_ptr = self.payload_store.append(value)
             .expect("payload append failed");
-        self.fst_builder.insert(key, ptr)
+        let lut_ptr = self.lookup_store.append(payload_ptr)
+            .expect("lookup append failed");
+        self.fst_builder.insert(key, lut_ptr)
             .expect("FST insert failed");
     }
 
@@ -56,6 +62,7 @@ impl<V: Serialize> DatabaseBuilder<V> {
             .finish()
             .map_err(|e| IndexError::Io(io::Error::new(io::ErrorKind::Other, format!("failed to finalize index builder: {}", e))))?;
 
+        self.lookup_store.close()?;
         self.payload_store.close()?;
         Ok(())
     }

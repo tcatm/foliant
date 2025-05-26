@@ -125,8 +125,13 @@ where
     /// Retrieve the payload for `key`, if any.
     pub fn get_value(&self, key: &str) -> Result<Option<V>> {
         for shard in &self.shards {
-            if let Some(ptr) = shard.fst.get(key) {
-                let v = shard.payload.get(ptr)
+            if let Some(lut_ptr) = shard.fst.get(key) {
+                let lookup = shard.lookup.get(lut_ptr)
+                    .map_err(|e| IndexError::Io(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("lookup error: {}", e),
+                    )))?;
+                let v = shard.payload.get(lookup.payload_ptr)
                     .map_err(|e| IndexError::Io(io::Error::new(
                         io::ErrorKind::Other,
                         format!("payload error: {}", e),

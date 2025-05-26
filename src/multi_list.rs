@@ -161,9 +161,18 @@ where V: DeserializeOwned,
             if !frame.yielded {
                 frame.yielded = true;
                 if let Some(state) = frame.states.iter().find(|s| s.node.is_final()) {
-                    let ptr = state.output.value();
+                    let lut_ptr = state.output.value();
                     let shard_i = state.shard_idx;
-                    let val = self.shards[shard_i].payload.get(ptr).ok().flatten();
+                    let lookup_entry = self.shards[shard_i]
+                        .lookup
+                        .get(lut_ptr)
+                        .ok()
+                        .unwrap_or_default();
+                    let val = self.shards[shard_i]
+                        .payload
+                        .get(lookup_entry.payload_ptr)
+                        .ok()
+                        .flatten();
                     let key = String::from_utf8(self.prefix.clone())
                         .expect("invalid utf8 in key");
                     return Some(Entry::Key(key, val));

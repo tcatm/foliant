@@ -1,5 +1,6 @@
 mod error;
 mod payload_store;
+mod lookup_table_store;
 mod shard;
 mod streamer;
 mod entry;
