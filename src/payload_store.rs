@@ -5,9 +5,17 @@ use std::sync::Arc;
 use memmap2::Mmap;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::convert::TryInto;
+use std::ptr;
 
 const CHUNK_SIZE: usize = 128 * 1024;
+/// Header for each payload entry: 2-byte little-endian length prefix.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct PayloadEntryHeader {
+    /// little-endian length of the CBOR-encoded payload
+    pub len: u16,
+}
+
 /// Builder for appending payloads of type V to a file-backed store, buffering writes in 128KiB.
 pub struct PayloadStoreBuilder<V: Serialize> {
     writer: BufWriter<File>,
@@ -29,11 +37,12 @@ impl<V: Serialize> PayloadStoreBuilder<V> {
             let data = serde_cbor::to_vec(&val)
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "CBOR serialize failed"))?;
             let current = self.offset;
-            let len_bytes = (data.len() as u16).to_le_bytes();
-            // Write length prefix and data
-            self.writer.write_all(&len_bytes)?;
+            let header = PayloadEntryHeader {
+                len: (data.len() as u16).to_le(),
+            };
+            self.writer.write_all(&header.len.to_le_bytes())?;
             self.writer.write_all(&data)?;
-            self.offset += 2 + data.len() as u64;
+            self.offset += std::mem::size_of::<PayloadEntryHeader>() as u64 + data.len() as u64;
             Ok((current + 1) as u32)
         } else {
             Ok(0)
@@ -69,14 +78,14 @@ impl<V: DeserializeOwned> PayloadStore<V> {
         }
         let rel = (ptr_val - 1) as usize;
         let buf = &self.buf;
-        if rel + 2 > buf.len() {
+        if rel + std::mem::size_of::<PayloadEntryHeader>() > buf.len() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated payload length"));
         }
-        let len_bytes: [u8; 2] = buf[rel..rel + 2]
-            .try_into()
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid payload length"))?;
-        let val_len = u16::from_le_bytes(len_bytes) as usize;
-        let start = rel + 2;
+        let header = unsafe {
+            ptr::read_unaligned(buf.as_ptr().add(rel) as *const PayloadEntryHeader)
+        };
+        let val_len = u16::from_le(header.len) as usize;
+        let start = rel + std::mem::size_of::<PayloadEntryHeader>();
         if start + val_len > buf.len() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated payload data"));
         }

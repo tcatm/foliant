@@ -3,7 +3,7 @@ use std::io::{self, Write, BufWriter};
 use std::path::Path;
 use std::sync::Arc;
 use memmap2::Mmap;
-use std::convert::TryInto;
+use std::ptr;
 
 const CHUNK_SIZE: usize = 128 * 1024;
 
@@ -72,7 +72,8 @@ impl LookupTableStore {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated lookup table entry"));
         }
         let slice = &self.buf[start..end];
-        let payload_ptr = u32::from_le_bytes(slice[0..4].try_into().unwrap());
+        let raw = unsafe { ptr::read_unaligned(slice.as_ptr() as *const LookupEntry) };
+        let payload_ptr = u32::from_le(raw.payload_ptr);
         Ok(LookupEntry { payload_ptr })
     }
 }
