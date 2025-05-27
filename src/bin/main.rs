@@ -185,7 +185,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let elapsed = now.duration_since(start).as_secs_f64();
                     let eps = if elapsed > 0.0 { (entries as f64 / elapsed).round() } else { 0.0 };
                     pb.set_position(bytes_in as u64);
-                    pb.set_message(format!("{} entries, {:.0}/s, mem {}KB", entries, eps, get_rss_kb().unwrap_or(0)));
+                    let mem_kb = get_rss_kb().unwrap_or(0);
+                    let mem_str = if mem_kb >= 1_048_576 {
+                        format!("{:.2} GB", mem_kb as f64 / 1_048_576.0)
+                    } else if mem_kb >= 1024 {
+                        format!("{:.2} MB", mem_kb as f64 / 1024.0)
+                    } else {
+                        format!("{} KB", mem_kb)
+                    };
+                    pb.set_message(format!("{} entries, {:.0}/s, mem {}", entries, eps, mem_str));
                     last_report = now;
                 }
             }
@@ -243,7 +251,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             while let Some(entry) = stream.next() {
                 match entry {
-                    Entry::Key(s, val_opt) => {
+                    Entry::Key(s, _ptr, val_opt) => {
                         // print key, followed by optional CBOR-decoded JSON Value in dim color
                         if let Some(val) = val_opt {
                             let val_str = serde_json::to_string(&val)?;

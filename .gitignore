@@ -1,5 +1,6 @@
 /target
 *.idx
 *.txt
+*.lookup
 *.payload
 /data

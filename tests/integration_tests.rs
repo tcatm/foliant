@@ -1,8 +1,8 @@
-use foliant::{DatabaseBuilder, Database, Entry};
 use foliant::Streamer;
-use tempfile::tempdir;
+use foliant::{Database, DatabaseBuilder, Entry};
+use serde_cbor::Value;
 use std::error::Error;
-use serde_cbor::Value as Value;
+use tempfile::tempdir;
 
 // SimpleList: insert distinct keys and verify list("", None)
 #[test]
@@ -17,7 +17,10 @@ fn simple_list() -> Result<(), Box<dyn Error>> {
     let db = builder.into_database()?;
     let mut list: Vec<Entry> = db.list("", None).unwrap().collect();
     list.sort();
-    let mut expected: Vec<Entry> = keys.iter().map(|&s| Entry::Key(s.to_string(), None)).collect();
+    let mut expected: Vec<Entry> = keys
+        .iter()
+        .map(|&s| Entry::Key(s.to_string(), 0, None))
+        .collect();
     expected.sort();
     assert_eq!(list, expected);
     Ok(())
@@ -38,7 +41,7 @@ fn delimiter_grouping() -> Result<(), Box<dyn Error>> {
     list.sort();
     let expected = vec![
         Entry::CommonPrefix("foo/".to_string()),
-        Entry::Key("foobar".to_string(), None),
+        Entry::Key("foobar".to_string(), 0, None),
     ];
     assert_eq!(list, expected);
     Ok(())
@@ -53,7 +56,7 @@ fn empty_key() -> Result<(), Box<dyn Error>> {
     builder.insert("", None);
     let db = builder.into_database()?;
     let list: Vec<Entry> = db.list("", None).unwrap().collect();
-    assert_eq!(list, vec![Entry::Key("".to_string(), None)]);
+    assert_eq!(list, vec![Entry::Key("".to_string(), 0, None)]);
     Ok(())
 }
 
@@ -69,8 +72,8 @@ fn prefix_split() -> Result<(), Box<dyn Error>> {
     let mut list: Vec<Entry> = db.list("te", None).unwrap().collect();
     list.sort();
     let mut expected = vec![
-        Entry::Key("test".to_string(), None),
-        Entry::Key("team".to_string(), None),
+        Entry::Key("test".to_string(), 0, None),
+        Entry::Key("team".to_string(), 0, None),
     ];
     expected.sort();
     assert_eq!(list, expected);
@@ -89,8 +92,8 @@ fn mid_edge_prefix() -> Result<(), Box<dyn Error>> {
     let mut list: Vec<Entry> = db.list("abc", None).unwrap().collect();
     list.sort();
     let mut expected = vec![
-        Entry::Key("abcde".to_string(), None),
-        Entry::Key("abcdx".to_string(), None),
+        Entry::Key("abcde".to_string(), 0, None),
+        Entry::Key("abcdx".to_string(), 0, None),
     ];
     expected.sort();
     assert_eq!(list, expected);
@@ -110,7 +113,10 @@ fn unicode_keys() -> Result<(), Box<dyn Error>> {
     let db = builder.into_database()?;
     let mut list: Vec<Entry> = db.list("こん", None).unwrap().collect();
     list.sort();
-    let mut expected: Vec<Entry> = words.iter().map(|&s| Entry::Key(s.to_string(), None)).collect();
+    let mut expected: Vec<Entry> = words
+        .iter()
+        .map(|&s| Entry::Key(s.to_string(), 0, None))
+        .collect();
     expected.sort();
     assert_eq!(list, expected);
     Ok(())
@@ -140,16 +146,24 @@ fn mmap_payload_access() -> Result<(), Box<dyn Error>> {
     let base = dir.path().join("db");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("x", Some(Value::Bool(true)));
-    builder.insert("y", Some(Value::Array(vec![
-        Value::Integer(1),
-        Value::Integer(2),
-        Value::Integer(3),
-    ])));
+    builder.insert(
+        "y",
+        Some(Value::Array(vec![
+            Value::Integer(1),
+            Value::Integer(2),
+            Value::Integer(3),
+        ])),
+    );
     let db = builder.into_database()?;
     assert_eq!(db.get_value("x")?, Some(Value::Bool(true)));
-    assert_eq!(db.get_value("y")?, Some(Value::Array(vec![
-        Value::Integer(1), Value::Integer(2), Value::Integer(3)
-    ])));
+    assert_eq!(
+        db.get_value("y")?,
+        Some(Value::Array(vec![
+            Value::Integer(1),
+            Value::Integer(2),
+            Value::Integer(3)
+        ]))
+    );
     assert_eq!(db.get_value("z")?, None);
     Ok(())
 }
@@ -168,7 +182,8 @@ fn serialize_vs_mmap_listing() -> Result<(), Box<dyn Error>> {
     let db2 = Database::<Value>::open(&base)?;
     let mut l1: Vec<Entry> = db1.list("", None).unwrap().collect();
     let mut l2: Vec<Entry> = db2.list("", None).unwrap().collect();
-    l1.sort(); l2.sort();
+    l1.sort();
+    l2.sort();
     assert_eq!(l1, l2);
     Ok(())
 }
@@ -188,7 +203,8 @@ fn roundtrip_prefixes() -> Result<(), Box<dyn Error>> {
     for &pref in &["", "a", "ab", "comp"] {
         let mut r1: Vec<Entry> = db1.list(pref, Some('/')).unwrap().collect();
         let mut r2: Vec<Entry> = db2.list(pref, Some('/')).unwrap().collect();
-        r1.sort(); r2.sort();
+        r1.sort();
+        r2.sort();
         assert_eq!(r1, r2);
     }
     Ok(())
@@ -207,4 +223,145 @@ fn multi_list_utf8_truncate() {
     let first = stream.next().unwrap();
     assert_eq!(first.as_str(), "é");
     assert!(stream.next().is_none());
+}
+
+#[test]
+fn batching_and_sorted() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let base = dir.path().join("db");
+    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    builder.insert("d", None);
+    builder.insert("a", None);
+    builder.insert("c", None);
+    builder.insert("b", None);
+    let db = builder.into_database()?;
+    let list: Vec<Entry> = db.list("", None).unwrap().collect();
+    let keys: Vec<String> = list.into_iter().map(|e| e.as_str().to_string()).collect();
+    assert_eq!(keys, vec!["a", "b", "c", "d"]);
+    Ok(())
+}
+
+#[test]
+fn batching_and_sorted_with_values() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let base = dir.path().join("db_values");
+    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    builder.insert("d", Some(Value::Integer(1)));
+    builder.insert("a", Some(Value::Text("alpha".into())));
+    builder.insert("c", Some(Value::Bool(true)));
+    builder.insert(
+        "b",
+        Some(Value::Array(vec![Value::Integer(2), Value::Integer(3)])),
+    );
+    let db = builder.into_database()?;
+    let list: Vec<Entry> = db.list("", None).unwrap().collect();
+    let keys: Vec<String> = list.into_iter().map(|e| e.as_str().to_string()).collect();
+    assert_eq!(keys, vec!["a", "b", "c", "d"]);
+    assert_eq!(db.get_value("a")?, Some(Value::Text("alpha".into())));
+    assert_eq!(
+        db.get_value("b")?,
+        Some(Value::Array(vec![Value::Integer(2), Value::Integer(3)]))
+    );
+    assert_eq!(db.get_value("c")?, Some(Value::Bool(true)));
+    assert_eq!(db.get_value("d")?, Some(Value::Integer(1)));
+    Ok(())
+}
+
+#[test]
+fn get_key_basic() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let base = dir.path().join("db_get_key_basic");
+    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    builder.insert("foo", Some(Value::Integer(1)));
+    builder.insert("bar", Some(Value::Text("two".into())));
+    builder.insert("baz", Some(Value::Bool(true)));
+    let db = builder.into_database()?;
+    let entries: Vec<Entry> = db.list("", None).unwrap().collect();
+    for entry in &entries {
+        let ptr = entry.ptr().expect("entry should have a ptr");
+        eprintln!("Checking entry: {:?} with ptr {}", entry, ptr);
+        // Check that get_key maps the pointer back to the correct key
+        let got = db.get_key(ptr)?;
+        assert_eq!(
+            got,
+            Some(entry.clone()),
+            "get_key returned {:?} for entry '{}' ptr {}",
+            got,
+            entry.as_str(),
+            ptr
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn get_key_with_new_fst_segment() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let base = dir.path().join("db_get_key_new_fst");
+    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    // First segment: foo and bar
+    builder.insert("foo", Some(Value::Integer(1)));
+    builder.insert("bar", Some(Value::Text("two".into())));
+    builder.flush_fst()?;
+    // Second segment: baz and qux
+    builder.insert("baz", Some(Value::Bool(true)));
+    builder.insert("qux", Some(Value::Array(vec![Value::Integer(3)])));
+    let db = builder.into_database()?;
+    let entries: Vec<Entry> = db.list("", None).unwrap().collect();
+    for entry in &entries {
+        let ptr = entry.ptr().expect("entry should have a ptr");
+        // Check that get_key maps the pointer back to the correct key, even across segments
+        let got = db.get_key(ptr)?;
+        assert_eq!(
+            got,
+            Some(entry.clone()),
+            "get_key returned {:?} for entry '{}' ptr {}",
+            got,
+            entry.as_str(),
+            ptr
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn get_key_multiple_fst_segments() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let base = dir.path().join("db_get_key_multiple_fst");
+    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    // Partition many keys into three batches, flushing fst after the first two batches
+    // to create multiple fst segments and stress fst's memory caching behavior on insert.
+    let num_keys = 1_200;
+    // Generate fixed-width numeric keys in descending order to create out-of-order segments.
+    let keys: Vec<String> = (0..num_keys).rev().map(|i| format!("{:05}", i)).collect();
+    let third = num_keys / 3;
+    // First segment
+    for key in keys[0..third].iter().rev() {
+        builder.insert(key, Some(Value::Integer(1)));
+    }
+    builder.flush_fst()?;
+    // Second segment
+    for key in keys[third..2 * third].iter().rev() {
+        builder.insert(key, Some(Value::Integer(2)));
+    }
+    builder.flush_fst()?;
+    // Third segment (implicit flush at close)
+    for key in keys[2 * third..].iter().rev() {
+        builder.insert(key, Some(Value::Integer(3)));
+    }
+    let db = builder.into_database()?;
+    let entries: Vec<Entry> = db.list("", None).unwrap().collect();
+    for entry in &entries {
+        let ptr = entry.ptr().expect("entry should have a ptr");
+        let got = db.get_key(ptr)?;
+        assert_eq!(
+            got,
+            Some(entry.clone()),
+            "get_key returned {:?} for entry '{}' ptr {}",
+            got,
+            entry.as_str(),
+            ptr
+        );
+    }
+    Ok(())
 }

@@ -45,16 +45,18 @@ where
         match stream.next() {
             Some(Entry::CommonPrefix(s)) if !only_keys => {
                 let s = s.strip_prefix(prefix).unwrap_or(&s);
-                println!("📁 {}", s);
+                // Color directory listings in blue
+                println!("\x1b[34m📁 {}\x1b[0m", s);
                 printed += 1;
             }
-            Some(Entry::Key(s, val_opt)) if !only_prefix => {
-                let s = s.strip_prefix(prefix).unwrap_or(&s);
+            Some(Entry::Key(orig, ptr, val_opt)) if !only_prefix => {
+                let s = orig.strip_prefix(prefix).unwrap_or(&orig);
+                // Print the raw pointer in subtle gray (bright black)
                 if let Some(val) = val_opt {
                     let val_str = serde_json::to_string(&val)?;
-                    println!("📄 {} \x1b[2m{}\x1b[0m", s, val_str);
+                    println!("📄 {} \x1b[90m#{}\x1b[0m \x1b[2m{}\x1b[0m", s, ptr, val_str);
                 } else {
-                    println!("📄 {}", s);
+                    println!("📄 {} \x1b[90m#{}\x1b[0m", s, ptr);
                 }
                 printed += 1;
             }
@@ -144,7 +146,7 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
                         }
                     }
                 }
-                Entry::Key(s, _) if !suggest_dirs_only => {
+                Entry::Key(s, _ptr, _) if !suggest_dirs_only => {
                     // File candidate (skip when completing 'cd')
                     let rem = &s[prefix.len()..];
                     if let Some(seg) = rem.split(delim).next() {
@@ -212,8 +214,8 @@ Available commands:
     -d <c>   one-off custom delimiter character
   cd [dir]                        change directory
   find <regex>                    search entries matching regex
+  val <id>                        lookup key by raw pointer ID
   pwd                             print working directory
-  val <value>                     get key by lookup id
   exit, quit                      exit shell
   help                            show this help
 
@@ -360,6 +362,27 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
                             }
                         }
                     }
+                    "val" => {
+                        // Reverse lookup by raw pointer ID
+                        let id_str = match parts.next() {
+                            Some(i) => i,
+                            None => { println!("Usage: val <numeric_id>"); continue; }
+                        };
+                        match id_str.parse::<u64>() {
+                            Ok(id) => match state.borrow().db.get_key(id)? {
+                                Some(Entry::Key(key, ptr, val_opt)) => {
+                                    if let Some(val) = val_opt {
+                                        let val_str = serde_json::to_string(&val)?;
+                                        println!("📄 {} \x1b[90m#{}\x1b[0m \x1b[2m{}\x1b[0m", key, ptr, val_str);
+                                    } else {
+                                        println!("📄 {} \x1b[90m#{}\x1b[0m", key, ptr);
+                                    }
+                                }
+                                _ => println!("No key found for id {}", id),
+                            },
+                            Err(_) => println!("Usage: val <numeric_id>"),
+                        }
+                    }
                     "cd" => {
                         // Change current working prefix
                         let arg = parts.next().unwrap_or("");
@@ -393,24 +416,6 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
                     }
                     "pwd" => {
                         println!("{}", state.borrow().cwd);
-                    }
-                    "val" => {
-                        let arg = parts.next().unwrap_or("");
-                        if arg.is_empty() {
-                            println!("Usage: val <value>");
-                            continue;
-                        }
-                        match arg.parse::<u64>() {
-                            Ok(id) => {
-                                let state_ref = state.borrow();
-                                if let Some(key) = state_ref.db.get_key(id) {
-                                    println!("{}", key);
-                                } else {
-                                    println!("No key found for lookup id {}", id);
-                                }
-                            }
-                            Err(_) => println!("Invalid number: {}", arg),
-                        }
                     }
                     "help" => {
                         println!("{}", help_text);

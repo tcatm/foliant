@@ -1,6 +1,6 @@
 use crate::{Shard, Entry, Streamer};
 use fst::raw::{Fst, Node, Output};
-use memmap2::Mmap;
+use crate::shard::SharedMmap;
 use smallvec::SmallVec;
 /// Maximum expected key length for reserve hints
 const MAX_KEY_LEN: usize = 256;
@@ -57,7 +57,7 @@ pub struct MultiShardListStreamer<'a, V>
 where V: DeserializeOwned,
 {
     /// Raw FSTs for each matching shard
-    fsts: Vec<&'a Fst<Mmap>>,
+    fsts: Vec<&'a Fst<SharedMmap>>,
     /// References to shards corresponding to each FST
     shards: Vec<&'a Shard<V>>,
     /// Optional delimiter byte for grouping
@@ -82,12 +82,12 @@ where
         shards: &'a [Shard<V>],
         prefix: &[u8],
     ) -> (
-        Vec<&'a Fst<Mmap>>,
+        Vec<&'a Fst<SharedMmap>>,
         Vec<&'a Shard<V>>,
         FrameMulti<'a>,
     ) {
         // Filter shards by prefix and build per-shard state, pre-allocating for efficiency
-        let mut fsts: Vec<&'a Fst<Mmap>> = Vec::with_capacity(shards.len());
+        let mut fsts: Vec<&'a Fst<SharedMmap>> = Vec::with_capacity(shards.len());
         let mut shards_f: Vec<&'a Shard<V>> = Vec::with_capacity(shards.len());
         let mut states: Vec<FrameState<'a>> = Vec::with_capacity(shards.len());
         for shard in shards {
@@ -161,21 +161,22 @@ where V: DeserializeOwned,
             if !frame.yielded {
                 frame.yielded = true;
                 if let Some(state) = frame.states.iter().find(|s| s.node.is_final()) {
-                    let lut_ptr = state.output.value();
+                    let lut_id = state.output.value();
                     let shard_i = state.shard_idx;
-                    let lookup_entry = self.shards[shard_i]
+                    let payload_ptr = self.shards[shard_i]
                         .lookup
-                        .get(lut_ptr as u32)
+                        .get(lut_id as u32)
                         .ok()
-                        .unwrap_or_default();
+                        .map(|e| e.payload_ptr)
+                        .unwrap_or(0);
                     let val = self.shards[shard_i]
                         .payload
-                        .get(lookup_entry.payload_ptr)
+                        .get(payload_ptr)
                         .ok()
                         .flatten();
                     let key = String::from_utf8(self.prefix.clone())
                         .expect("invalid utf8 in key");
-                    return Some(Entry::Key(key, val));
+                    return Some(Entry::Key(key, lut_id, val));
                 }
             }
             // 2) Build grouped transitions once, reusing inline buckets

@@ -37,11 +37,11 @@ fn multi_shard_listing_complex() -> Result<(), Box<dyn Error>> {
     let mut all: Vec<Entry> = db.list("", None)?.collect();
     all.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     let mut expected = vec![
-        Entry::Key("alpha/a".to_string(), None),
-        Entry::Key("alpha/b".to_string(), None),
-        Entry::Key("beta/x".to_string(), None),
-        Entry::Key("delta".to_string(), None),
-        Entry::Key("gamma/z".to_string(), None),
+        Entry::Key("alpha/a".to_string(), 0, None),
+        Entry::Key("alpha/b".to_string(), 0, None),
+        Entry::Key("beta/x".to_string(), 0, None),
+        Entry::Key("delta".to_string(), 0, None),
+        Entry::Key("gamma/z".to_string(), 0, None),
     ];
     expected.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     assert_eq!(all, expected);
@@ -54,7 +54,7 @@ fn multi_shard_listing_complex() -> Result<(), Box<dyn Error>> {
         Entry::CommonPrefix("beta/".to_string()),
         Entry::CommonPrefix("gamma/".to_string()),
         // 'delta' has no slash, so appears as a key
-        Entry::Key("delta".to_string(), None),
+        Entry::Key("delta".to_string(), 0, None),
     ];
     exp_grp.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     assert_eq!(grp, exp_grp);
@@ -96,11 +96,11 @@ fn multi_shard_listing_complex_with_values() -> Result<(), Box<dyn Error>> {
     let mut all: Vec<Entry> = db.list("", None)?.collect();
     all.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     let mut expected = vec![
-        Entry::Key("alpha/a".to_string(), Some(Value::Integer(1))),
-        Entry::Key("alpha/b".to_string(), Some(Value::Integer(2))),
-        Entry::Key("beta/x".to_string(), Some(Value::Text("x".into()))),
-        Entry::Key("delta".to_string(), Some(Value::Array(vec![Value::Integer(3), Value::Integer(4)]))),
-        Entry::Key("gamma/z".to_string(), Some(Value::Bool(true))),
+        Entry::Key("alpha/a".to_string(), 0, Some(Value::Integer(1))),
+        Entry::Key("alpha/b".to_string(), 0, Some(Value::Integer(2))),
+        Entry::Key("beta/x".to_string(), 0, Some(Value::Text("x".into()))),
+        Entry::Key("delta".to_string(), 0, Some(Value::Array(vec![Value::Integer(3), Value::Integer(4)]))),
+        Entry::Key("gamma/z".to_string(), 0, Some(Value::Bool(true))),
     ];
     expected.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     assert_eq!(all, expected);
@@ -113,7 +113,7 @@ fn multi_shard_listing_complex_with_values() -> Result<(), Box<dyn Error>> {
         Entry::CommonPrefix("beta/".to_string()),
         Entry::CommonPrefix("gamma/".to_string()),
         // 'delta' has no slash, so appears as a key
-        Entry::Key("delta".to_string(), Some(Value::Array(vec![Value::Integer(3), Value::Integer(4)]))),
+        Entry::Key("delta".to_string(), 0, Some(Value::Array(vec![Value::Integer(3), Value::Integer(4)]))),
     ];
     exp_grp.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     assert_eq!(grp, exp_grp);
@@ -161,8 +161,8 @@ fn multi_shard_listing_deep_prefix() -> Result<(), Box<dyn Error>> {
     lvl2.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     // Leaves for 1 & 2, then grouping for deeper subtree at 'foo/a/3/'
     let exp2 = vec![
-        Entry::Key("foo/a/1".to_string(), None),
-        Entry::Key("foo/a/2".to_string(), None),
+        Entry::Key("foo/a/1".to_string(), 0, None),
+        Entry::Key("foo/a/2".to_string(), 0, None),
         Entry::CommonPrefix("foo/a/3/".to_string()),
     ];
     assert_eq!(lvl2, exp2);
@@ -204,11 +204,11 @@ fn multi_shard_listing_none_values() -> Result<(), Box<dyn Error>> {
     let mut all: Vec<Entry> = db.list("", None)?.collect();
     all.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     let expected = vec![
-        Entry::Key("x/1".to_string(), None),
-        Entry::Key("x/2".to_string(), None),
-        Entry::Key("y/a".to_string(), None),
-        Entry::Key("y/b".to_string(), None),
-        Entry::Key("z".to_string(), None),
+        Entry::Key("x/1".to_string(), 0, None),
+        Entry::Key("x/2".to_string(), 0, None),
+        Entry::Key("y/a".to_string(), 0, None),
+        Entry::Key("y/b".to_string(), 0, None),
+        Entry::Key("z".to_string(), 0, None),
     ];
     assert_eq!(all, expected);
 
@@ -218,7 +218,7 @@ fn multi_shard_listing_none_values() -> Result<(), Box<dyn Error>> {
     let expected_grp = vec![
         Entry::CommonPrefix("x/".to_string()),
         Entry::CommonPrefix("y/".to_string()),
-        Entry::Key("z".to_string(), None),
+        Entry::Key("z".to_string(), 0, None),
     ];
     assert_eq!(grp, expected_grp);
     Ok(())
@@ -253,8 +253,8 @@ fn multi_shard_listing_with_prefix() -> Result<(), Box<dyn Error>> {
     let mut list: Vec<Entry> = db.list("foo", None)?.collect();
     list.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     let expected = vec![
-        Entry::Key("foo/a".to_string(), Some(Value::Integer(10))),
-        Entry::Key("foo/b".to_string(), Some(Value::Integer(20))),
+        Entry::Key("foo/a".to_string(), 0, Some(Value::Integer(10))),
+        Entry::Key("foo/b".to_string(), 0, Some(Value::Integer(20))),
     ];
     assert_eq!(list, expected);
     Ok(())

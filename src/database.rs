@@ -1,20 +1,20 @@
 use std::fs::read_dir;
-use std::path::Path;
 use std::io;
+use std::path::Path;
 
-use serde::de::DeserializeOwned;
-use regex_automata::sparse::SparseDFA;
 use fst::automaton::Str;
-use fst::Automaton;
 use fst::map::OpBuilder;
+use fst::Automaton;
 use fst::IntoStreamer;
 use fst::Streamer as FstStreamer;
+use regex_automata::sparse::SparseDFA;
+use serde::de::DeserializeOwned;
 
-use crate::error::{IndexError, Result};
-use crate::shard::Shard;
-use crate::multi_list::MultiShardListStreamer;
-use crate::streamer::{PrefixStream, Streamer};
 use crate::entry::Entry;
+use crate::error::{IndexError, Result};
+use crate::multi_list::MultiShardListStreamer;
+use crate::shard::Shard;
+use crate::streamer::{PrefixStream, Streamer};
 
 /// Read-only database: union of one or more shards (FST maps + payload stores)
 pub struct Database<V = serde_cbor::Value>
@@ -93,11 +93,12 @@ where
     ///
     /// Returns a stream of `Entry<V>` (keys matching the regex).
     pub fn grep<'a>(&'a self, prefix: Option<&'a str>, re: &str) -> Result<PrefixStream<'a, V>> {
-        let dfa = SparseDFA::new(re)
-            .map_err(|e| IndexError::Io(io::Error::new(
+        let dfa = SparseDFA::new(re).map_err(|e| {
+            IndexError::Io(io::Error::new(
                 io::ErrorKind::Other,
                 format!("regex error: {}", e),
-            )))?;
+            ))
+        })?;
         let prefix_str = prefix.unwrap_or("");
         let start = Str::new(prefix_str).starts_with();
         let mut relevant_shards: Vec<&Shard<V>> = Vec::new();
@@ -119,23 +120,23 @@ where
             op = op.add(shard.fst.search(automaton.clone()));
         }
         let stream = op.union().into_stream();
-        Ok(PrefixStream { stream, shards: relevant_shards })
+        Ok(PrefixStream {
+            stream,
+            shards: relevant_shards,
+        })
     }
 
     /// Retrieve the payload for `key`, if any.
     pub fn get_value(&self, key: &str) -> Result<Option<V>> {
         for shard in &self.shards {
-            if let Some(lut_ptr) = shard.fst.get(key) {
-                let lookup = shard.lookup.get(lut_ptr as u32)
-                    .map_err(|e| IndexError::Io(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("lookup error: {}", e),
-                    )))?;
-                let v = shard.payload.get(lookup.payload_ptr)
-                    .map_err(|e| IndexError::Io(io::Error::new(
+            if let Some(weight) = shard.fst.get(key) {
+                let lut_entry = shard.lookup.get(weight as u32).map_err(IndexError::from)?;
+                let v = shard.payload.get(lut_entry.payload_ptr).map_err(|e| {
+                    IndexError::Io(io::Error::new(
                         io::ErrorKind::Other,
                         format!("payload error: {}", e),
-                    )))?;
+                    ))
+                })?;
                 return Ok(v);
             }
         }
@@ -147,14 +148,24 @@ where
         self.shards.iter().map(|s| s.fst.len()).sum()
     }
 
-    /// Given a lookup identifier (weight), return the corresponding key if present in any shard.
-    pub fn get_key(&self, lut_id: u64) -> Option<String> {
+    /// Reverse lookup by raw pointer: retrieve the key and optional value.
+    pub fn get_key(&self, ptr: u64) -> Result<Option<crate::entry::Entry<V>>> {
+        // Use raw FST reverse lookup directly on the shard's mmap
+        use fst::raw::Fst as RawFst;
         for shard in &self.shards {
-            let raw_fst = shard.fst.as_fst();
-            if let Some(bytes) = raw_fst.get_key(lut_id) {
-                return String::from_utf8(bytes).ok();
+            let raw_fst = RawFst::new(shard.idx_mmap.clone()).map_err(IndexError::from)?;
+            if let Some(key_bytes) = raw_fst.get_key(ptr) {
+                let key = String::from_utf8(key_bytes).map_err(|e| {
+                    IndexError::Io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid utf8 in key: {}", e),
+                    ))
+                })?;
+                let lut_entry = shard.lookup.get(ptr as u32)?;
+                let value = shard.payload.get(lut_entry.payload_ptr)?;
+                return Ok(Some(crate::entry::Entry::Key(key, ptr, value)));
             }
         }
-        None
+        Ok(None)
     }
 }

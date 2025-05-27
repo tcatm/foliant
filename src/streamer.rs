@@ -56,15 +56,15 @@ where
 
             let iv = ivs.into_iter().next()
                 .expect("failed to get first shard in grep");
-            let lookup_entry = self.shards[iv.index]
+            let weight = iv.value;
+            let payload_ptr = self.shards[iv.index]
                 .lookup
-                .get(iv.value as u32)
-                .expect("failed to get lookup entry in grep");
-            let value = self.shards[iv.index]
-                .payload
-                .get(lookup_entry.payload_ptr)
+                .get(weight as u32)
+                .expect("failed to get lookup in grep")
+                .payload_ptr;
+            let value = self.shards[iv.index].payload.get(payload_ptr)
                 .expect("failed to get payload in grep");
-            Some(Entry::Key(key, value))
+            Some(Entry::Key(key, weight, value))
         } else {
             None
         }
