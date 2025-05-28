@@ -1,11 +1,11 @@
-use std::fs::File;
-use std::io::{self, Write, BufWriter};
-use std::path::Path;
-use std::sync::Arc;
 use memmap2::Mmap;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
+use std::path::Path;
 use std::ptr;
+use std::sync::Arc;
 
 const CHUNK_SIZE: usize = 128 * 1024;
 /// Header for each payload entry: 2-byte little-endian length prefix.
@@ -28,7 +28,11 @@ impl<V: Serialize> PayloadStoreBuilder<V> {
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let file = File::create(path)?;
         let writer = BufWriter::with_capacity(CHUNK_SIZE, file);
-        Ok(PayloadStoreBuilder { writer, offset: 0, phantom: std::marker::PhantomData })
+        Ok(PayloadStoreBuilder {
+            writer,
+            offset: 0,
+            phantom: std::marker::PhantomData,
+        })
     }
 
     /// Append an optional payload; returns an identifier (offset+1), 0 means no payload.
@@ -68,7 +72,10 @@ impl<V: DeserializeOwned> PayloadStore<V> {
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let file = File::open(path)?;
         let mmap = unsafe { Mmap::map(&file)? };
-        Ok(PayloadStore { buf: Arc::new(mmap), phantom: std::marker::PhantomData })
+        Ok(PayloadStore {
+            buf: Arc::new(mmap),
+            phantom: std::marker::PhantomData,
+        })
     }
 
     /// Retrieve the payload for a given identifier, deserializing to V.
@@ -79,15 +86,20 @@ impl<V: DeserializeOwned> PayloadStore<V> {
         let rel = (ptr_val - 1) as usize;
         let buf = &self.buf;
         if rel + std::mem::size_of::<PayloadEntryHeader>() > buf.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated payload length"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "truncated payload length",
+            ));
         }
-        let header = unsafe {
-            ptr::read_unaligned(buf.as_ptr().add(rel) as *const PayloadEntryHeader)
-        };
+        let header =
+            unsafe { ptr::read_unaligned(buf.as_ptr().add(rel) as *const PayloadEntryHeader) };
         let val_len = u16::from_le(header.len) as usize;
         let start = rel + std::mem::size_of::<PayloadEntryHeader>();
         if start + val_len > buf.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated payload data"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "truncated payload data",
+            ));
         }
         let slice = &buf[start..start + val_len];
         let val: V = serde_cbor::from_slice(slice)
@@ -98,6 +110,9 @@ impl<V: DeserializeOwned> PayloadStore<V> {
 
 impl<V: DeserializeOwned> Clone for PayloadStore<V> {
     fn clone(&self) -> Self {
-        PayloadStore { buf: self.buf.clone(), phantom: std::marker::PhantomData }
+        PayloadStore {
+            buf: self.buf.clone(),
+            phantom: std::marker::PhantomData,
+        }
     }
 }

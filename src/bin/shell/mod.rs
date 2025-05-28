@@ -2,16 +2,27 @@
 // Maintains a current 'directory' prefix split by a delimiter
 // Commands: ls, cd, pwd, help, exit/quit
 
-use rustyline::{Editor, error::ReadlineError, completion::{Completer, Pair}, hint::Hinter, highlight::Highlighter, validate::Validator, Helper, Context};
+use rustyline::{
+    completion::{Completer, Pair},
+    error::ReadlineError,
+    highlight::Highlighter,
+    hint::Hinter,
+    validate::Validator,
+    Context, Editor, Helper,
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::rc::Rc;
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::rc::Rc;
 
-use foliant::{Database, Entry, Streamer};
 use ctrlc;
-use std::sync::{mpsc::{channel, Receiver}, Arc, atomic::{AtomicU64, Ordering}};
+use foliant::{Database, Entry, Streamer, TagMode};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    mpsc::{channel, Receiver},
+    Arc,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Result of printing a stream: either completed or aborted via Ctrl-C.
@@ -83,22 +94,30 @@ impl<V: DeserializeOwned> Helper for ShellHelper<V> {}
 
 impl<V: DeserializeOwned> Completer for ShellHelper<V> {
     type Candidate = Pair;
-    fn complete(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Result<(usize, Vec<Pair>), ReadlineError> {
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &Context<'_>,
+    ) -> Result<(usize, Vec<Pair>), ReadlineError> {
         let before = &line[..pos];
         let start = before.rfind(' ').map(|i| i + 1).unwrap_or(0);
         let word = &before[start..];
         let mut candidates = Vec::new();
         if start == 0 {
-            let cmds = ["cd", "ls", "find", "pwd", "val", "exit", "quit", "help"];
+            let cmds = ["cd", "ls", "find", "pwd", "val", "tags", "exit", "quit", "help"];
             for &cmd in &cmds {
                 if cmd.starts_with(word) {
                     // Commands that take an argument get a trailing space
-                    let replacement = if ["cd", "ls", "find", "val"].contains(&cmd) {
+                    let replacement = if ["cd", "ls", "find", "val", "tags"].contains(&cmd) {
                         format!("{} ", cmd)
                     } else {
                         cmd.to_string()
                     };
-                    candidates.push(Pair { display: cmd.to_string(), replacement });
+                    candidates.push(Pair {
+                        display: cmd.to_string(),
+                        replacement,
+                    });
                 }
             }
             return Ok((start, candidates));
@@ -142,7 +161,10 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
                             }
                             rep.push_str(seg);
                             rep.push(delim);
-                            candidates.push(Pair { display: rep.clone(), replacement: rep });
+                            candidates.push(Pair {
+                                display: rep.clone(),
+                                replacement: rep,
+                            });
                         }
                     }
                 }
@@ -157,7 +179,10 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
                                 rep.push(delim);
                             }
                             rep.push_str(seg);
-                            candidates.push(Pair { display: rep.clone(), replacement: rep });
+                            candidates.push(Pair {
+                                display: rep.clone(),
+                                replacement: rep,
+                            });
                         }
                     }
                 }
@@ -177,9 +202,18 @@ impl<V: DeserializeOwned> Hinter for ShellHelper<V> {
 impl<V: DeserializeOwned> Highlighter for ShellHelper<V> {}
 impl<V: DeserializeOwned> Validator for ShellHelper<V> {}
 
-pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) -> Result<(), Box<dyn std::error::Error>> {
-    let state = Rc::new(RefCell::new(ShellState { db, delim, cwd: String::new() }));
-    let helper = ShellHelper { state: Rc::clone(&state) };
+pub fn run_shell<V: DeserializeOwned + Serialize>(
+    db: Database<V>,
+    delim: char,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let state = Rc::new(RefCell::new(ShellState {
+        db,
+        delim,
+        cwd: String::new(),
+    }));
+    let helper = ShellHelper {
+        state: Rc::clone(&state),
+    };
     let mut rl = Editor::new()?;
     rl.set_helper(Some(helper));
     // Setup Ctrl-C handler: first press aborts listing, second within 2s exits shell
@@ -189,7 +223,10 @@ pub fn run_shell<V: DeserializeOwned + Serialize>(db: Database<V>, delim: char) 
         let sig_tx = sig_tx.clone();
         let last_sig = Arc::clone(&last_sig);
         ctrlc::set_handler(move || {
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
             let prev = last_sig.swap(now, Ordering::SeqCst);
             if now.saturating_sub(prev) < 2000 {
                 std::process::exit(0);
@@ -214,6 +251,9 @@ Available commands:
     -d <c>   one-off custom delimiter character
   cd [dir]                        change directory
   find <regex>                    search entries matching regex
+  tags [-a|-o] <tag1> [tag2...]   list entries with tags (default: all)
+    -a       match all tags (AND, default)
+    -o       match any tag (OR)
   val <id>                        lookup key by raw pointer ID
   pwd                             print working directory
   exit, quit                      exit shell
@@ -252,7 +292,10 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
                                     if dtok.chars().count() == 1 {
                                         custom_delim = dtok.chars().next();
                                     } else {
-                                        println!("Invalid delimiter '{}'; must be single char", dtok);
+                                        println!(
+                                            "Invalid delimiter '{}'; must be single char",
+                                            dtok
+                                        );
                                     }
                                 } else {
                                     println!("Flag -d requires a delimiter argument");
@@ -308,15 +351,27 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
                             let state_borrow = state.borrow();
                             let mut stream = match state_borrow.db.list(&list_prefix, list_delim) {
                                 Ok(s) => s,
-                                Err(e) => { println!("Error listing {}: {}", list_prefix, e); continue; }
+                                Err(e) => {
+                                    println!("Error listing {}: {}", list_prefix, e);
+                                    continue;
+                                }
                             };
-                            match print_entries(list_prefix.as_str(), &mut stream, only_prefix, only_keys, Some(&sig_rx))? {
+                            match print_entries(
+                                list_prefix.as_str(),
+                                &mut stream,
+                                only_prefix,
+                                only_keys,
+                                Some(&sig_rx),
+                            )? {
                                 PrintResult::Aborted => continue,
                                 PrintResult::Count(printed) => {
                                     // Summary
                                     if printed > 0 {
-                                        println!("\n{} {} listed", printed,
-                                            if printed == 1 { "entry" } else { "entries" });
+                                        println!(
+                                            "\n{} {} listed",
+                                            printed,
+                                            if printed == 1 { "entry" } else { "entries" }
+                                        );
                                     } else if !prefix_str.is_empty() {
                                         println!("No entries found for prefix '{}'", prefix_str);
                                     } else {
@@ -326,11 +381,89 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
                             }
                         }
                     }
+                    "tags" => {
+                        // Parse flags and tags: -a for all (AND), -o for any (OR)
+                        let mut tag_mode = TagMode::And; // Default to AND
+                        let mut tags = Vec::new();
+                        
+                        for tok in parts {
+                            if tok == "-a" {
+                                tag_mode = TagMode::And;
+                            } else if tok == "-o" {
+                                tag_mode = TagMode::Or;
+                            } else if tok.starts_with('-') {
+                                println!("Unknown flag: {}", tok);
+                                continue;
+                            } else {
+                                tags.push(tok);
+                            }
+                        }
+                        
+                        if tags.is_empty() {
+                            println!("Usage: tags [-a|-o] <tag1> [tag2...]");
+                            continue;
+                        }
+                        
+                        let tags_refs: &[&str] = &tags;
+
+                        let cwd_owned = state.borrow().cwd.clone();
+                        let prefix_opt = if cwd_owned.is_empty() {
+                            None
+                        } else {
+                            Some(cwd_owned.as_str())
+                        };
+                        
+                        {
+                            let state_borrow = state.borrow();
+                            let mut stream = match state_borrow.db.list_by_tags(tags_refs, tag_mode, prefix_opt) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    println!("Error listing by tags: {}", e);
+                                    continue;
+                                }
+                            };
+                            
+                            let display_prefix = state_borrow.cwd.clone();
+                            match print_entries(
+                                &display_prefix,
+                                &mut stream,
+                                false,
+                                true, // Only show keys for tag searches
+                                Some(&sig_rx),
+                            )? {
+                                PrintResult::Aborted => continue,
+                                PrintResult::Count(printed) => {
+                                    let mode_str = match tag_mode {
+                                        TagMode::And => "all",
+                                        TagMode::Or => "any",
+                                    };
+                                    if printed > 0 {
+                                        println!(
+                                            "\n{} {} found with {} of tags: {}",
+                                            printed,
+                                            if printed == 1 { "entry" } else { "entries" },
+                                            mode_str,
+                                            tags.join(", ")
+                                        );
+                                    } else {
+                                        println!(
+                                            "No entries found with {} of tags: {}",
+                                            mode_str,
+                                            tags.join(", ")
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                     "find" => {
                         // Search for keys matching a regex under the current working directory
                         let pattern = match parts.next() {
                             Some(p) => p,
-                            None => { println!("Usage: find <regex>"); continue; }
+                            None => {
+                                println!("Usage: find <regex>");
+                                continue;
+                            }
                         };
                         {
                             let state_ref = state.borrow();
@@ -347,16 +480,31 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
                             };
                             let mut stream = match state_ref.db.grep(prefix_opt, pattern) {
                                 Ok(s) => s,
-                                Err(e) => { println!("Error running find: {}", e); continue; }
+                                Err(e) => {
+                                    println!("Error running find: {}", e);
+                                    continue;
+                                }
                             };
-                            match print_entries(cwd_owned.as_str(), &mut stream, false, true, Some(&sig_rx))? {
+                            match print_entries(
+                                cwd_owned.as_str(),
+                                &mut stream,
+                                false,
+                                true,
+                                Some(&sig_rx),
+                            )? {
                                 PrintResult::Aborted => continue,
                                 PrintResult::Count(printed) => {
                                     if printed > 0 {
-                                        println!("\n{} {} found", printed,
-                                            if printed == 1 { "entry" } else { "entries" });
+                                        println!(
+                                            "\n{} {} found",
+                                            printed,
+                                            if printed == 1 { "entry" } else { "entries" }
+                                        );
                                     } else {
-                                        println!("No entries matching '{}' in '{}'", pattern, display_cwd);
+                                        println!(
+                                            "No entries matching '{}' in '{}'",
+                                            pattern, display_cwd
+                                        );
                                     }
                                 }
                             }
@@ -366,14 +514,20 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
                         // Reverse lookup by raw pointer ID
                         let id_str = match parts.next() {
                             Some(i) => i,
-                            None => { println!("Usage: val <numeric_id>"); continue; }
+                            None => {
+                                println!("Usage: val <numeric_id>");
+                                continue;
+                            }
                         };
                         match id_str.parse::<u64>() {
                             Ok(id) => match state.borrow().db.get_key(id)? {
                                 Some(Entry::Key(key, ptr, val_opt)) => {
                                     if let Some(val) = val_opt {
                                         let val_str = serde_json::to_string(&val)?;
-                                        println!("📄 {} \x1b[90m#{}\x1b[0m \x1b[2m{}\x1b[0m", key, ptr, val_str);
+                                        println!(
+                                            "📄 {} \x1b[90m#{}\x1b[0m \x1b[2m{}\x1b[0m",
+                                            key, ptr, val_str
+                                        );
                                     } else {
                                         println!("📄 {} \x1b[90m#{}\x1b[0m", key, ptr);
                                     }
@@ -392,7 +546,6 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
                         // If no argument, go to root
                         if arg.is_empty() {
                             state_mut.cwd.clear();
-
                         } else if arg == ".." {
                             // Move up one directory
                             if let Some(end) = state_mut.cwd.rfind(|c| c != delim_char) {
@@ -404,7 +557,6 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
                             } else {
                                 state_mut.cwd.clear();
                             }
-
                         } else {
                             // Append segment: if cwd is empty or arg begins with the delimiter, just push it
                             if state_mut.cwd.is_empty() {
@@ -426,7 +578,10 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
             }
             Err(ReadlineError::Interrupted) => {
                 // Handle double Ctrl-C at prompt: exit if within 2s
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64;
                 let prev = last_sig.swap(now, Ordering::SeqCst);
                 if now.saturating_sub(prev) < 2000 {
                     break;

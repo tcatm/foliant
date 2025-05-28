@@ -9,13 +9,16 @@ use std::convert::TryInto;
 use std::fs;
 use std::fs::File;
 use std::io;
-use std::io::{BufWriter};
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use crate::database::Database;
 use crate::error::{IndexError, Result};
 use crate::lookup_table_store::LookupTableStoreBuilder;
 use crate::payload_store::PayloadStoreBuilder;
+use roaring::RoaringBitmap;
+use std::collections::BTreeMap;
+use std::io::Write;
 
 const CHUNK_SIZE: usize = 128 * 1024;
 const INSERT_BATCH_SIZE: usize = 10_000;
@@ -30,6 +33,7 @@ where
     payload_store: PayloadStoreBuilder<V>,
     lookup_store: LookupTableStoreBuilder,
     buffer: Vec<(Vec<u8>, u32)>,
+    tag_entries: Vec<(Vec<u8>, Vec<String>)>,
     partials: Vec<PartialBuilder>,
 }
 
@@ -122,6 +126,7 @@ impl<V: Serialize> DatabaseBuilder<V> {
             payload_store,
             lookup_store,
             buffer: Vec::with_capacity(INSERT_BATCH_SIZE),
+            tag_entries: Vec::new(),
             partials: Vec::new(),
         })
     }
@@ -134,6 +139,26 @@ impl<V: Serialize> DatabaseBuilder<V> {
             .append(value)
             .expect("payload append failed");
         self.buffer.push((key.as_bytes().to_vec(), payload_ptr));
+        if self.buffer.len() >= INSERT_BATCH_SIZE {
+            self.flush_buffer().expect("failed to flush batch");
+        }
+    }
+
+    /// Insert a key with optional value `V` and associated tags into the database.
+    /// Tags will be indexed into the tag bitmap index.
+    pub fn insert_ext<T>(&mut self, key: &str, value: Option<V>, tags: T)
+    where
+        T: IntoIterator,
+        T::Item: Into<String>,
+    {
+        let payload_ptr = self
+            .payload_store
+            .append(value)
+            .expect("payload append failed");
+        let key_bytes = key.as_bytes().to_vec();
+        let tags_vec = tags.into_iter().map(Into::into).collect::<Vec<_>>();
+        self.tag_entries.push((key_bytes.clone(), tags_vec.clone()));
+        self.buffer.push((key_bytes, payload_ptr));
         if self.buffer.len() >= INSERT_BATCH_SIZE {
             self.flush_buffer().expect("failed to flush batch");
         }
@@ -171,117 +196,170 @@ impl<V: Serialize> DatabaseBuilder<V> {
         self.flush_buffer()
     }
 
-    /// Finalize and write index and payload files to disk.
+    /// Drain and finalize all partial index builders, returning their file paths.
+    fn drain_and_finish_partials(&mut self) -> Result<Vec<PathBuf>> {
+        let paths = self
+            .partials
+            .drain(..)
+            .map(PartialBuilder::finish)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(paths)
+    }
+
+    /// Finish the index by either using a single partial or merging multiple partial indices.
+    fn finish_index(&mut self, partial_paths: Vec<PathBuf>) -> Result<()> {
+        if partial_paths.len() <= 1 {
+            self.finish_small_index(partial_paths)
+        } else {
+            self.finish_and_merge_partials(partial_paths)
+        }
+    }
+
+    /// Finalize and write index, tag, and payload files to disk.
     pub fn close(mut self) -> Result<()> {
         self.flush_fst()?;
-        // Finalize partial segments to disk and merge if needed
-        let partial_paths: Vec<PathBuf> = self
-            .partials
-            .into_iter()
-            .map(|pb| pb.finish())
-            .collect::<Result<Vec<_>>>()?;
+        let partial_paths = self.drain_and_finish_partials()?;
+        self.finish_index(partial_paths)?;
+        if !self.tag_entries.is_empty() {
+            self.write_tags()?;
+        }
         self.payload_store.close()?;
-        match partial_paths.len() {
-            0 => {
-                // No entries: write an empty .idx
-                let idx_path = self.base.with_extension("idx");
-                let fst_file = File::create(&idx_path).map_err(IndexError::from)?;
-                let fst_writer = BufWriter::with_capacity(CHUNK_SIZE, fst_file);
-                let builder = MapBuilder::new(fst_writer).map_err(IndexError::from)?;
-                builder.finish().map_err(IndexError::from)?;
-                // Close lookup table
-                self.lookup_store.close()?;
-            }
-            1 => {
-                // Single segment: rename to <base>.idx
-                let src = &partial_paths[0];
-                let dst = self.base.with_extension("idx");
-                fs::rename(src, &dst).map_err(IndexError::from)?;
-                // Close lookup table
-                self.lookup_store.close()?;
-            }
-            _ => {
-                // Merge multiple segments into final index, reassign lookup IDs for final keys.
-                // Flush and close existing lookup table to ensure old entries are on disk.
-                self.lookup_store.close().map_err(IndexError::from)?;
+        Ok(())
+    }
 
-                // Read existing lookup entries.
-                let lut_path = self.base.with_extension("lookup");
-                let lut_file = File::open(&lut_path).map_err(IndexError::from)?;
-                let lut_mmap = unsafe { Mmap::map(&lut_file) }.map_err(IndexError::from)?;
-                let mut old_lut = Vec::with_capacity(lut_mmap.len() / 4);
-                for chunk in lut_mmap.chunks_exact(4) {
-                    old_lut.push(u32::from_le_bytes(chunk.try_into().unwrap()));
-                }
+    fn finish_small_index(&mut self, partial_paths: Vec<PathBuf>) -> Result<()> {
+        if partial_paths.is_empty() {
+            let idx_path = self.base.with_extension("idx");
+            let fst_file = File::create(&idx_path)?;
+            let fst_writer = BufWriter::with_capacity(CHUNK_SIZE, fst_file);
+            let fst_builder = MapBuilder::new(fst_writer)?;
+            fst_builder.finish()?;
+        } else {
+            let src = &partial_paths[0];
+            let dst = self.base.with_extension("idx");
+            fs::rename(src, &dst)?;
+        }
+        self.lookup_store.close()?;
+        Ok(())
+    }
 
-                // Re-open lookup table for writing new entries, truncating the old file.
-                self.lookup_store =
-                    LookupTableStoreBuilder::open(&lut_path).map_err(IndexError::from)?;
+    fn finish_and_merge_partials(&mut self, partial_paths: Vec<PathBuf>) -> Result<()> {
+        self.lookup_store.close()?;
 
-                let final_idx = self.base.with_extension("idx");
-                let final_file = File::create(&final_idx).map_err(IndexError::from)?;
-                let final_writer = BufWriter::with_capacity(CHUNK_SIZE, final_file);
-                let mut final_builder = MapBuilder::new(final_writer).map_err(IndexError::from)?;
+        let lut_path = self.base.with_extension("lookup");
+        let lut_file = File::open(&lut_path)?;
+        let lut_mmap = unsafe { Mmap::map(&lut_file)? };
+        let mut old_lut = Vec::with_capacity(lut_mmap.len() / 4);
+        for chunk in lut_mmap.chunks_exact(4) {
+            old_lut.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+        }
 
-                // Merge partial FST segments with k-way merge.
-                let mut maps = Vec::new();
-                for path in &partial_paths {
-                    let file = File::open(path).map_err(IndexError::from)?;
-                    let mmap = unsafe { Mmap::map(&file) }.map_err(IndexError::from)?;
-                    let map = Map::new(mmap).map_err(IndexError::from)?;
-                    maps.push(map);
-                }
-                let mut streams: Vec<_> = maps.iter().map(|m| m.stream()).collect();
-                let mut heads: Vec<Option<(Vec<u8>, u64)>> = streams
-                    .iter_mut()
-                    .map(|s| s.next().map(|(k, v)| (k.to_vec(), v)))
-                    .collect();
+        self.lookup_store = LookupTableStoreBuilder::open(&lut_path)?;
 
-                // Remove partial files.
-                for path in &partial_paths {
-                    fs::remove_file(path).map_err(IndexError::from)?;
-                }
+        let final_idx = self.base.with_extension("idx");
+        let final_file = File::create(&final_idx)?;
+        let final_writer = BufWriter::with_capacity(CHUNK_SIZE, final_file);
+        let mut final_builder = MapBuilder::new(final_writer)?;
 
-                // Rebuild lookup table and FST together in sorted order.
-                while heads.iter().any(Option::is_some) {
-                    // Find index of smallest key.
-                    let mut min_idx: Option<usize> = None;
-                    let mut min_key: Option<&Vec<u8>> = None;
-                    for (i, head) in heads.iter().enumerate() {
-                        if let Some((ref key, _)) = head {
-                            if min_idx.is_none() || key < min_key.unwrap() {
-                                min_idx = Some(i);
-                                min_key = Some(key);
-                            }
-                        }
-                    }
-                    let i = min_idx.unwrap();
-                    let (key_vec, val) = heads[i].take().unwrap();
-                    let payload_ptr = old_lut[val as usize - 1];
-                    let new_lut_id = self
-                        .lookup_store
-                        .append(payload_ptr)
-                        .map_err(IndexError::from)?;
-                    final_builder
-                        .insert(&key_vec, new_lut_id.into())
-                        .expect("FST insert failed during merge");
-                    heads[i] = streams[i].next().map(|(k, v)| (k.to_vec(), v));
-                    // Skip duplicates.
-                    for (j, head) in heads.iter_mut().enumerate() {
-                        if j != i {
-                            if let Some((ref other_key, _)) = head {
-                                if other_key == &key_vec {
-                                    *head = streams[j].next().map(|(k, v)| (k.to_vec(), v));
-                                }
-                            }
+        let mut maps = Vec::new();
+        for path in &partial_paths {
+            let file = File::open(path)?;
+            let mmap = unsafe { Mmap::map(&file)? };
+            let map = Map::new(mmap)?;
+            maps.push(map);
+        }
+        let mut streams: Vec<_> = maps.iter().map(|m| m.stream()).collect();
+        let mut heads: Vec<Option<(Vec<u8>, u64)>> = streams
+            .iter_mut()
+            .map(|s| s.next().map(|(k, v)| (k.to_vec(), v)))
+            .collect();
+
+        for path in &partial_paths {
+            fs::remove_file(path)?;
+        }
+
+        while heads.iter().any(Option::is_some) {
+            let (i, _) = heads
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, head)| head.as_ref().map(|(key, _)| (idx, key)))
+                .min_by(|a, b| a.1.cmp(b.1))
+                .unwrap();
+            let (key_vec, val) = heads[i].take().unwrap();
+            let payload_ptr = old_lut[val as usize - 1];
+            let new_lut_id = self.lookup_store.append(payload_ptr)?;
+            final_builder
+                .insert(&key_vec, new_lut_id.into())
+                .expect("FST insert failed during merge");
+            heads[i] = streams[i].next().map(|(k, v)| (k.to_vec(), v));
+            for (j, head) in heads.iter_mut().enumerate() {
+                if j != i {
+                    if let Some((ref other_key, _)) = head {
+                        if other_key == &key_vec {
+                            *head = streams[j].next().map(|(k, v)| (k.to_vec(), v));
                         }
                     }
                 }
-                final_builder.finish().map_err(IndexError::from)?;
-
-                // Close the rebuilt lookup table.
-                self.lookup_store.close().map_err(IndexError::from)?;
             }
+        }
+        final_builder.finish()?;
+
+        self.lookup_store.close()?;
+        Ok(())
+    }
+
+    /// Write an optional tag index file (`<base>.tags`) using inserted tags.
+    fn write_tags(&self) -> Result<()> {
+        let idx_path = self.base.with_extension("idx");
+        let idx_file = File::open(&idx_path)?;
+        let idx_mmap = unsafe { Mmap::map(&idx_file)? };
+        let idx_map = Map::new(idx_mmap)?;
+
+        let mut tag_bitmaps: BTreeMap<String, RoaringBitmap> = BTreeMap::new();
+        for (key_bytes, tags) in &self.tag_entries {
+            let key_str = std::str::from_utf8(key_bytes)
+                .map_err(|e| IndexError::Io(io::Error::new(io::ErrorKind::InvalidData, e)))?;
+            if let Some(weight) = idx_map.get(key_str) {
+                let ptr = weight as u32;
+                for tag in tags {
+                    tag_bitmaps
+                        .entry(tag.clone())
+                        .or_insert_with(RoaringBitmap::new)
+                        .insert(ptr);
+                }
+            }
+        }
+        if tag_bitmaps.is_empty() {
+            return Ok(());
+        }
+
+        let mut blobs = Vec::new();
+        for bitmap in tag_bitmaps.values() {
+            let mut buf = Vec::new();
+            bitmap.serialize_into(&mut buf).map_err(IndexError::Io)?;
+            blobs.push(buf);
+        }
+
+        let mut fst_section = Vec::new();
+        let mut fst_builder = MapBuilder::new(&mut fst_section)?;
+        let mut offset = 0u64;
+        for ((tag, _), blob_data) in tag_bitmaps.iter().zip(blobs.iter()) {
+            let len = blob_data.len() as u64;
+            let packed = (offset << 32) | len;
+            fst_builder.insert(tag, packed)?;
+            offset += len;
+        }
+        fst_builder.finish()?;
+
+        let tags_path = self.base.with_extension("tags");
+        let tags_file = File::create(&tags_path)?;
+        let mut writer = BufWriter::with_capacity(CHUNK_SIZE, tags_file);
+        writer.write_all(b"FTGT")?;
+        writer.write_all(&1u16.to_le_bytes())?;
+        writer.write_all(&(fst_section.len() as u64).to_le_bytes())?;
+        writer.write_all(&fst_section)?;
+        for blob in blobs {
+            writer.write_all(&blob)?;
         }
         Ok(())
     }

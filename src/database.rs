@@ -15,6 +15,7 @@ use crate::error::{IndexError, Result};
 use crate::multi_list::MultiShardListStreamer;
 use crate::shard::Shard;
 use crate::streamer::{PrefixStream, Streamer};
+use roaring::{RoaringBitmap, bitmap::IntoIter};
 
 /// Read-only database: union of one or more shards (FST maps + payload stores)
 pub struct Database<V = serde_cbor::Value>
@@ -22,6 +23,15 @@ where
     V: DeserializeOwned,
 {
     shards: Vec<Shard<V>>,
+}
+
+/// Mode for combining multiple tags in `list_by_tags`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum TagMode {
+    /// Entries must match ALL specified tags (intersection).
+    And,
+    /// Entries may match ANY of the specified tags (union).
+    Or,
 }
 
 impl<V> Database<V>
@@ -167,5 +177,113 @@ where
             }
         }
         Ok(None)
+    }
+
+    /// List entries filtered by tags, optionally intersected with a key prefix.
+    pub fn list_by_tags<'a>(
+        &'a self,
+        tags: &[&str],
+        mode: TagMode,
+        prefix: Option<&'a str>,
+    ) -> Result<Box<dyn Streamer<Item = Entry<V>> + 'a>> {
+        let mut streams: Vec<Box<dyn Streamer<Item = Entry<V>> + 'a>> = Vec::new();
+        for shard in &self.shards {
+            if let Some(idx) = &shard.tags {
+                let mut combined: Option<RoaringBitmap> = None;
+                for &tag in tags {
+                    let mut bm = RoaringBitmap::new();
+                    if let Some(sub) = idx.get(tag)? {
+                        bm |= sub;
+                    }
+                    combined = Some(match combined {
+                        Some(mut acc) if mode == TagMode::And => {
+                            acc &= &bm;
+                            acc
+                        }
+                        Some(mut acc) => {
+                            acc |= &bm;
+                            acc
+                        }
+                        None => bm,
+                    });
+                }
+                let filter_bm = combined.unwrap_or_else(RoaringBitmap::new);
+                
+                struct ShardPtrStreamer<'a, V>
+                where
+                    V: DeserializeOwned,
+                {
+                    shard: &'a crate::shard::Shard<V>,
+                    ptr_iter: IntoIter,
+                    prefix: Option<&'a str>,
+                }
+                impl<'a, V> Streamer for ShardPtrStreamer<'a, V>
+                where
+                    V: DeserializeOwned,
+                {
+                    type Item = Entry<V>;
+                    fn next(&mut self) -> Option<Self::Item> {
+                        use fst::raw::Fst as RawFst;
+                        while let Some(ptr) = self.ptr_iter.next() {
+                            if let Ok(Some(entry)) = (|| -> Result<Option<Entry<V>>> {
+                                let raw_fst = RawFst::new(self.shard.idx_mmap.clone()).map_err(
+                                    crate::error::IndexError::from,
+                                )?;
+                                if let Some(key_bytes) = raw_fst.get_key(ptr as u64) {
+                                    let key = String::from_utf8(key_bytes.to_vec()).map_err(|e| {
+                                        crate::error::IndexError::Io(std::io::Error::new(
+                                            std::io::ErrorKind::InvalidData,
+                                            format!("invalid utf8 in key: {}", e),
+                                        ))
+                                    })?;
+                                    let lut_entry = self.shard.lookup.get(ptr as u32)?;
+                                    let value = self.shard.payload.get(lut_entry.payload_ptr)?;
+                                    return Ok(Some(Entry::Key(key, ptr as u64, value)));
+                                }
+                                Ok(None)
+                            })() {
+                                if let Some(pref) = self.prefix {
+                                    if let Entry::Key(ref k, _, _) = entry {
+                                        if !k.starts_with(pref) {
+                                            continue;
+                                        }
+                                    }
+                                }
+                                return Some(entry);
+                            }
+                        }
+                        None
+                    }
+                }
+                streams.push(Box::new(ShardPtrStreamer {
+                    shard,
+                    ptr_iter: filter_bm.into_iter(),
+                    prefix,
+                }));
+            }
+        }
+        struct ChainStreamer<'a, V>
+        where
+            V: DeserializeOwned,
+        {
+            streams: Vec<Box<dyn Streamer<Item = Entry<V>> + 'a>>,
+            idx: usize,
+        }
+        impl<'a, V> Streamer for ChainStreamer<'a, V>
+        where
+            V: DeserializeOwned,
+        {
+            type Item = Entry<V>;
+            fn next(&mut self) -> Option<Self::Item> {
+                while self.idx < self.streams.len() {
+                    if let Some(item) = self.streams[self.idx].next() {
+                        return Some(item);
+                    }
+                    self.idx += 1;
+                }
+                None
+            }
+        }
+        Ok(Box::new(ChainStreamer { streams, idx: 0 }))
     }
 }

@@ -3,4 +3,5 @@
 *.txt
 *.lookup
 *.payload
+*.tags
 /data

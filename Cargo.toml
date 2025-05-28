@@ -17,6 +17,7 @@ tempfile = "3"
 libc = "0.2"
 rustyline = "10"
 ctrlc = "3"
+roaring = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

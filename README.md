@@ -102,12 +102,15 @@ Sample lines in `sample.jsonl`:
 - Listings can be grouped by the first occurrence of a custom delimiter
 
 ## On-Disk Format
-foliant produces three files per database:
+foliant produces up to four files per database (the tag index is optional):
 
 - `<base>.idx`: an FST map file (using the `fst` crate) containing keys mapped to `u64` lookup identifiers. Each lookup ID is `index + 1` into the `.lookup` file.
 - `<base>.lookup`: a flat file storing fixed-size lookup table entries (`LookupEntry`), each mapping to a payload pointer. Each entry is a 4-byte little-endian `u32` payload pointer (`offset+1` into the `.payload` file).
-- `<base>.payload`: a flat file storing CBOR-encoded payloads. Each payload record then consists of:
-  1. A 2-byte little-endian length (`u16`)
-  2. The CBOR-encoded value bytes
+- `<base>.payload`: a flat file storing CBOR‑encoded payloads. Each payload record then consists of:
+
+1. A 2-byte little-endian length (`u16`)
+2. The CBOR‑encoded value bytes
+
+- `<base>.tags`: (variant C) a monolithic tag index file embedding an FST mapping each tag string to a packed `(offset_in_blob<<32)|length` weight, followed by concatenated Roaring bitmap blobs.
 
 The `.idx` file begins with the magic header and structure defined by the `fst` crate. This format enables fast, memory-mapped prefix queries and efficient payload retrieval with minimal allocations.

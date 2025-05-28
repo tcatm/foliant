@@ -1,5 +1,5 @@
-use std::io;
 use std::fmt;
+use std::io;
 
 #[derive(Debug)]
 pub enum IndexError {
@@ -35,7 +35,10 @@ impl From<io::Error> for IndexError {
 
 impl From<fst::Error> for IndexError {
     fn from(err: fst::Error) -> IndexError {
-        IndexError::Io(io::Error::new(io::ErrorKind::Other, format!("fst error: {}", err)))
+        IndexError::Io(io::Error::new(
+            io::ErrorKind::Other,
+            format!("fst error: {}", err),
+        ))
     }
 }
 

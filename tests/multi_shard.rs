@@ -1,7 +1,7 @@
-use foliant::{DatabaseBuilder, Database, Entry, Streamer};
-use tempfile::tempdir;
-use std::error::Error;
+use foliant::{Database, DatabaseBuilder, Entry, Streamer};
 use serde_cbor::Value;
+use std::error::Error;
+use tempfile::tempdir;
 
 #[test]
 fn multi_shard_listing_complex() -> Result<(), Box<dyn Error>> {
@@ -84,7 +84,10 @@ fn multi_shard_listing_complex_with_values() -> Result<(), Box<dyn Error>> {
         let mut b2 = DatabaseBuilder::<Value>::new(&base2)?;
         // Keys must be inserted in lex order
         b2.insert("alpha/b", Some(Value::Integer(20)));
-        b2.insert("delta", Some(Value::Array(vec![Value::Integer(3), Value::Integer(4)])));
+        b2.insert(
+            "delta",
+            Some(Value::Array(vec![Value::Integer(3), Value::Integer(4)])),
+        );
         b2.insert("gamma/z", Some(Value::Bool(true)));
         b2.close()?;
     }
@@ -99,7 +102,11 @@ fn multi_shard_listing_complex_with_values() -> Result<(), Box<dyn Error>> {
         Entry::Key("alpha/a".to_string(), 0, Some(Value::Integer(1))),
         Entry::Key("alpha/b".to_string(), 0, Some(Value::Integer(2))),
         Entry::Key("beta/x".to_string(), 0, Some(Value::Text("x".into()))),
-        Entry::Key("delta".to_string(), 0, Some(Value::Array(vec![Value::Integer(3), Value::Integer(4)]))),
+        Entry::Key(
+            "delta".to_string(),
+            0,
+            Some(Value::Array(vec![Value::Integer(3), Value::Integer(4)])),
+        ),
         Entry::Key("gamma/z".to_string(), 0, Some(Value::Bool(true))),
     ];
     expected.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -113,7 +120,11 @@ fn multi_shard_listing_complex_with_values() -> Result<(), Box<dyn Error>> {
         Entry::CommonPrefix("beta/".to_string()),
         Entry::CommonPrefix("gamma/".to_string()),
         // 'delta' has no slash, so appears as a key
-        Entry::Key("delta".to_string(), 0, Some(Value::Array(vec![Value::Integer(3), Value::Integer(4)]))),
+        Entry::Key(
+            "delta".to_string(),
+            0,
+            Some(Value::Array(vec![Value::Integer(3), Value::Integer(4)])),
+        ),
     ];
     exp_grp.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     assert_eq!(grp, exp_grp);

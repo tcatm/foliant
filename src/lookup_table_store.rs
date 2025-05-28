@@ -1,9 +1,9 @@
-use std::fs::File;
-use std::io::{self, Write, BufWriter};
-use std::path::Path;
-use std::sync::Arc;
 use memmap2::Mmap;
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
+use std::path::Path;
 use std::ptr;
+use std::sync::Arc;
 
 const CHUNK_SIZE: usize = 128 * 1024;
 
@@ -41,10 +41,9 @@ impl LookupTableStoreBuilder {
     }
 
     /// Flush buffered writes and sync to disk.
-    pub fn close(mut self) -> io::Result<()> {
+    pub fn close(&mut self) -> io::Result<()> {
         self.writer.flush()?;
-        let file = self.writer.into_inner()?;
-        file.sync_all()
+        self.writer.get_ref().sync_all()
     }
 }
 
@@ -58,7 +57,9 @@ impl LookupTableStore {
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let file = File::open(path)?;
         let mmap = unsafe { Mmap::map(&file)? };
-        Ok(LookupTableStore { buf: Arc::new(mmap) })
+        Ok(LookupTableStore {
+            buf: Arc::new(mmap),
+        })
     }
 
     /// Retrieve the `LookupEntry` for a given identifier.
@@ -69,7 +70,10 @@ impl LookupTableStore {
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "lookup index overflow"))?;
         let end = start + RECSZ;
         if end > self.buf.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated lookup table entry"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "truncated lookup table entry",
+            ));
         }
         let slice = &self.buf[start..end];
         let raw = unsafe { ptr::read_unaligned(slice.as_ptr() as *const LookupEntry) };
@@ -80,6 +84,8 @@ impl LookupTableStore {
 
 impl Clone for LookupTableStore {
     fn clone(&self) -> Self {
-        LookupTableStore { buf: self.buf.clone() }
+        LookupTableStore {
+            buf: self.buf.clone(),
+        }
     }
 }

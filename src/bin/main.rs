@@ -1,15 +1,16 @@
 use clap::{Parser, Subcommand};
+use foliant::IndexError;
+use foliant::Streamer;
+use foliant::TagMode;
+use foliant::{Database, DatabaseBuilder, Entry};
+use indicatif::ProgressBar;
+use indicatif::ProgressStyle;
+use serde::de::DeserializeOwned;
+use serde_json::{self, Value};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::PathBuf;
-use std::time::{Instant, Duration};
-use foliant::{Database, DatabaseBuilder, Entry};
-use foliant::Streamer;
-use foliant::IndexError;
-use serde::de::DeserializeOwned;
-use serde_json::{self, Value};
-use indicatif::ProgressBar;
-use indicatif::ProgressStyle;
+use std::time::{Duration, Instant};
 
 mod shell;
 use shell::run_shell;
@@ -42,7 +43,9 @@ fn get_rss_kb() -> Option<usize> {
 }
 
 #[cfg(not(unix))]
-fn get_rss_kb() -> Option<usize> { None }
+fn get_rss_kb() -> Option<usize> {
+    None
+}
 /// A simple CLI for building and querying a Trie index.
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -64,15 +67,24 @@ enum Commands {
         /// Interpret each line as JSON and extract this field as the key
         #[arg(short, long, value_name = "KEYNAME")]
         json: Option<String>,
+        /// Extract tags from this JSON field (array of strings)
+        #[arg(long, value_name = "TAGFIELD")]
+        tag_field: Option<String>,
         /// Prefix to prepend to all keys
         #[arg(short, long, value_name = "PREFIX")]
         prefix: Option<String>,
     },
-    /// List entries in an existing index
+    /// List entries in an existing index, with optional tag filtering
     List {
         /// Path to the serialized index
         #[arg(short, long, value_name = "FILE")]
         index: PathBuf,
+        /// Comma-separated tags to filter by
+        #[arg(long, value_name = "TAGS")]
+        tags: Option<String>,
+        /// Combine tags with AND or OR logic
+        #[arg(long, value_name = "TAG_MODE", default_value = "and")]
+        tag_mode: TagMode,
         /// Prefix to list (default is empty)
         #[arg(value_name = "PREFIX", default_value = "")]
         prefix: String,
@@ -96,17 +108,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Helper to open either a single database or a directory of shards, with optional delimiter
     fn load_db<V>(path: &std::path::PathBuf) -> Result<Database<V>, IndexError>
-    where V: DeserializeOwned + 'static { 
+    where
+        V: DeserializeOwned + 'static,
+    {
         let db = Database::<V>::open(path)?;
         Ok(db)
     }
-    
+
     match cli.command {
-        Commands::Index { index, input, json, prefix } => {
+        Commands::Index {
+            index,
+            input,
+            json,
+            tag_field,
+            prefix,
+        } => {
             // Build the database on-disk via builder, measuring throughput
             let mut builder = DatabaseBuilder::<Value>::new(&index)?;
             // Setup progress bar using indicatif
-            let total_bytes = input.as_ref().and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len());
+            let total_bytes = input
+                .as_ref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .map(|m| m.len());
             let pb = if let Some(total) = total_bytes {
                 let pb = ProgressBar::new(total);
                 pb.set_style(
@@ -146,21 +169,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let res = (|| -> Result<(), String> {
                         let mut jv: serde_json::Value = serde_json::from_str(&line)
                             .map_err(|e| format!("JSON parse error: {}", e))?;
-                        let obj = jv.as_object_mut()
+                        let obj = jv
+                            .as_object_mut()
                             .ok_or_else(|| "expected JSON object per line".to_string())?;
-                        let key_val = obj.remove(keyname)
+                        let key_val = obj
+                            .remove(keyname)
                             .ok_or_else(|| format!("missing key field '{}'", keyname))?;
-                        let key_str = key_val.as_str()
+                        let key_str = key_val
+                            .as_str()
                             .ok_or_else(|| format!("key field '{}' is not a string", keyname))?;
                         // Prepend CLI prefix if provided
                         let mut full_key = String::with_capacity(
-                            prefix.as_ref().map_or(0, |p| p.len()) + key_str.len()
+                            prefix.as_ref().map_or(0, |p| p.len()) + key_str.len(),
                         );
                         if let Some(pref) = prefix.as_ref() {
                             full_key.push_str(pref);
                         }
                         full_key.push_str(key_str);
-                        builder.insert(&full_key, Some(jv));
+                        // Extract tags if requested
+                        let tag_vals = tag_field
+                            .as_ref()
+                            .and_then(|tf| {
+                                obj.get(tf).and_then(|v| v.as_array()).map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|e| e.as_str().map(ToString::to_string))
+                                        .collect::<Vec<_>>()
+                                })
+                            })
+                            .unwrap_or_default();
+                        builder.insert_ext(&full_key, Some(jv), tag_vals);
                         Ok(())
                     })();
                     if let Err(err) = res {
@@ -169,21 +206,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 } else {
                     // Prepend CLI prefix if provided
-                    let mut full_key = String::with_capacity(
-                        prefix.as_ref().map_or(0, |p| p.len()) + line.len()
-                    );
+                    let mut full_key =
+                        String::with_capacity(prefix.as_ref().map_or(0, |p| p.len()) + line.len());
                     if let Some(pref) = prefix.as_ref() {
                         full_key.push_str(pref);
                     }
                     full_key.push_str(&line);
-                    builder.insert(&full_key, None);
+                    builder.insert_ext(&full_key, None, std::iter::empty::<String>());
                 }
 
                 // periodic throttled progress update
                 let now = Instant::now();
                 if now.duration_since(last_report) >= report_interval {
                     let elapsed = now.duration_since(start).as_secs_f64();
-                    let eps = if elapsed > 0.0 { (entries as f64 / elapsed).round() } else { 0.0 };
+                    let eps = if elapsed > 0.0 {
+                        (entries as f64 / elapsed).round()
+                    } else {
+                        0.0
+                    };
                     pb.set_position(bytes_in as u64);
                     let mem_kb = get_rss_kb().unwrap_or(0);
                     let mem_str = if mem_kb >= 1_048_576 {
@@ -193,7 +233,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         format!("{} KB", mem_kb)
                     };
-                    pb.set_message(format!("{} entries, {:.0}/s, mem {}", entries, eps, mem_str));
+                    pb.set_message(format!(
+                        "{} entries, {:.0}/s, mem {}",
+                        entries, eps, mem_str
+                    ));
                     last_report = now;
                 }
             }
@@ -237,14 +280,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("Memory usage: {} KB", mem_after);
             }
         }
-        Commands::List { index, prefix, delimiter } => {
+        Commands::List {
+            index,
+            tags,
+            tag_mode,
+            prefix,
+            delimiter,
+        } => {
             // Open read-only database or sharded directory via mmap
             let load_start = Instant::now();
             let db_handle: Database<Value> = load_db(&index)?;
             let load_duration = load_start.elapsed();
-            // Stream and print entries with realtime progress
+            // Choose tag-filtered or plain listing
             let stream_start = Instant::now();
-            let mut stream = db_handle.list(&prefix, delimiter)?;
+            let mut stream = if let Some(tag_strs) = tags.as_deref() {
+                let tag_list: Vec<&str> = tag_strs.split(',').collect();
+                db_handle.list_by_tags(&tag_list, tag_mode, Some(&prefix))?
+            } else {
+                db_handle.list(&prefix, delimiter)?
+            };
             let stream_duration = stream_start.elapsed();
             let mut printed = 0usize;
             let list_start = Instant::now();
@@ -264,7 +318,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 printed += 1;
             }
-            
+
             let list_duration = list_start.elapsed();
             // Output combined metrics
             let total_duration = load_start.elapsed();

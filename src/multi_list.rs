@@ -1,6 +1,6 @@
-use crate::{Shard, Entry, Streamer};
-use fst::raw::{Fst, Node, Output};
 use crate::shard::SharedMmap;
+use crate::{Entry, Shard, Streamer};
+use fst::raw::{Fst, Node, Output};
 use smallvec::SmallVec;
 /// Maximum expected key length for reserve hints
 const MAX_KEY_LEN: usize = 256;
@@ -54,7 +54,8 @@ impl<'a> FrameMulti<'a> {
 
 /// Multi-shard DFS streamer that groups at a delimiter, yielding keys and common prefixes
 pub struct MultiShardListStreamer<'a, V>
-where V: DeserializeOwned,
+where
+    V: DeserializeOwned,
 {
     /// Raw FSTs for each matching shard
     fsts: Vec<&'a Fst<SharedMmap>>,
@@ -81,11 +82,7 @@ where
     fn walk_prefix(
         shards: &'a [Shard<V>],
         prefix: &[u8],
-    ) -> (
-        Vec<&'a Fst<SharedMmap>>,
-        Vec<&'a Shard<V>>,
-        FrameMulti<'a>,
-    ) {
+    ) -> (Vec<&'a Fst<SharedMmap>>, Vec<&'a Shard<V>>, FrameMulti<'a>) {
         // Filter shards by prefix and build per-shard state, pre-allocating for efficiency
         let mut fsts: Vec<&'a Fst<SharedMmap>> = Vec::with_capacity(shards.len());
         let mut shards_f: Vec<&'a Shard<V>> = Vec::with_capacity(shards.len());
@@ -111,7 +108,11 @@ where
                 let idx = fsts.len();
                 fsts.push(raw_fst);
                 shards_f.push(shard);
-                states.push(FrameState { shard_idx: idx, node, output: out });
+                states.push(FrameState {
+                    shard_idx: idx,
+                    node,
+                    output: out,
+                });
             }
         }
 
@@ -125,11 +126,7 @@ where
     }
 
     /// Create a new multi-shard listing streamer for prefix bytes and optional delimiter
-    pub(crate) fn new(
-        shards: &'a [Shard<V>],
-        prefix: Vec<u8>,
-        delim: Option<u8>,
-    ) -> Self {
+    pub(crate) fn new(shards: &'a [Shard<V>], prefix: Vec<u8>, delim: Option<u8>) -> Self {
         let (fsts, shards_f, initial_frame) = Self::walk_prefix(shards, &prefix);
 
         let mut streamer = MultiShardListStreamer {
@@ -152,7 +149,8 @@ where
 }
 
 impl<'a, V> Streamer for MultiShardListStreamer<'a, V>
-where V: DeserializeOwned,
+where
+    V: DeserializeOwned,
 {
     type Item = Entry<V>;
     fn next(&mut self) -> Option<Self::Item> {
@@ -169,13 +167,8 @@ where V: DeserializeOwned,
                         .ok()
                         .map(|e| e.payload_ptr)
                         .unwrap_or(0);
-                    let val = self.shards[shard_i]
-                        .payload
-                        .get(payload_ptr)
-                        .ok()
-                        .flatten();
-                    let key = String::from_utf8(self.prefix.clone())
-                        .expect("invalid utf8 in key");
+                    let val = self.shards[shard_i].payload.get(payload_ptr).ok().flatten();
+                    let key = String::from_utf8(self.prefix.clone()).expect("invalid utf8 in key");
                     return Some(Entry::Key(key, lut_id, val));
                 }
             }
@@ -203,20 +196,26 @@ where V: DeserializeOwned,
                 frame.trans_idx += 1;
                 // a) Delimiter grouping: yield common prefix
                 if Some(*b) == self.delim {
-                    let mut s = String::from_utf8(self.prefix.clone())
-                        .expect("invalid utf8 in prefix");
+                    let mut s =
+                        String::from_utf8(self.prefix.clone()).expect("invalid utf8 in prefix");
                     s.push(*b as char);
                     return Some(Entry::CommonPrefix(s));
                 }
                 // b) Descend into child nodes across all shards for byte b
                 self.prefix.push(*b);
                 // Recycle or allocate a new frame, then repopulate its states in-place
-                let mut new_frame = self.frame_pool.pop()
+                let mut new_frame = self
+                    .frame_pool
+                    .pop()
                     .unwrap_or_else(|| FrameMulti::with_capacity(self.shards.len()));
                 new_frame.reset(self.prefix.len());
                 for (shard_i, addr, out) in refs.iter() {
                     let node = self.fsts[*shard_i].node(*addr);
-                    new_frame.states.push(FrameState { shard_idx: *shard_i, node, output: *out });
+                    new_frame.states.push(FrameState {
+                        shard_idx: *shard_i,
+                        node,
+                        output: *out,
+                    });
                 }
                 self.stack.push(new_frame);
                 continue;
