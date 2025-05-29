@@ -101,6 +101,20 @@ where
     Ok(PrintResult::Count(printed))
 }
 
+/// Prints a summary for a completed entry listing: if any entries were printed,
+/// emits a trailing line with the total count.
+fn handle_print_result(res: Result<PrintResult, Box<dyn std::error::Error>>) {
+    if let Ok(PrintResult::Count(printed)) = res {
+        if printed > 0 {
+            println!(
+                "\n{} {} listed",
+                printed,
+                if printed == 1 { "entry" } else { "entries" }
+            );
+        }
+    }
+}
+
 struct ShellState<V: DeserializeOwned> {
     db: Database<V>,
     delim: char,
@@ -327,17 +341,13 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                     return Ok(false);
                 }
             };
-            match print_entries(&list_prefix, &mut stream, only_prefix, only_keys, abort_rx) {
-                Ok(PrintResult::Aborted) | Err(_) => {}
-                Ok(PrintResult::Count(printed)) if printed > 0 => {
-                    println!(
-                        "\n{} {} listed",
-                        printed,
-                        if printed == 1 { "entry" } else { "entries" }
-                    );
-                }
-                _ => {}
-            }
+            handle_print_result(print_entries(
+                &list_prefix,
+                &mut stream,
+                only_prefix,
+                only_keys,
+                abort_rx,
+            ));
         }
         "tags" => {
             let mut tag_mode = TagMode::And;
@@ -383,10 +393,13 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                     return Ok(false);
                 }
             };
-            match print_entries(&state_ref.cwd, &mut stream, false, true, abort_rx) {
-                Ok(PrintResult::Aborted) | Err(_) => {}
-                _ => {}
-            }
+            handle_print_result(print_entries(
+                &state_ref.cwd,
+                &mut stream,
+                false,
+                true,
+                abort_rx,
+            ));
         }
         "find" => {
             let pattern = match parts.next() {
@@ -410,10 +423,13 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                     return Ok(false);
                 }
             };
-            match print_entries(cwd_owned.as_str(), &mut stream, false, true, abort_rx) {
-                Ok(PrintResult::Aborted) | Err(_) => {}
-                _ => {}
-            }
+            handle_print_result(print_entries(
+                cwd_owned.as_str(),
+                &mut stream,
+                false,
+                true,
+                abort_rx,
+            ));
         }
         "val" => {
             let id_str = match parts.next() {
