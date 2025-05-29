@@ -25,6 +25,27 @@ use std::sync::{
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Help text for interactive shell commands and Ctrl-C behavior.
+const HELP_TEXT: &str = "\
+Available commands:
+  ls [-rck] [-d DELIM] [prefix]   list entries
+    -r       recursive (no delimiter grouping)
+    -c       only directories (common prefixes)
+    -k       only keys
+    -d <c>   one-off custom delimiter character
+  cd [dir]                        change directory
+  find <regex>                    search entries matching regex
+  tags [-a|-o] <tag1> [tag2...]   list entries with tags (default: all)
+    -a       match all tags (AND, default)
+    -o       match any tag (OR)
+  val <id>                        lookup key by raw pointer ID
+  pwd                             print working directory
+  exit, quit                      exit shell
+  help                            show this help
+
+Ctrl-C once aborts a running ls; twice within 2s exits the shell
+";
+
 /// Result of printing a stream: either completed or aborted via Ctrl-C.
 enum PrintResult {
     Count(usize),
@@ -200,7 +221,215 @@ impl<V: DeserializeOwned> Hinter for ShellHelper<V> {
 }
 // Use default highlighter (no-op)
 impl<V: DeserializeOwned> Highlighter for ShellHelper<V> {}
+
 impl<V: DeserializeOwned> Validator for ShellHelper<V> {}
+
+/// Internal helper to process one shell command; returns true to exit shell
+fn handle_cmd<V: DeserializeOwned + Serialize>(
+    state: &Rc<RefCell<ShellState<V>>>,
+    help_text: &str,
+    abort_rx: Option<&Receiver<()>>,
+    raw: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let line = raw.trim();
+    if line.is_empty() {
+        return Ok(false);
+    }
+    let mut parts = line.split_whitespace();
+    let cmd = parts.next().unwrap();
+    match cmd {
+        "ls" => {
+            let mut recursive = false;
+            let mut only_prefix = false;
+            let mut only_keys = false;
+            let mut custom_delim: Option<char> = None;
+            let mut prefix_str = String::new();
+            while let Some(tok) = parts.next() {
+                if tok == "-d" {
+                    if let Some(dtok) = parts.next() {
+                        if dtok.chars().count() == 1 {
+                            custom_delim = dtok.chars().next();
+                        } else {
+                            println!("Invalid delimiter '{}'; must be single char", dtok);
+                        }
+                    } else {
+                        println!("Flag -d requires a delimiter argument");
+                    }
+                    continue;
+                } else if tok.starts_with("-d") {
+                    let ds: Vec<char> = tok.chars().collect();
+                    if ds.len() == 3 {
+                        custom_delim = Some(ds[2]);
+                    } else {
+                        println!("Invalid -d flag '{}'; use -d<DELIM>", tok);
+                    }
+                    continue;
+                } else if tok.starts_with('-') && tok.len() > 1 {
+                    for ch in tok.chars().skip(1) {
+                        match ch {
+                            'r' => recursive = true,
+                            'c' => only_prefix = true,
+                            'k' => only_keys = true,
+                            _ => println!("Unknown flag -{}", ch),
+                        }
+                    }
+                    continue;
+                } else {
+                    prefix_str = tok.to_string();
+                    break;
+                }
+            }
+            if only_prefix && only_keys {
+                println!("Cannot use -c and -k together");
+                return Ok(false);
+            }
+            let (list_prefix, list_delim) = {
+                let state_ref = state.borrow();
+                let mut p = state_ref.cwd.clone();
+                if !prefix_str.is_empty() {
+                    p.push_str(&prefix_str);
+                }
+                let d = if recursive {
+                    None
+                } else if let Some(cd) = custom_delim {
+                    Some(cd)
+                } else {
+                    Some(state_ref.delim)
+                };
+                (p, d)
+            };
+            let state_ref = state.borrow();
+            let mut stream = match state_ref.db.list(&list_prefix, list_delim) {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("Error listing {}: {}", list_prefix, e);
+                    return Ok(false);
+                }
+            };
+            match print_entries(&list_prefix, &mut stream, only_prefix, only_keys, abort_rx) {
+                Ok(PrintResult::Aborted) | Err(_) => {}
+                Ok(PrintResult::Count(printed)) if printed > 0 => {
+                    println!("\n{} {} listed", printed, if printed == 1 { "entry" } else { "entries" });
+                }
+                _ => {}
+            }
+        }
+        "tags" => {
+            let mut tag_mode = TagMode::And;
+            let mut tags = Vec::new();
+            for tok in parts {
+                if tok == "-a" {
+                    tag_mode = TagMode::And;
+                } else if tok == "-o" {
+                    tag_mode = TagMode::Or;
+                } else if tok.starts_with('-') {
+                    println!("Unknown flag: {}", tok);
+                    continue;
+                } else {
+                    tags.push(tok);
+                }
+            }
+            if tags.is_empty() {
+                println!("Usage: tags [-a|-o] <tag1> [tag2...]");
+                return Ok(false);
+            }
+            let tags_refs: Vec<&str> = tags.iter().map(|s| &**s).collect();
+            let cwd_owned = state.borrow().cwd.clone();
+            let prefix_opt = if cwd_owned.is_empty() { None } else { Some(cwd_owned.as_str()) };
+            let state_ref = state.borrow();
+            let mut stream = match state_ref.db.list_by_tags(&tags_refs, tag_mode, prefix_opt) {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("Error listing by tags: {}", e);
+                    return Ok(false);
+                }
+            };
+            match print_entries(&state_ref.cwd, &mut stream, false, true, abort_rx) {
+                Ok(PrintResult::Aborted) | Err(_) => {}
+                _ => {}
+            }
+        }
+        "find" => {
+            let pattern = match parts.next() {
+                Some(p) => p,
+                None => {
+                    println!("Usage: find <regex>");
+                    return Ok(false);
+                }
+            };
+            let state_ref = state.borrow();
+            let cwd_owned = state_ref.cwd.clone();
+            let prefix_opt = if cwd_owned.is_empty() { None } else { Some(cwd_owned.as_str()) };
+            let mut stream = match state_ref.db.grep(prefix_opt, pattern) {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("Error running find: {}", e);
+                    return Ok(false);
+                }
+            };
+            match print_entries(cwd_owned.as_str(), &mut stream, false, true, abort_rx) {
+                Ok(PrintResult::Aborted) | Err(_) => {}
+                _ => {}
+            }
+        }
+        "val" => {
+            let id_str = match parts.next() {
+                Some(i) => i,
+                None => {
+                    println!("Usage: val <numeric_id>");
+                    return Ok(false);
+                }
+            };
+            match id_str.parse::<u64>() {
+                Ok(id) => match state.borrow().db.get_key(id)? {
+                    Some(Entry::Key(key, ptr, val_opt)) => {
+                        if let Some(val) = val_opt {
+                            let val_str = serde_json::to_string(&val)?;
+                            println!("📄 {} \x1b[90m#{}\x1b[0m \x1b[2m{}\x1b[0m", key, ptr, val_str);
+                        } else {
+                            println!("📄 {} \x1b[90m#{}\x1b[0m", key, ptr);
+                        }
+                    }
+                    _ => println!("No key found for id {}", id),
+                },
+                Err(_) => println!("Usage: val <numeric_id>"),
+            }
+        }
+        "cd" => {
+            let arg = parts.next().unwrap_or("");
+            let mut state_mut = state.borrow_mut();
+            let delim_char = state_mut.delim;
+            if arg.is_empty() {
+                state_mut.cwd.clear();
+            } else if arg == ".." {
+                if let Some(end) = state_mut.cwd.rfind(|c| c != delim_char) {
+                    if let Some(idx) = state_mut.cwd[..=end].rfind(delim_char) {
+                        state_mut.cwd.truncate(idx + 1);
+                    } else {
+                        state_mut.cwd.clear();
+                    }
+                } else {
+                    state_mut.cwd.clear();
+                }
+            } else {
+                if state_mut.cwd.is_empty() {
+                    state_mut.cwd = arg.to_string();
+                } else {
+                    state_mut.cwd.push_str(arg);
+                }
+            }
+        }
+        "pwd" => {
+            println!("{}", state.borrow().cwd);
+        }
+        "help" => {
+            println!("{}", help_text);
+        }
+        "exit" | "quit" => return Ok(true),
+        _ => println!("Unknown command: {}", cmd),
+    }
+    Ok(false)
+}
 
 pub fn run_shell<V: DeserializeOwned + Serialize>(
     db: Database<V>,
@@ -241,27 +470,8 @@ pub fn run_shell<V: DeserializeOwned + Serialize>(
     };
     println!("Database contains {} entries", num_entries);
     // Database handle will be borrowed from state as needed within command handlers
-    // Help text for interactive shell commands and Ctrl-C behavior
-    let help_text = "\
-Available commands:
-  ls [-rck] [-d DELIM] [prefix]   list entries
-    -r       recursive (no delimiter grouping)
-    -c       only directories (common prefixes)
-    -k       only keys
-    -d <c>   one-off custom delimiter character
-  cd [dir]                        change directory
-  find <regex>                    search entries matching regex
-  tags [-a|-o] <tag1> [tag2...]   list entries with tags (default: all)
-    -a       match all tags (AND, default)
-    -o       match any tag (OR)
-  val <id>                        lookup key by raw pointer ID
-  pwd                             print working directory
-  exit, quit                      exit shell
-  help                            show this help
-
-Ctrl-C once aborts a running ls; twice within 2s exits the shell
-";
-    println!("{}", help_text);
+    // Show shell help text
+    println!("{}", HELP_TEXT);
 
     loop {
         // Build prompt: virtual leading delimiter; show cwd between delimiters
@@ -269,311 +479,14 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
 
         match rl.readline(&prompt) {
             Ok(line) => {
-                let line = line.trim();
-                if line.is_empty() {
+                let raw = line.trim();
+                if raw.is_empty() {
                     continue;
                 }
-                rl.add_history_entry(line);
+                rl.add_history_entry(raw);
 
-                let mut parts = line.split_whitespace();
-                let cmd = parts.next().unwrap();
-
-                match cmd {
-                    "ls" => {
-                        // Parse flags: -r recursive, -c only directories, -k only keys, -d custom delimiter
-                        let mut recursive = false;
-                        let mut only_prefix = false;
-                        let mut only_keys = false;
-                        let mut custom_delim: Option<char> = None;
-                        let mut prefix_str = String::new();
-                        while let Some(tok) = parts.next() {
-                            if tok == "-d" {
-                                if let Some(dtok) = parts.next() {
-                                    if dtok.chars().count() == 1 {
-                                        custom_delim = dtok.chars().next();
-                                    } else {
-                                        println!(
-                                            "Invalid delimiter '{}'; must be single char",
-                                            dtok
-                                        );
-                                    }
-                                } else {
-                                    println!("Flag -d requires a delimiter argument");
-                                }
-                                continue;
-                            } else if tok.starts_with("-d") {
-                                // e.g. -d:
-                                let ds: Vec<char> = tok.chars().collect();
-                                if ds.len() == 3 {
-                                    custom_delim = Some(ds[2]);
-                                } else {
-                                    println!("Invalid -d flag '{}'; use -d<DELIM>", tok);
-                                }
-                                continue;
-                            } else if tok.starts_with('-') && tok.len() > 1 {
-                                for ch in tok.chars().skip(1) {
-                                    match ch {
-                                        'r' => recursive = true,
-                                        'c' => only_prefix = true,
-                                        'k' => only_keys = true,
-                                        _ => println!("Unknown flag -{}", ch),
-                                    }
-                                }
-                                continue;
-                            } else {
-                                prefix_str = tok.to_string();
-                                break;
-                            }
-                        }
-                        if only_prefix && only_keys {
-                            println!("Cannot use -c and -k together");
-                            continue;
-                        }
-                        // Build listing prefix and delimiter option
-                        let (list_prefix, list_delim) = {
-                            let state_ref = state.borrow();
-                            let mut p = state_ref.cwd.clone();
-                            if !prefix_str.is_empty() {
-                                p.push_str(&prefix_str);
-                            }
-                            // Determine delimiter to use: None for recursive, custom if set, else default
-                            let d = if recursive {
-                                None
-                            } else if let Some(cd) = custom_delim {
-                                Some(cd)
-                            } else {
-                                Some(state_ref.delim)
-                            };
-                            (p, d)
-                        };
-                        // Stream entries with abort support
-                        {
-                            let state_borrow = state.borrow();
-                            let mut stream = match state_borrow.db.list(&list_prefix, list_delim) {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    println!("Error listing {}: {}", list_prefix, e);
-                                    continue;
-                                }
-                            };
-                            match print_entries(
-                                list_prefix.as_str(),
-                                &mut stream,
-                                only_prefix,
-                                only_keys,
-                                Some(&sig_rx),
-                            )? {
-                                PrintResult::Aborted => continue,
-                                PrintResult::Count(printed) => {
-                                    // Summary
-                                    if printed > 0 {
-                                        println!(
-                                            "\n{} {} listed",
-                                            printed,
-                                            if printed == 1 { "entry" } else { "entries" }
-                                        );
-                                    } else if !prefix_str.is_empty() {
-                                        println!("No entries found for prefix '{}'", prefix_str);
-                                    } else {
-                                        println!("No entries found");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    "tags" => {
-                        // Parse flags and tags: -a for all (AND), -o for any (OR)
-                        let mut tag_mode = TagMode::And; // Default to AND
-                        let mut tags = Vec::new();
-                        
-                        for tok in parts {
-                            if tok == "-a" {
-                                tag_mode = TagMode::And;
-                            } else if tok == "-o" {
-                                tag_mode = TagMode::Or;
-                            } else if tok.starts_with('-') {
-                                println!("Unknown flag: {}", tok);
-                                continue;
-                            } else {
-                                tags.push(tok);
-                            }
-                        }
-                        
-                        if tags.is_empty() {
-                            println!("Usage: tags [-a|-o] <tag1> [tag2...]");
-                            continue;
-                        }
-                        
-                        let tags_refs: &[&str] = &tags;
-
-                        let cwd_owned = state.borrow().cwd.clone();
-                        let prefix_opt = if cwd_owned.is_empty() {
-                            None
-                        } else {
-                            Some(cwd_owned.as_str())
-                        };
-                        
-                        {
-                            let state_borrow = state.borrow();
-                            let mut stream = match state_borrow.db.list_by_tags(tags_refs, tag_mode, prefix_opt) {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    println!("Error listing by tags: {}", e);
-                                    continue;
-                                }
-                            };
-                            
-                            let display_prefix = state_borrow.cwd.clone();
-                            match print_entries(
-                                &display_prefix,
-                                &mut stream,
-                                false,
-                                true, // Only show keys for tag searches
-                                Some(&sig_rx),
-                            )? {
-                                PrintResult::Aborted => continue,
-                                PrintResult::Count(printed) => {
-                                    let mode_str = match tag_mode {
-                                        TagMode::And => "all",
-                                        TagMode::Or => "any",
-                                    };
-                                    if printed > 0 {
-                                        println!(
-                                            "\n{} {} found with {} of tags: {}",
-                                            printed,
-                                            if printed == 1 { "entry" } else { "entries" },
-                                            mode_str,
-                                            tags.join(", ")
-                                        );
-                                    } else {
-                                        println!(
-                                            "No entries found with {} of tags: {}",
-                                            mode_str,
-                                            tags.join(", ")
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    "find" => {
-                        // Search for keys matching a regex under the current working directory
-                        let pattern = match parts.next() {
-                            Some(p) => p,
-                            None => {
-                                println!("Usage: find <regex>");
-                                continue;
-                            }
-                        };
-                        {
-                            let state_ref = state.borrow();
-                            let cwd_owned = state_ref.cwd.clone();
-                            let prefix_opt = if cwd_owned.is_empty() {
-                                None
-                            } else {
-                                Some(cwd_owned.as_str())
-                            };
-                            let display_cwd = if cwd_owned.is_empty() {
-                                "/"
-                            } else {
-                                cwd_owned.as_str()
-                            };
-                            let mut stream = match state_ref.db.grep(prefix_opt, pattern) {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    println!("Error running find: {}", e);
-                                    continue;
-                                }
-                            };
-                            match print_entries(
-                                cwd_owned.as_str(),
-                                &mut stream,
-                                false,
-                                true,
-                                Some(&sig_rx),
-                            )? {
-                                PrintResult::Aborted => continue,
-                                PrintResult::Count(printed) => {
-                                    if printed > 0 {
-                                        println!(
-                                            "\n{} {} found",
-                                            printed,
-                                            if printed == 1 { "entry" } else { "entries" }
-                                        );
-                                    } else {
-                                        println!(
-                                            "No entries matching '{}' in '{}'",
-                                            pattern, display_cwd
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    "val" => {
-                        // Reverse lookup by raw pointer ID
-                        let id_str = match parts.next() {
-                            Some(i) => i,
-                            None => {
-                                println!("Usage: val <numeric_id>");
-                                continue;
-                            }
-                        };
-                        match id_str.parse::<u64>() {
-                            Ok(id) => match state.borrow().db.get_key(id)? {
-                                Some(Entry::Key(key, ptr, val_opt)) => {
-                                    if let Some(val) = val_opt {
-                                        let val_str = serde_json::to_string(&val)?;
-                                        println!(
-                                            "📄 {} \x1b[90m#{}\x1b[0m \x1b[2m{}\x1b[0m",
-                                            key, ptr, val_str
-                                        );
-                                    } else {
-                                        println!("📄 {} \x1b[90m#{}\x1b[0m", key, ptr);
-                                    }
-                                }
-                                _ => println!("No key found for id {}", id),
-                            },
-                            Err(_) => println!("Usage: val <numeric_id>"),
-                        }
-                    }
-                    "cd" => {
-                        // Change current working prefix
-                        let arg = parts.next().unwrap_or("");
-                        let mut state_mut = state.borrow_mut();
-                        let delim_char = state_mut.delim;
-
-                        // If no argument, go to root
-                        if arg.is_empty() {
-                            state_mut.cwd.clear();
-                        } else if arg == ".." {
-                            // Move up one directory
-                            if let Some(end) = state_mut.cwd.rfind(|c| c != delim_char) {
-                                if let Some(idx) = state_mut.cwd[..=end].rfind(delim_char) {
-                                    state_mut.cwd.truncate(idx + 1);
-                                } else {
-                                    state_mut.cwd.clear();
-                                }
-                            } else {
-                                state_mut.cwd.clear();
-                            }
-                        } else {
-                            // Append segment: if cwd is empty or arg begins with the delimiter, just push it
-                            if state_mut.cwd.is_empty() {
-                                state_mut.cwd = arg.to_string();
-                            } else {
-                                state_mut.cwd.push_str(arg);
-                            }
-                        }
-                    }
-                    "pwd" => {
-                        println!("{}", state.borrow().cwd);
-                    }
-                    "help" => {
-                        println!("{}", help_text);
-                    }
-                    "exit" | "quit" => break,
-                    _ => println!("Unknown command: {}", cmd),
+                if handle_cmd(&state, HELP_TEXT, Some(&sig_rx), raw)? {
+                    break;
                 }
             }
             Err(ReadlineError::Interrupted) => {
@@ -598,3 +511,19 @@ Ctrl-C once aborts a running ls; twice within 2s exits the shell
 
     Ok(())
 }
+
+/// Execute a single shell command non-interactively.
+pub fn run_shell_commands<V: DeserializeOwned + Serialize>(
+    db: Database<V>,
+    delim: char,
+    commands: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let state = Rc::new(RefCell::new(ShellState { db, delim, cwd: String::new() }));
+    // Join remaining args into one command
+    let line = commands.join(" ");
+    println!("> {}", line);
+    // Dispatch without abort support
+    let _ = handle_cmd(&state, HELP_TEXT, None, &line)?;
+    Ok(())
+}
+

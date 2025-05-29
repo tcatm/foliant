@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 mod shell;
-use shell::run_shell;
+use shell::{run_shell, run_shell_commands};
 
 // Cross-platform resident set size (RSS) in KB; uses getrusage on UNIX.
 #[cfg(unix)]
@@ -92,7 +92,7 @@ enum Commands {
         #[arg(short, long, value_name = "DELIM")]
         delimiter: Option<char>,
     },
-    /// Interactive shell for browsing the index
+    /// Interactive shell for browsing the index (or run commands non-interactively)
     Shell {
         /// Path to the serialized index
         #[arg(short, long, value_name = "FILE")]
@@ -100,6 +100,9 @@ enum Commands {
         /// Delimiter character for grouping (default: '/')
         #[arg(short, long, value_name = "DELIM", default_value = "/")]
         delimiter: char,
+        /// Shell commands to execute non-interactively (skips REPL)
+        #[arg(value_name = "CMD", num_args = 0.., last = true)]
+        commands: Vec<String>,
     },
 }
 
@@ -331,11 +334,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 printed,
             );
         }
-        Commands::Shell { index, delimiter } => {
-            // Open single DB or sharded directory for interactive shell
-            // Reuse the same helper as List
+        Commands::Shell { index, delimiter, commands } => {
+            // Open single DB or sharded directory for interactive shell or batch commands
             let db_handle: Database<Value> = load_db(&index)?;
-            run_shell(db_handle, delimiter)?;
+            if commands.is_empty() {
+                run_shell(db_handle, delimiter)?;
+            } else {
+                run_shell_commands(db_handle, delimiter, &commands)?;
+            }
         }
     }
 
