@@ -334,7 +334,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 printed,
             );
         }
-        Commands::Shell { index, delimiter, commands } => {
+        Commands::Shell {
+            index,
+            delimiter,
+            commands,
+        } => {
             // Open single DB or sharded directory for interactive shell or batch commands
             let db_handle: Database<Value> = load_db(&index)?;
             if commands.is_empty() {

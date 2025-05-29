@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::read_dir;
 use std::io;
 use std::path::Path;
@@ -15,7 +16,7 @@ use crate::error::{IndexError, Result};
 use crate::multi_list::MultiShardListStreamer;
 use crate::shard::Shard;
 use crate::streamer::{PrefixStream, Streamer};
-use roaring::{RoaringBitmap, bitmap::IntoIter};
+use roaring::{bitmap::IntoIter, RoaringBitmap};
 
 /// Read-only database: union of one or more shards (FST maps + payload stores)
 pub struct Database<V = serde_cbor::Value>
@@ -208,7 +209,7 @@ where
                     });
                 }
                 let filter_bm = combined.unwrap_or_else(RoaringBitmap::new);
-                
+
                 struct ShardPtrStreamer<'a, V>
                 where
                     V: DeserializeOwned,
@@ -226,16 +227,16 @@ where
                         use fst::raw::Fst as RawFst;
                         while let Some(ptr) = self.ptr_iter.next() {
                             if let Ok(Some(entry)) = (|| -> Result<Option<Entry<V>>> {
-                                let raw_fst = RawFst::new(self.shard.idx_mmap.clone()).map_err(
-                                    crate::error::IndexError::from,
-                                )?;
+                                let raw_fst = RawFst::new(self.shard.idx_mmap.clone())
+                                    .map_err(crate::error::IndexError::from)?;
                                 if let Some(key_bytes) = raw_fst.get_key(ptr as u64) {
-                                    let key = String::from_utf8(key_bytes.to_vec()).map_err(|e| {
-                                        crate::error::IndexError::Io(std::io::Error::new(
-                                            std::io::ErrorKind::InvalidData,
-                                            format!("invalid utf8 in key: {}", e),
-                                        ))
-                                    })?;
+                                    let key =
+                                        String::from_utf8(key_bytes.to_vec()).map_err(|e| {
+                                            crate::error::IndexError::Io(std::io::Error::new(
+                                                std::io::ErrorKind::InvalidData,
+                                                format!("invalid utf8 in key: {}", e),
+                                            ))
+                                        })?;
                                     let lut_entry = self.shard.lookup.get(ptr as u32)?;
                                     let value = self.shard.payload.get(lut_entry.payload_ptr)?;
                                     return Ok(Some(Entry::Key(key, ptr as u64, value)));
@@ -285,5 +286,28 @@ where
             }
         }
         Ok(Box::new(ChainStreamer { streams, idx: 0 }))
+    }
+
+    /// List all tags present in the database, returning their counts.
+    pub fn list_tags(&self) -> Result<Vec<(String, usize)>> {
+        let mut tag_map: HashMap<String, RoaringBitmap> = HashMap::new();
+        for shard in &self.shards {
+            if let Some(idx) = &shard.tags {
+                for tag in idx.list_tags()? {
+                    if let Ok(Some(bm)) = idx.get(&tag) {
+                        tag_map
+                            .entry(tag)
+                            .and_modify(|acc| *acc |= &bm)
+                            .or_insert(bm);
+                    }
+                }
+            }
+        }
+        let mut res: Vec<(String, usize)> = tag_map
+            .into_iter()
+            .map(|(tag, bm)| (tag, bm.len() as usize))
+            .collect();
+        res.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(res)
     }
 }

@@ -2,7 +2,11 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 
+use fst::automaton::Str;
 use fst::map::Map;
+use fst::Automaton;
+use fst::IntoStreamer;
+use fst::Streamer as FstStreamer;
 use memmap2::Mmap;
 use roaring::RoaringBitmap;
 
@@ -112,5 +116,17 @@ impl TagIndex {
         } else {
             Ok(None)
         }
+    }
+}
+
+impl TagIndex {
+    /// List all tags present in this index.
+    pub fn list_tags(&self) -> Result<Vec<String>> {
+        let mut tags = Vec::new();
+        let mut stream = self.fst.search(Str::new("").starts_with()).into_stream();
+        while let Some((tag, _)) = stream.next() {
+            tags.push(String::from_utf8_lossy(tag).into_owned());
+        }
+        Ok(tags)
     }
 }

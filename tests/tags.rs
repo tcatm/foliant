@@ -1,7 +1,7 @@
 use foliant::{Database, DatabaseBuilder, Entry, Streamer, TagMode};
 use serde_cbor::Value;
-use tempfile::tempdir;
 use std::fs;
+use tempfile::tempdir;
 
 #[test]
 fn list_by_tags_basic() -> Result<(), Box<dyn std::error::Error>> {
@@ -122,7 +122,10 @@ fn list_by_tags_multi_shard() -> Result<(), Box<dyn std::error::Error>> {
     }
     let db: Database<Value> = Database::open(&base_dir)?;
     let or_list = db_list_tags(&db, &["t1", "t2"], TagMode::Or, None);
-    assert_eq!(or_list, vec!["bar".to_string(), "baz".to_string(), "foo".to_string()]);
+    assert_eq!(
+        or_list,
+        vec!["bar".to_string(), "baz".to_string(), "foo".to_string()]
+    );
     let and = db_list_tags(&db, &["t1", "t2"], TagMode::And, None);
     assert_eq!(and, vec!["bar".to_string()]);
     let or_pref = db_list_tags(&db, &["t1", "t2"], TagMode::Or, Some("b"));
@@ -182,9 +185,17 @@ fn list_by_tags_merge_reorder_image_text() -> Result<(), Box<dyn std::error::Err
     const TEXT_COUNT: usize = 3;
     for i in 1..=TEXT_COUNT {
         if i % 2 == 0 {
-            builder.insert_ext(&format!("txt{:02}", i), None, vec!["Text", "Structured Data"]);
+            builder.insert_ext(
+                &format!("txt{:02}", i),
+                None,
+                vec!["Text", "Structured Data"],
+            );
         } else {
-            builder.insert_ext(&format!("txt{:02}", i), None, vec!["Structured Data", "Text"]);
+            builder.insert_ext(
+                &format!("txt{:02}", i),
+                None,
+                vec!["Structured Data", "Text"],
+            );
         }
     }
     builder.close()?;
@@ -192,21 +203,18 @@ fn list_by_tags_merge_reorder_image_text() -> Result<(), Box<dyn std::error::Err
     let db: Database<Value> = Database::open(&base)?;
     // Single-tag queries should return exactly the respective keys.
     let image_keys = db_list_tags(&db, &["Image"], TagMode::Or, None);
-    let expected_image: Vec<String> =
-        (1..=IMAGE_COUNT).map(|i| format!("img{:05}", i)).collect();
+    let expected_image: Vec<String> = (1..=IMAGE_COUNT).map(|i| format!("img{:05}", i)).collect();
     assert_eq!(image_keys, expected_image);
 
     let text_keys = db_list_tags(&db, &["Text"], TagMode::Or, None);
-    let expected_text: Vec<String> =
-        (1..=TEXT_COUNT).map(|i| format!("txt{:02}", i)).collect();
+    let expected_text: Vec<String> = (1..=TEXT_COUNT).map(|i| format!("txt{:02}", i)).collect();
     assert_eq!(text_keys, expected_text);
 
     // AND queries for multi-tag entries must also return exactly those same keys.
     let image_eng_keys = db_list_tags(&db, &["Image", "English"], TagMode::And, None);
     assert_eq!(image_eng_keys, expected_image);
 
-    let text_struct_keys =
-        db_list_tags(&db, &["Text", "Structured Data"], TagMode::And, None);
+    let text_struct_keys = db_list_tags(&db, &["Text", "Structured Data"], TagMode::And, None);
     assert_eq!(text_struct_keys, expected_text);
 
     // OR query should return the union of both sets.
@@ -222,7 +230,6 @@ fn list_by_tags_merge_reorder_image_text() -> Result<(), Box<dyn std::error::Err
 
     Ok(())
 }
-
 
 fn db_list_tags(
     db: &Database<Value>,

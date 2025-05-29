@@ -35,7 +35,7 @@ Available commands:
     -d <c>   one-off custom delimiter character
   cd [dir]                        change directory
   find <regex>                    search entries matching regex
-  tags [-a|-o] <tag1> [tag2...]   list entries with tags (default: all)
+  tags [-a|-o] [<tag1> [tag2...]]   list entries with tags (default: all); no args lists all tags with counts
     -a       match all tags (AND, default)
     -o       match any tag (OR)
   val <id>                        lookup key by raw pointer ID
@@ -126,7 +126,9 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
         let word = &before[start..];
         let mut candidates = Vec::new();
         if start == 0 {
-            let cmds = ["cd", "ls", "find", "pwd", "val", "tags", "exit", "quit", "help"];
+            let cmds = [
+                "cd", "ls", "find", "pwd", "val", "tags", "exit", "quit", "help",
+            ];
             for &cmd in &cmds {
                 if cmd.starts_with(word) {
                     // Commands that take an argument get a trailing space
@@ -146,6 +148,25 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
         let state = self.state.borrow();
         let cwd = &state.cwd;
         let delim = state.delim;
+        if line.split_whitespace().next() == Some("tags") {
+            let mut seen_tags = HashSet::new();
+            match state.db.list_tags() {
+                Ok(tag_counts) => {
+                    for (tag, _) in tag_counts {
+                        if tag.starts_with(word) && seen_tags.insert(tag.clone()) {
+                            let mut replacement = tag.clone();
+                            replacement.push(' ');
+                            candidates.push(Pair {
+                                display: tag,
+                                replacement,
+                            });
+                        }
+                    }
+                }
+                Err(_) => return Ok((start, Vec::new())),
+            }
+            return Ok((start, candidates));
+        }
         // Split word into parent path and fragment after last delimiter
         let (parent, frag) = if let Some(idx) = word.rfind(delim) {
             (&word[..idx], &word[idx + 1..])
@@ -309,7 +330,11 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
             match print_entries(&list_prefix, &mut stream, only_prefix, only_keys, abort_rx) {
                 Ok(PrintResult::Aborted) | Err(_) => {}
                 Ok(PrintResult::Count(printed)) if printed > 0 => {
-                    println!("\n{} {} listed", printed, if printed == 1 { "entry" } else { "entries" });
+                    println!(
+                        "\n{} {} listed",
+                        printed,
+                        if printed == 1 { "entry" } else { "entries" }
+                    );
                 }
                 _ => {}
             }
@@ -330,12 +355,26 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                 }
             }
             if tags.is_empty() {
-                println!("Usage: tags [-a|-o] <tag1> [tag2...]");
+                let state_ref = state.borrow();
+                match state_ref.db.list_tags() {
+                    Ok(tag_counts) => {
+                        for (tag, count) in tag_counts {
+                            println!("{} ({})", tag, count);
+                        }
+                    }
+                    Err(e) => {
+                        println!("Error listing tags: {}", e);
+                    }
+                }
                 return Ok(false);
             }
             let tags_refs: Vec<&str> = tags.iter().map(|s| &**s).collect();
             let cwd_owned = state.borrow().cwd.clone();
-            let prefix_opt = if cwd_owned.is_empty() { None } else { Some(cwd_owned.as_str()) };
+            let prefix_opt = if cwd_owned.is_empty() {
+                None
+            } else {
+                Some(cwd_owned.as_str())
+            };
             let state_ref = state.borrow();
             let mut stream = match state_ref.db.list_by_tags(&tags_refs, tag_mode, prefix_opt) {
                 Ok(s) => s,
@@ -359,7 +398,11 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
             };
             let state_ref = state.borrow();
             let cwd_owned = state_ref.cwd.clone();
-            let prefix_opt = if cwd_owned.is_empty() { None } else { Some(cwd_owned.as_str()) };
+            let prefix_opt = if cwd_owned.is_empty() {
+                None
+            } else {
+                Some(cwd_owned.as_str())
+            };
             let mut stream = match state_ref.db.grep(prefix_opt, pattern) {
                 Ok(s) => s,
                 Err(e) => {
@@ -385,7 +428,10 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                     Some(Entry::Key(key, ptr, val_opt)) => {
                         if let Some(val) = val_opt {
                             let val_str = serde_json::to_string(&val)?;
-                            println!("📄 {} \x1b[90m#{}\x1b[0m \x1b[2m{}\x1b[0m", key, ptr, val_str);
+                            println!(
+                                "📄 {} \x1b[90m#{}\x1b[0m \x1b[2m{}\x1b[0m",
+                                key, ptr, val_str
+                            );
                         } else {
                             println!("📄 {} \x1b[90m#{}\x1b[0m", key, ptr);
                         }
@@ -518,7 +564,11 @@ pub fn run_shell_commands<V: DeserializeOwned + Serialize>(
     delim: char,
     commands: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let state = Rc::new(RefCell::new(ShellState { db, delim, cwd: String::new() }));
+    let state = Rc::new(RefCell::new(ShellState {
+        db,
+        delim,
+        cwd: String::new(),
+    }));
     // Join remaining args into one command
     let line = commands.join(" ");
     println!("> {}", line);
@@ -526,4 +576,3 @@ pub fn run_shell_commands<V: DeserializeOwned + Serialize>(
     let _ = handle_cmd(&state, HELP_TEXT, None, &line)?;
     Ok(())
 }
-
