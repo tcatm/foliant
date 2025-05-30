@@ -7,7 +7,6 @@ use fst::automaton::Str;
 use fst::map::OpBuilder;
 use fst::Automaton;
 use fst::IntoStreamer;
-use fst::Streamer as FstStreamer;
 use regex_automata::sparse::SparseDFA;
 use serde::de::DeserializeOwned;
 
@@ -16,7 +15,7 @@ use crate::error::{IndexError, Result};
 use crate::multi_list::MultiShardListStreamer;
 use crate::shard::Shard;
 use crate::streamer::{PrefixStream, Streamer};
-use roaring::{bitmap::IntoIter, RoaringBitmap};
+use roaring::RoaringBitmap;
 
 /// Read-only database: union of one or more shards (FST maps + payload stores)
 pub struct Database<V = serde_cbor::Value>
@@ -112,19 +111,11 @@ where
         })?;
         let prefix_str = prefix.unwrap_or("");
         let start = Str::new(prefix_str).starts_with();
-        let mut relevant_shards: Vec<&Shard<V>> = Vec::new();
-        if prefix_str.is_empty() {
-            for shard in &self.shards {
-                relevant_shards.push(shard);
-            }
+        let relevant_shards: Vec<&Shard<V>> = if prefix_str.is_empty() {
+            self.shards.iter().collect()
         } else {
-            for shard in &self.shards {
-                let mut s = shard.fst.search(start.clone()).into_stream();
-                if s.next().is_some() {
-                    relevant_shards.push(shard);
-                }
-            }
-        }
+            self.shards.iter().filter(|s| s.has_prefix(prefix_str)).collect()
+        };
         let automaton = dfa.intersection(start);
         let mut op = OpBuilder::new();
         for shard in &relevant_shards {
@@ -140,15 +131,8 @@ where
     /// Retrieve the payload for `key`, if any.
     pub fn get_value(&self, key: &str) -> Result<Option<V>> {
         for shard in &self.shards {
-            if let Some(weight) = shard.fst.get(key) {
-                let lut_entry = shard.lookup.get(weight as u32).map_err(IndexError::from)?;
-                let v = shard.payload.get(lut_entry.payload_ptr).map_err(|e| {
-                    IndexError::Io(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("payload error: {}", e),
-                    ))
-                })?;
-                return Ok(v);
+            if let Some(v) = shard.get_value(key)? {
+                return Ok(Some(v));
             }
         }
         Ok(None)
@@ -161,20 +145,9 @@ where
 
     /// Reverse lookup by raw pointer: retrieve the key and optional value.
     pub fn get_key(&self, ptr: u64) -> Result<Option<crate::entry::Entry<V>>> {
-        // Use raw FST reverse lookup directly on the shard's mmap
-        use fst::raw::Fst as RawFst;
         for shard in &self.shards {
-            let raw_fst = RawFst::new(shard.idx_mmap.clone()).map_err(IndexError::from)?;
-            if let Some(key_bytes) = raw_fst.get_key(ptr) {
-                let key = String::from_utf8(key_bytes).map_err(|e| {
-                    IndexError::Io(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("invalid utf8 in key: {}", e),
-                    ))
-                })?;
-                let lut_entry = shard.lookup.get(ptr as u32)?;
-                let value = shard.payload.get(lut_entry.payload_ptr)?;
-                return Ok(Some(crate::entry::Entry::Key(key, ptr, value)));
+            if let Some(entry) = shard.get_entry(ptr)? {
+                return Ok(Some(entry));
             }
         }
         Ok(None)
@@ -189,79 +162,7 @@ where
     ) -> Result<Box<dyn Streamer<Item = Entry<V>> + 'a>> {
         let mut streams: Vec<Box<dyn Streamer<Item = Entry<V>> + 'a>> = Vec::new();
         for shard in &self.shards {
-            if let Some(idx) = &shard.tags {
-                let mut combined: Option<RoaringBitmap> = None;
-                for &tag in tags {
-                    let mut bm = RoaringBitmap::new();
-                    if let Some(sub) = idx.get(tag)? {
-                        bm |= sub;
-                    }
-                    combined = Some(match combined {
-                        Some(mut acc) if mode == TagMode::And => {
-                            acc &= &bm;
-                            acc
-                        }
-                        Some(mut acc) => {
-                            acc |= &bm;
-                            acc
-                        }
-                        None => bm,
-                    });
-                }
-                let filter_bm = combined.unwrap_or_else(RoaringBitmap::new);
-
-                struct ShardPtrStreamer<'a, V>
-                where
-                    V: DeserializeOwned,
-                {
-                    shard: &'a crate::shard::Shard<V>,
-                    ptr_iter: IntoIter,
-                    prefix: Option<&'a str>,
-                }
-                impl<'a, V> Streamer for ShardPtrStreamer<'a, V>
-                where
-                    V: DeserializeOwned,
-                {
-                    type Item = Entry<V>;
-                    fn next(&mut self) -> Option<Self::Item> {
-                        use fst::raw::Fst as RawFst;
-                        while let Some(ptr) = self.ptr_iter.next() {
-                            if let Ok(Some(entry)) = (|| -> Result<Option<Entry<V>>> {
-                                let raw_fst = RawFst::new(self.shard.idx_mmap.clone())
-                                    .map_err(crate::error::IndexError::from)?;
-                                if let Some(key_bytes) = raw_fst.get_key(ptr as u64) {
-                                    let key =
-                                        String::from_utf8(key_bytes.to_vec()).map_err(|e| {
-                                            crate::error::IndexError::Io(std::io::Error::new(
-                                                std::io::ErrorKind::InvalidData,
-                                                format!("invalid utf8 in key: {}", e),
-                                            ))
-                                        })?;
-                                    let lut_entry = self.shard.lookup.get(ptr as u32)?;
-                                    let value = self.shard.payload.get(lut_entry.payload_ptr)?;
-                                    return Ok(Some(Entry::Key(key, ptr as u64, value)));
-                                }
-                                Ok(None)
-                            })() {
-                                if let Some(pref) = self.prefix {
-                                    if let Entry::Key(ref k, _, _) = entry {
-                                        if !k.starts_with(pref) {
-                                            continue;
-                                        }
-                                    }
-                                }
-                                return Some(entry);
-                            }
-                        }
-                        None
-                    }
-                }
-                streams.push(Box::new(ShardPtrStreamer {
-                    shard,
-                    ptr_iter: filter_bm.into_iter(),
-                    prefix,
-                }));
-            }
+            streams.push(shard.stream_by_tags(tags, mode, prefix)?);
         }
         struct ChainStreamer<'a, V>
         where
