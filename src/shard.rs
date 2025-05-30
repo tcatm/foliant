@@ -100,4 +100,28 @@ where
             tags,
         })
     }
+
+    /// Return the longest common prefix of all indexed keys in this shard.
+    ///
+    /// Walk the underlying FST from the root, following the unique outgoing
+    /// transition at each node until a branching point or leaf is reached.
+    /// The bytes traversed form the longest common prefix.
+    pub fn common_prefix(&self) -> String {
+        let raw = self.fst.as_fst();
+        let mut node = raw.root();
+        let mut prefix_bytes = Vec::new();
+        while node.len() == 1 {
+            let tr = node.transition(0);
+            prefix_bytes.push(tr.inp);
+            node = raw.node(tr.addr);
+        }
+        String::from_utf8_lossy(&prefix_bytes)
+            .trim_end_matches('\u{FFFD}')
+            .to_string()
+    }
+
+    /// Number of keys in this shard.
+    pub fn len(&self) -> usize {
+        self.fst.len()
+    }
 }

@@ -156,7 +156,7 @@ where
 
     /// Total number of keys across all shards.
     pub fn len(&self) -> usize {
-        self.shards.iter().map(|s| s.fst.len()).sum()
+        self.shards.iter().map(|s| s.len()).sum()
     }
 
     /// Reverse lookup by raw pointer: retrieve the key and optional value.
@@ -309,5 +309,10 @@ where
             .collect();
         res.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(res)
+    }
+
+    /// Return a slice of shards in the database.
+    pub fn shards(&self) -> &[Shard<V>] {
+        &self.shards
     }
 }

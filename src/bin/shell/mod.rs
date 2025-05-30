@@ -141,7 +141,7 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
         let mut candidates = Vec::new();
         if start == 0 {
             let cmds = [
-                "cd", "ls", "find", "pwd", "val", "tags", "exit", "quit", "help",
+                "cd", "ls", "find", "pwd", "val", "tags", "shards", "exit", "quit", "help",
             ];
             for &cmd in &cmds {
                 if cmd.starts_with(word) {
@@ -400,6 +400,20 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                 true,
                 abort_rx,
             ));
+        }
+        "shards" => {
+            let state_ref = state.borrow();
+            let shards = state_ref.db.shards();
+            println!("{} shard(s) loaded", shards.len());
+            for (i, shard) in shards.iter().enumerate() {
+                println!(
+                    "shard {}: {} keys, common_prefix=\"{}\"",
+                    i,
+                    shard.len(),
+                    shard.common_prefix(),
+                );
+            }
+            return Ok(false);
         }
         "find" => {
             let pattern = match parts.next() {
