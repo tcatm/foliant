@@ -86,7 +86,7 @@ fn list_by_tags_with_values() -> Result<(), Box<dyn std::error::Error>> {
     builder.insert_ext("z", Some(Value::Integer(3)), vec!["a", "b"]);
     builder.close()?;
     let db: Database<Value> = Database::open(&base)?;
-    let entries: Vec<Entry<Value>> = db.list_by_tags(&["a"], TagMode::Or, None)?.collect();
+    let entries: Vec<Entry<Value>> = db.list_by_tags(&["a"], &[], TagMode::Or, None)?.collect();
     let mut kvs: Vec<(String, Option<Value>)> = entries
         .into_iter()
         .filter_map(|entry| match entry {
@@ -237,7 +237,7 @@ fn db_list_tags(
     mode: TagMode,
     prefix: Option<&str>,
 ) -> Vec<String> {
-    let entries: Vec<Entry<Value>> = db.list_by_tags(tags, mode, prefix).unwrap().collect();
+    let entries: Vec<Entry<Value>> = db.list_by_tags(tags, &[], mode, prefix).unwrap().collect();
     let mut res: Vec<String> = entries
         .into_iter()
         .filter_map(|entry| match entry {

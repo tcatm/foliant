@@ -35,7 +35,7 @@ Available commands:
     -d <c>   one-off custom delimiter character
   cd [dir]                        change directory
   find <regex>                    search entries matching regex
-  tags [-a|-o] [<tag1> [tag2...]]   list entries with tags (default: all); no args lists all tags with counts
+  tags [-a|-o] [<tag1> [tag2...]]   list entries with tags (default: all); prefix tags with '-' or '!' to exclude; no args lists all tags with counts
     -a       match all tags (AND, default)
     -o       match any tag (OR)
   val <id>                        lookup key by raw pointer ID
@@ -167,11 +167,24 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
             match state.db.list_tags() {
                 Ok(tag_counts) => {
                     for (tag, _) in tag_counts {
-                        if tag.starts_with(word) && seen_tags.insert(tag.clone()) {
-                            let mut replacement = tag.clone();
+                        // Support exclusion markers '-' and '!' as prefixes.
+                        let (marker, rest) = if word.starts_with('-') || word.starts_with('!') {
+                            (Some(word.chars().next().unwrap()), &word[1..])
+                        } else {
+                            (None, word)
+                        };
+                        if tag.starts_with(rest) && seen_tags.insert(tag.clone()) {
+                            let mut display = String::new();
+                            let mut replacement = String::new();
+                            if let Some(m) = marker {
+                                display.push(m);
+                                replacement.push(m);
+                            }
+                            display.push_str(&tag);
+                            replacement.push_str(&tag);
                             replacement.push(' ');
                             candidates.push(Pair {
-                                display: tag,
+                                display,
                                 replacement,
                             });
                         }
@@ -351,20 +364,22 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
         }
         "tags" => {
             let mut tag_mode = TagMode::And;
-            let mut tags = Vec::new();
+            let mut include_tags = Vec::new();
+            let mut exclude_tags = Vec::new();
             for tok in parts {
                 if tok == "-a" {
                     tag_mode = TagMode::And;
                 } else if tok == "-o" {
                     tag_mode = TagMode::Or;
-                } else if tok.starts_with('-') {
-                    println!("Unknown flag: {}", tok);
-                    continue;
+                } else if let Some(t) = tok.strip_prefix('-') {
+                    exclude_tags.push(t.to_string());
+                } else if let Some(t) = tok.strip_prefix('!') {
+                    exclude_tags.push(t.to_string());
                 } else {
-                    tags.push(tok);
+                    include_tags.push(tok.to_string());
                 }
             }
-            if tags.is_empty() {
+            if include_tags.is_empty() && exclude_tags.is_empty() {
                 let state_ref = state.borrow();
                 match state_ref.db.list_tags() {
                     Ok(tag_counts) => {
@@ -378,7 +393,8 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                 }
                 return Ok(false);
             }
-            let tags_refs: Vec<&str> = tags.iter().map(|s| &**s).collect();
+            let include_refs: Vec<&str> = include_tags.iter().map(|s| &**s).collect();
+            let exclude_refs: Vec<&str> = exclude_tags.iter().map(|s| &**s).collect();
             let cwd_owned = state.borrow().cwd.clone();
             let prefix_opt = if cwd_owned.is_empty() {
                 None
@@ -386,13 +402,17 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                 Some(cwd_owned.as_str())
             };
             let state_ref = state.borrow();
-            let mut stream = match state_ref.db.list_by_tags(&tags_refs, tag_mode, prefix_opt) {
-                Ok(s) => s,
-                Err(e) => {
-                    println!("Error listing by tags: {}", e);
-                    return Ok(false);
-                }
-            };
+            let mut stream =
+                match state_ref
+                    .db
+                    .list_by_tags(&include_refs, &exclude_refs, tag_mode, prefix_opt)
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        println!("Error listing by tags: {}", e);
+                        return Ok(false);
+                    }
+                };
             handle_print_result(print_entries(
                 &state_ref.cwd,
                 &mut stream,

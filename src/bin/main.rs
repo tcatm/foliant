@@ -74,15 +74,14 @@ enum Commands {
         #[arg(short, long, value_name = "PREFIX")]
         prefix: Option<String>,
     },
-    /// List entries in an existing index, with optional tag filtering
     List {
         /// Path to the serialized index
         #[arg(short, long, value_name = "FILE")]
         index: PathBuf,
-        /// Comma-separated tags to filter by
+        /// Comma-separated tags to include or exclude (prefix with '-' or '!' to exclude)
         #[arg(long, value_name = "TAGS")]
         tags: Option<String>,
-        /// Combine tags with AND or OR logic
+        /// Combine positive tags with AND or OR logic (applied before exclusion)
         #[arg(long, value_name = "TAG_MODE", default_value = "and")]
         tag_mode: TagMode,
         /// Prefix to list (default is empty)
@@ -297,8 +296,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Choose tag-filtered or plain listing
             let stream_start = Instant::now();
             let mut stream = if let Some(tag_strs) = tags.as_deref() {
-                let tag_list: Vec<&str> = tag_strs.split(',').collect();
-                db_handle.list_by_tags(&tag_list, tag_mode, Some(&prefix))?
+                // Split into include/exclude sets: prefix '-' or '!' to exclude
+                let mut include_tags = Vec::new();
+                let mut exclude_tags = Vec::new();
+                for raw in tag_strs.split(',') {
+                    if let Some(t) = raw.strip_prefix('-') {
+                        exclude_tags.push(t);
+                    } else if let Some(t) = raw.strip_prefix('!') {
+                        exclude_tags.push(t);
+                    } else if let Some(t) = raw.strip_prefix('+') {
+                        include_tags.push(t);
+                    } else if !raw.is_empty() {
+                        include_tags.push(raw);
+                    }
+                }
+                db_handle.list_by_tags(&include_tags, &exclude_tags, tag_mode, Some(&prefix))?
             } else {
                 db_handle.list(&prefix, delimiter)?
             };

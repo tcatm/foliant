@@ -114,7 +114,10 @@ where
         let relevant_shards: Vec<&Shard<V>> = if prefix_str.is_empty() {
             self.shards.iter().collect()
         } else {
-            self.shards.iter().filter(|s| s.has_prefix(prefix_str)).collect()
+            self.shards
+                .iter()
+                .filter(|s| s.has_prefix(prefix_str))
+                .collect()
         };
         let automaton = dfa.intersection(start);
         let mut op = OpBuilder::new();
@@ -153,16 +156,20 @@ where
         Ok(None)
     }
 
-    /// List entries filtered by tags, optionally intersected with a key prefix.
+    /// List entries filtered by tags (include/exclude) under a given tag-mode, optionally restricted to a key prefix.
+    ///
+    /// `include_tags`: positive tags to match (combined by `mode`), or empty for no includes.
+    /// `exclude_tags`: tags to exclude from the result (entries having any of these tags are dropped).
     pub fn list_by_tags<'a>(
         &'a self,
-        tags: &[&str],
+        include_tags: &[&str],
+        exclude_tags: &[&str],
         mode: TagMode,
         prefix: Option<&'a str>,
     ) -> Result<Box<dyn Streamer<Item = Entry<V>> + 'a>> {
         let mut streams: Vec<Box<dyn Streamer<Item = Entry<V>> + 'a>> = Vec::new();
         for shard in &self.shards {
-            streams.push(shard.stream_by_tags(tags, mode, prefix)?);
+            streams.push(shard.stream_by_tags(include_tags, exclude_tags, mode, prefix)?);
         }
         struct ChainStreamer<'a, V>
         where
