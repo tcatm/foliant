@@ -601,7 +601,6 @@ pub fn run_shell_commands<V: DeserializeOwned + Serialize>(
     }));
     // Join remaining args into one command
     let line = commands.join(" ");
-    println!("> {}", line);
     // Dispatch without abort support
     let _ = handle_cmd(&state, HELP_TEXT, None, &line)?;
     Ok(())
