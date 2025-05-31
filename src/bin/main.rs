@@ -11,6 +11,9 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use std::sync::Arc;
+use memmap2::Mmap;
+use fst::map::Map;
 
 mod shell;
 use shell::{run_shell, run_shell_commands};
@@ -124,6 +127,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let db = Database::<V>::open(path)?;
         Ok(db)
+    }
+
+    // Helper to build a tag index with a progress bar; returns elapsed time
+    fn run_tag_index(
+        index: &PathBuf,
+        tag_field: &str,
+    ) -> Result<Duration, Box<dyn std::error::Error>> {
+        let start = Instant::now();
+        let idx_path = index.with_extension("idx");
+        let idx_file = File::open(&idx_path)?;
+        let idx_mmap = unsafe { Mmap::map(&idx_file)? };
+        let idx_map = Map::new(idx_mmap)?;
+        let total = idx_map.len() as u64;
+        let pb = ProgressBar::new(total);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] [{eta_precise}] {pos}/{len} ({percent}%) {msg}"
+            )?
+            .progress_chars("#>-")
+        );
+        let pb_clone = pb.clone();
+        build_tags_index(index, tag_field, Some(Arc::new(move |_| pb_clone.inc(1))))?;
+        pb.finish();
+        Ok(start.elapsed())
     }
 
     match cli.command {
@@ -282,23 +309,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Generate tag index if requested (two-pass)
             if let Some(tf) = tag_field {
-                let ti_start = Instant::now();
-                build_tags_index(&index, &tf)?;
-                let ti_dur = ti_start.elapsed();
-                eprintln!(
-                    "Tag index generated in {:.3} ms",
-                    ti_dur.as_secs_f64() * 1000.0
-                );
+                let ti_dur = run_tag_index(&index, &tf)?;
+                eprintln!("Tag index generated in {:.3} ms", ti_dur.as_secs_f64() * 1000.0);
             }
         }
         Commands::TagIndex { index, tag_field } => {
-            let start = Instant::now();
-            build_tags_index(&index, &tag_field)?;
-            let dur = start.elapsed();
-            eprintln!(
-                "Tag index generated in {:.3} ms",
-                dur.as_secs_f64() * 1000.0
-            );
+            let dur = run_tag_index(&index, &tag_field)?;
+            eprintln!("Tag index generated in {:.3} ms", dur.as_secs_f64() * 1000.0);
         }
         Commands::List {
             index,

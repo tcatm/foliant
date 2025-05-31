@@ -178,6 +178,8 @@ pub fn write_tag_index_file<P: AsRef<Path>>(
 pub struct TagIndexBuilder {
     base: PathBuf,
     tag_bitmaps: BTreeMap<String, RoaringBitmap>,
+    /// Optional hook that gets called after each insert_tags, passing the total count so far.
+    on_progress: Option<Box<dyn Fn(u64)>>,
 }
 
 impl TagIndexBuilder {
@@ -186,6 +188,7 @@ impl TagIndexBuilder {
         TagIndexBuilder {
             base: base.as_ref().to_path_buf(),
             tag_bitmaps: BTreeMap::new(),
+            on_progress: None,
         }
     }
 
@@ -201,10 +204,24 @@ impl TagIndexBuilder {
                 .or_insert_with(RoaringBitmap::new)
                 .insert(id);
         }
+        if let Some(cb) = &self.on_progress {
+            let total: u64 = self.tag_bitmaps.values().map(|bm| bm.len() as u64).sum();
+            cb(total);
+        }
     }
 
     /// Consume the builder and write out the `.tags` file.
     pub fn finish(self) -> Result<()> {
         write_tag_index_file(self.base, &self.tag_bitmaps)
+    }
+
+    /// Attach a progress‐callback: called with the cumulative tag‐entry count
+    /// on every `insert_tags` invocation.
+    pub fn with_progress<F>(mut self, cb: F) -> Self
+    where
+        F: Fn(u64) + 'static,
+    {
+        self.on_progress = Some(Box::new(cb));
+        self
     }
 }
