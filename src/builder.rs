@@ -15,10 +15,8 @@ use std::path::{Path, PathBuf};
 use crate::database::Database;
 use crate::error::{IndexError, Result};
 use crate::lookup_table_store::LookupTableStoreBuilder;
-use crate::tag_index::{TagIndexBuilder, write_tag_index_file};
+use crate::tag_index::TagIndexBuilder;
 use crate::payload_store::PayloadStoreBuilder;
-use roaring::RoaringBitmap;
-use std::io::Write;
 
 pub(crate) const CHUNK_SIZE: usize = 128 * 1024;
 const INSERT_BATCH_SIZE: usize = 10_000;
