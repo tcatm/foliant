@@ -37,6 +37,11 @@ foliant index -i data.idx --input input.txt
 foliant index -i data.idx -j path --input sample.jsonl
 ```
 
+### Build an index with tags extracted at index time
+```bash
+foliant index -i data.idx --json path --tag-field tags --input sample.jsonl
+```
+ 
 ### Build an index with a custom prefix
 ```bash
 foliant index -i data.idx --json path --prefix foo/ --input sample.jsonl
@@ -58,7 +63,13 @@ foliant index -i data.idx --json path --prefix foo/ --input sample.jsonl
 
 ### Interactive shell
 ```bash
+
 foliant shell -i data.idx
+```
+
+### Generate a tag index for an existing database
+```bash
+foliant tag-index -i data.idx --tag-field tags
 ```
 
 When values are present, they are shown after the key in dim ANSI color, serialized as one-line JSON.
@@ -93,6 +104,9 @@ Sample lines in `sample.jsonl`:
 - `Database<V>`: read-only handle (`V: DeserializeOwned`) for querying the index; supports prefix listing (`list`) and value lookup (`get_value`)
 - `Entry`: enum returned by `Database::list`, either `Entry::Key(String)` for full keys or `Entry::CommonPrefix(String)` for grouped prefixes
 - `PayloadStoreBuilder<V>` and `PayloadStore<V>`: internal types for writing and reading the `.payload` file
+
+- `TagIndex`: read-only handle for querying a tag index file; supports listing tags (`list_tags`) and retrieving bitmap for a tag (`get`)
+- `TagIndexBuilder`: builder for creating a new tag index file; insert lookup IDs with associated tags, then finalize to write the `.tags` file
 
 ### Design Notes
 - The index uses the `fst` crate's `MapBuilder` to store keys with `u64` lookup identifiers as weights, each pointing into the flat lookup table.

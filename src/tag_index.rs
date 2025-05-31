@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use fst::automaton::Str;
 use fst::map::Map;
@@ -11,6 +11,10 @@ use memmap2::Mmap;
 use roaring::RoaringBitmap;
 
 use crate::error::{IndexError, Result};
+use crate::builder::CHUNK_SIZE;
+use fst::map::MapBuilder;
+use std::collections::BTreeMap;
+use std::io::{BufWriter, Write};
 
 /// In-memory handle to a variant-C tag index file (.tags), embedding an FST mapping
 /// each tag to a packed (offset_in_blob<<32 | length) value, followed by concatenated
@@ -128,5 +132,76 @@ impl TagIndex {
             tags.push(String::from_utf8_lossy(tag).into_owned());
         }
         Ok(tags)
+    }
+}
+
+/// Write a variant-C tag index file (`<base>.tags`) from precomputed tag bitmaps.
+pub fn write_tag_index_file<P: AsRef<Path>>(base: P, tag_bitmaps: &BTreeMap<String, RoaringBitmap>) -> Result<()> {
+    let base = base.as_ref();
+    if tag_bitmaps.is_empty() {
+        return Ok(());
+    }
+    let mut blobs = Vec::with_capacity(tag_bitmaps.len());
+    for bitmap in tag_bitmaps.values() {
+        let mut buf = Vec::new();
+        bitmap.serialize_into(&mut buf).map_err(IndexError::Io)?;
+        blobs.push(buf);
+    }
+    let mut fst_section = Vec::new();
+    let mut fst_builder = MapBuilder::new(&mut fst_section)?;
+    let mut offset = 0u64;
+    for ((tag, _), blob_data) in tag_bitmaps.iter().zip(blobs.iter()) {
+        let len = blob_data.len() as u64;
+        let packed = (offset << 32) | len;
+        fst_builder.insert(tag, packed)?;
+        offset += len;
+    }
+    fst_builder.finish()?;
+
+    let tags_path = base.with_extension("tags");
+    let tags_file = File::create(&tags_path)?;
+    let mut writer = BufWriter::with_capacity(CHUNK_SIZE, tags_file);
+    writer.write_all(b"FTGT")?;
+    writer.write_all(&1u16.to_le_bytes())?;
+    writer.write_all(&(fst_section.len() as u64).to_le_bytes())?;
+    writer.write_all(&fst_section)?;
+    for blob in blobs {
+        writer.write_all(&blob)?;
+    }
+    Ok(())
+}
+
+/// Builder for creating a variant-C tag index file (`<base>.tags`).
+pub struct TagIndexBuilder {
+    base: PathBuf,
+    tag_bitmaps: BTreeMap<String, RoaringBitmap>,
+}
+
+impl TagIndexBuilder {
+    /// Create a new TagIndexBuilder for writing `<base>.tags`.
+    pub fn new<P: AsRef<Path>>(base: P) -> Self {
+        TagIndexBuilder {
+            base: base.as_ref().to_path_buf(),
+            tag_bitmaps: BTreeMap::new(),
+        }
+    }
+
+    /// Insert a lookup ID and its associated tags into the index.
+    pub fn insert_tags<T>(&mut self, id: u32, tags: T)
+    where
+        T: IntoIterator,
+        T::Item: Into<String>,
+    {
+        for tag in tags {
+            self.tag_bitmaps
+                .entry(tag.into())
+                .or_insert_with(RoaringBitmap::new)
+                .insert(id);
+        }
+    }
+
+    /// Consume the builder and write out the `.tags` file.
+    pub fn finish(self) -> Result<()> {
+        write_tag_index_file(self.base, &self.tag_bitmaps)
     }
 }

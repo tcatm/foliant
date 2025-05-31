@@ -15,12 +15,12 @@ use std::path::{Path, PathBuf};
 use crate::database::Database;
 use crate::error::{IndexError, Result};
 use crate::lookup_table_store::LookupTableStoreBuilder;
+use crate::tag_index::{TagIndexBuilder, write_tag_index_file};
 use crate::payload_store::PayloadStoreBuilder;
 use roaring::RoaringBitmap;
-use std::collections::BTreeMap;
 use std::io::Write;
 
-const CHUNK_SIZE: usize = 128 * 1024;
+pub(crate) const CHUNK_SIZE: usize = 128 * 1024;
 const INSERT_BATCH_SIZE: usize = 10_000;
 
 /// Builder for creating a new on-disk database with values of type V.
@@ -315,53 +315,16 @@ impl<V: Serialize> DatabaseBuilder<V> {
         let idx_mmap = unsafe { Mmap::map(&idx_file)? };
         let idx_map = Map::new(idx_mmap)?;
 
-        let mut tag_bitmaps: BTreeMap<String, RoaringBitmap> = BTreeMap::new();
+        let mut tag_builder = TagIndexBuilder::new(&self.base);
         for (key_bytes, tags) in &self.tag_entries {
             let key_str = std::str::from_utf8(key_bytes)
                 .map_err(|e| IndexError::Io(io::Error::new(io::ErrorKind::InvalidData, e)))?;
             if let Some(weight) = idx_map.get(key_str) {
                 let ptr = weight as u32;
-                for tag in tags {
-                    tag_bitmaps
-                        .entry(tag.clone())
-                        .or_insert_with(RoaringBitmap::new)
-                        .insert(ptr);
-                }
+                tag_builder.insert_tags(ptr, tags);
             }
         }
-        if tag_bitmaps.is_empty() {
-            return Ok(());
-        }
-
-        let mut blobs = Vec::new();
-        for bitmap in tag_bitmaps.values() {
-            let mut buf = Vec::new();
-            bitmap.serialize_into(&mut buf).map_err(IndexError::Io)?;
-            blobs.push(buf);
-        }
-
-        let mut fst_section = Vec::new();
-        let mut fst_builder = MapBuilder::new(&mut fst_section)?;
-        let mut offset = 0u64;
-        for ((tag, _), blob_data) in tag_bitmaps.iter().zip(blobs.iter()) {
-            let len = blob_data.len() as u64;
-            let packed = (offset << 32) | len;
-            fst_builder.insert(tag, packed)?;
-            offset += len;
-        }
-        fst_builder.finish()?;
-
-        let tags_path = self.base.with_extension("tags");
-        let tags_file = File::create(&tags_path)?;
-        let mut writer = BufWriter::with_capacity(CHUNK_SIZE, tags_file);
-        writer.write_all(b"FTGT")?;
-        writer.write_all(&1u16.to_le_bytes())?;
-        writer.write_all(&(fst_section.len() as u64).to_le_bytes())?;
-        writer.write_all(&fst_section)?;
-        for blob in blobs {
-            writer.write_all(&blob)?;
-        }
-        Ok(())
+        tag_builder.finish()
     }
 
     /// Consume the builder, write files, and open a read-only Database<V> via mmap.
@@ -374,3 +337,4 @@ impl<V: Serialize> DatabaseBuilder<V> {
         Database::<V>::open(base)
     }
 }
+

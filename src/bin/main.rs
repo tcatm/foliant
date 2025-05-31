@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use foliant::IndexError;
 use foliant::Streamer;
 use foliant::TagMode;
-use foliant::{Database, DatabaseBuilder, Entry};
+use foliant::{Database, DatabaseBuilder, Entry, build_tags_index};
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
 use serde::de::DeserializeOwned;
@@ -73,6 +73,15 @@ enum Commands {
         /// Prefix to prepend to all keys
         #[arg(short, long, value_name = "PREFIX")]
         prefix: Option<String>,
+    },
+    /// Generate or update the tag index (.tags) for an existing database by scanning JSON payloads
+    TagIndex {
+        /// Path to the serialized index (file or directory)
+        #[arg(short, long, value_name = "FILE")]
+        index: PathBuf,
+        /// JSON field name containing array-of-strings tags
+        #[arg(long, value_name = "TAGFIELD")]
+        tag_field: String,
     },
     List {
         /// Path to the serialized index
@@ -282,7 +291,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("Memory usage: {} KB", mem_after);
             }
         }
-        Commands::List {
+	        Commands::TagIndex { index, tag_field } => {
+	            let start = Instant::now();
+	            build_tags_index(&index, &tag_field)?;
+	            let dur = start.elapsed();
+	            eprintln!("Tag index generated in {:.3} ms", dur.as_secs_f64() * 1000.0);
+	        }
+	        Commands::List {
             index,
             tags,
             tag_mode,

@@ -1,12 +1,13 @@
 use std::collections::HashMap;
-use std::fs::read_dir;
+use std::fs::{read_dir, File};
 use std::io;
 use std::path::Path;
 
 use fst::automaton::Str;
-use fst::map::OpBuilder;
+use fst::map::{Map, OpBuilder};
 use fst::Automaton;
 use fst::IntoStreamer;
+use fst::Streamer;
 use regex_automata::sparse::SparseDFA;
 use serde::de::DeserializeOwned;
 
@@ -14,8 +15,12 @@ use crate::entry::Entry;
 use crate::error::{IndexError, Result};
 use crate::multi_list::MultiShardListStreamer;
 use crate::shard::Shard;
-use crate::streamer::{PrefixStream, Streamer};
+use crate::streamer::{PrefixStream, Streamer as DbStreamer};
+use crate::payload_store::PayloadStore;
+use crate::lookup_table_store::LookupTableStore;
 use roaring::RoaringBitmap;
+use memmap2::Mmap;
+use crate::tag_index::TagIndexBuilder;
 
 /// Read-only database: union of one or more shards (FST maps + payload stores)
 pub struct Database<V = serde_cbor::Value>
@@ -89,7 +94,7 @@ where
         &'a self,
         prefix: &'a str,
         delimiter: Option<char>,
-    ) -> Result<Box<dyn Streamer<Item = Entry<V>> + 'a>> {
+    ) -> Result<Box<dyn DbStreamer<Item = Entry<V>> + 'a>> {
         let delim_u8 = delimiter.map(|c| c as u8);
         let prefix_buf = prefix.as_bytes().to_vec();
         let ms = MultiShardListStreamer::new(&self.shards, prefix_buf, delim_u8);
@@ -166,8 +171,8 @@ where
         exclude_tags: &[&str],
         mode: TagMode,
         prefix: Option<&'a str>,
-    ) -> Result<Box<dyn Streamer<Item = Entry<V>> + 'a>> {
-        let mut streams: Vec<Box<dyn Streamer<Item = Entry<V>> + 'a>> = Vec::new();
+) -> Result<Box<dyn DbStreamer<Item = Entry<V>> + 'a>> {
+		let mut streams: Vec<Box<dyn DbStreamer<Item = Entry<V>> + 'a>> = Vec::new();
         for shard in &self.shards {
             streams.push(shard.stream_by_tags(include_tags, exclude_tags, mode, prefix)?);
         }
@@ -175,10 +180,10 @@ where
         where
             V: DeserializeOwned,
         {
-            streams: Vec<Box<dyn Streamer<Item = Entry<V>> + 'a>>,
+            streams: Vec<Box<dyn DbStreamer<Item = Entry<V>> + 'a>>,
             idx: usize,
         }
-        impl<'a, V> Streamer for ChainStreamer<'a, V>
+        impl<'a, V> DbStreamer for ChainStreamer<'a, V>
         where
             V: DeserializeOwned,
         {
@@ -222,5 +227,58 @@ where
     /// Return a slice of shards in the database.
     pub fn shards(&self) -> &[Shard<V>] {
         &self.shards
+	}
+	}
+
+/// Build or rebuild the tag index files by scanning existing JSON payloads for the given tag field.
+///
+/// This implements a two-pass tag-index process: if you deferred tag extraction during
+/// initial indexing (or omitted --tag-field), you can generate the `<base>.tags` files
+/// later by invoking this function with the name of the JSON field storing an array of tags.
+pub fn build_tags_index<P: AsRef<Path>>(path: P, tag_field: &str) -> Result<()> {
+    let base = path.as_ref();
+    if base.is_dir() {
+        for entry in read_dir(base)? {
+            let ent = entry?;
+            let p = ent.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("idx") {
+                continue;
+            }
+            let stem = p
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .ok_or(IndexError::InvalidFormat("invalid shard file name"))?;
+            let shard_base = base.join(stem);
+            build_tags_index_file(&shard_base, tag_field)?;
+        }
+    } else {
+        build_tags_index_file(base, tag_field)?;
     }
+    Ok(())
+}
+
+/// Helper: scan the payloads for a single shard and write its `<base>.tags` file.
+fn build_tags_index_file(base: &Path, tag_field: &str) -> Result<()> {
+    let idx_path = base.with_extension("idx");
+    let idx_file = File::open(&idx_path)?;
+    let idx_mmap = unsafe { Mmap::map(&idx_file)? };
+    let idx_map = Map::new(idx_mmap)?;
+
+    let payload = PayloadStore::<serde_json::Value>::open(&base.with_extension("payload"))?;
+    let lookup = LookupTableStore::open(&base.with_extension("lookup"))?;
+
+    let mut builder = TagIndexBuilder::new(base);
+    let mut stream = idx_map.stream();
+    while let Some((_, weight)) = stream.next() {
+        let shard_ptr = weight as u32;
+        let lut = lookup.get(shard_ptr)?;
+        let payload_ptr = lut.payload_ptr;
+        if let Some(val) = payload.get(payload_ptr)? {
+            if let Some(arr) = val.get(tag_field).and_then(|v| v.as_array()) {
+                builder.insert_tags(shard_ptr, arr.iter().filter_map(|v| v.as_str()));
+            }
+        }
+    }
+    builder.finish()?;
+    Ok(())
 }
