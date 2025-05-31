@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 use crate::database::Database;
 use crate::error::{IndexError, Result};
 use crate::lookup_table_store::LookupTableStoreBuilder;
-use crate::tag_index::TagIndexBuilder;
 use crate::payload_store::PayloadStoreBuilder;
 
 pub(crate) const CHUNK_SIZE: usize = 128 * 1024;
@@ -31,7 +30,6 @@ where
     payload_store: PayloadStoreBuilder<V>,
     lookup_store: LookupTableStoreBuilder,
     buffer: Vec<(Vec<u8>, u32)>,
-    tag_entries: Vec<(Vec<u8>, Vec<String>)>,
     partials: Vec<PartialBuilder>,
 }
 
@@ -124,7 +122,6 @@ impl<V: Serialize> DatabaseBuilder<V> {
             payload_store,
             lookup_store,
             buffer: Vec::with_capacity(INSERT_BATCH_SIZE),
-            tag_entries: Vec::new(),
             partials: Vec::new(),
         })
     }
@@ -137,26 +134,6 @@ impl<V: Serialize> DatabaseBuilder<V> {
             .append(value)
             .expect("payload append failed");
         self.buffer.push((key.as_bytes().to_vec(), payload_ptr));
-        if self.buffer.len() >= INSERT_BATCH_SIZE {
-            self.flush_buffer().expect("failed to flush batch");
-        }
-    }
-
-    /// Insert a key with optional value `V` and associated tags into the database.
-    /// Tags will be indexed into the tag bitmap index.
-    pub fn insert_ext<T>(&mut self, key: &str, value: Option<V>, tags: T)
-    where
-        T: IntoIterator,
-        T::Item: Into<String>,
-    {
-        let payload_ptr = self
-            .payload_store
-            .append(value)
-            .expect("payload append failed");
-        let key_bytes = key.as_bytes().to_vec();
-        let tags_vec = tags.into_iter().map(Into::into).collect::<Vec<_>>();
-        self.tag_entries.push((key_bytes.clone(), tags_vec.clone()));
-        self.buffer.push((key_bytes, payload_ptr));
         if self.buffer.len() >= INSERT_BATCH_SIZE {
             self.flush_buffer().expect("failed to flush batch");
         }
@@ -218,9 +195,6 @@ impl<V: Serialize> DatabaseBuilder<V> {
         self.flush_fst()?;
         let partial_paths = self.drain_and_finish_partials()?;
         self.finish_index(partial_paths)?;
-        if !self.tag_entries.is_empty() {
-            self.write_tags()?;
-        }
         self.payload_store.close()?;
         Ok(())
     }
@@ -306,25 +280,6 @@ impl<V: Serialize> DatabaseBuilder<V> {
         Ok(())
     }
 
-    /// Write an optional tag index file (`<base>.tags`) using inserted tags.
-    fn write_tags(&self) -> Result<()> {
-        let idx_path = self.base.with_extension("idx");
-        let idx_file = File::open(&idx_path)?;
-        let idx_mmap = unsafe { Mmap::map(&idx_file)? };
-        let idx_map = Map::new(idx_mmap)?;
-
-        let mut tag_builder = TagIndexBuilder::new(&self.base);
-        for (key_bytes, tags) in &self.tag_entries {
-            let key_str = std::str::from_utf8(key_bytes)
-                .map_err(|e| IndexError::Io(io::Error::new(io::ErrorKind::InvalidData, e)))?;
-            if let Some(weight) = idx_map.get(key_str) {
-                let ptr = weight as u32;
-                tag_builder.insert_tags(ptr, tags);
-            }
-        }
-        tag_builder.finish()
-    }
-
     /// Consume the builder, write files, and open a read-only Database<V> via mmap.
     pub fn into_database(self) -> Result<Database<V>>
     where
@@ -335,4 +290,3 @@ impl<V: Serialize> DatabaseBuilder<V> {
         Database::<V>::open(base)
     }
 }
-

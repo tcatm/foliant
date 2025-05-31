@@ -10,8 +10,8 @@ use fst::Streamer as FstStreamer;
 use memmap2::Mmap;
 use roaring::RoaringBitmap;
 
-use crate::error::{IndexError, Result};
 use crate::builder::CHUNK_SIZE;
+use crate::error::{IndexError, Result};
 use fst::map::MapBuilder;
 use std::collections::BTreeMap;
 use std::io::{BufWriter, Write};
@@ -136,7 +136,10 @@ impl TagIndex {
 }
 
 /// Write a variant-C tag index file (`<base>.tags`) from precomputed tag bitmaps.
-pub fn write_tag_index_file<P: AsRef<Path>>(base: P, tag_bitmaps: &BTreeMap<String, RoaringBitmap>) -> Result<()> {
+pub fn write_tag_index_file<P: AsRef<Path>>(
+    base: P,
+    tag_bitmaps: &BTreeMap<String, RoaringBitmap>,
+) -> Result<()> {
     let base = base.as_ref();
     if tag_bitmaps.is_empty() {
         return Ok(());

@@ -131,10 +131,7 @@ impl<V: DeserializeOwned> PayloadStore<V> {
             ));
         }
         let header = unsafe {
-            ptr::read_unaligned(
-                buf.as_ptr()
-                    .add(header_off + rel) as *const PayloadEntryHeader,
-            )
+            ptr::read_unaligned(buf.as_ptr().add(header_off + rel) as *const PayloadEntryHeader)
         };
         let val_len = u16::from_le(header.len) as usize;
         let start = header_off + rel + std::mem::size_of::<PayloadEntryHeader>();

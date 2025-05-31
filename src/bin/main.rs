@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use foliant::IndexError;
 use foliant::Streamer;
 use foliant::TagMode;
-use foliant::{Database, DatabaseBuilder, Entry, build_tags_index};
+use foliant::{build_tags_index, Database, DatabaseBuilder, Entry};
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
 use serde::de::DeserializeOwned;
@@ -67,8 +67,8 @@ enum Commands {
         /// Interpret each line as JSON and extract this field as the key
         #[arg(short, long, value_name = "KEYNAME")]
         json: Option<String>,
-        /// Extract tags from this JSON field (array of strings)
-        #[arg(long, value_name = "TAGFIELD")]
+        /// JSON field name containing array-of-strings tags (two-pass; run tag-index after indexing)
+        #[arg(long, alias = "tag-index", value_name = "TAGFIELD")]
         tag_field: Option<String>,
         /// Prefix to prepend to all keys
         #[arg(short, long, value_name = "PREFIX")]
@@ -197,18 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             full_key.push_str(pref);
                         }
                         full_key.push_str(key_str);
-                        // Extract tags if requested
-                        let tag_vals = tag_field
-                            .as_ref()
-                            .and_then(|tf| {
-                                obj.get(tf).and_then(|v| v.as_array()).map(|arr| {
-                                    arr.iter()
-                                        .filter_map(|e| e.as_str().map(ToString::to_string))
-                                        .collect::<Vec<_>>()
-                                })
-                            })
-                            .unwrap_or_default();
-                        builder.insert_ext(&full_key, Some(jv), tag_vals);
+                        builder.insert(&full_key, Some(jv));
                         Ok(())
                     })();
                     if let Err(err) = res {
@@ -223,7 +212,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         full_key.push_str(pref);
                     }
                     full_key.push_str(&line);
-                    builder.insert_ext(&full_key, None, std::iter::empty::<String>());
+                    builder.insert(&full_key, None);
                 }
 
                 // periodic throttled progress update
@@ -290,14 +279,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(mem_after) = get_rss_kb() {
                 eprintln!("Memory usage: {} KB", mem_after);
             }
+
+            // Generate tag index if requested (two-pass)
+            if let Some(tf) = tag_field {
+                let ti_start = Instant::now();
+                build_tags_index(&index, &tf)?;
+                let ti_dur = ti_start.elapsed();
+                eprintln!(
+                    "Tag index generated in {:.3} ms",
+                    ti_dur.as_secs_f64() * 1000.0
+                );
+            }
         }
-	        Commands::TagIndex { index, tag_field } => {
-	            let start = Instant::now();
-	            build_tags_index(&index, &tag_field)?;
-	            let dur = start.elapsed();
-	            eprintln!("Tag index generated in {:.3} ms", dur.as_secs_f64() * 1000.0);
-	        }
-	        Commands::List {
+        Commands::TagIndex { index, tag_field } => {
+            let start = Instant::now();
+            build_tags_index(&index, &tag_field)?;
+            let dur = start.elapsed();
+            eprintln!(
+                "Tag index generated in {:.3} ms",
+                dur.as_secs_f64() * 1000.0
+            );
+        }
+        Commands::List {
             index,
             tags,
             tag_mode,

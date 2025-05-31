@@ -13,14 +13,14 @@ use serde::de::DeserializeOwned;
 
 use crate::entry::Entry;
 use crate::error::{IndexError, Result};
+use crate::lookup_table_store::LookupTableStore;
 use crate::multi_list::MultiShardListStreamer;
+use crate::payload_store::PayloadStore;
 use crate::shard::Shard;
 use crate::streamer::{PrefixStream, Streamer as DbStreamer};
-use crate::payload_store::PayloadStore;
-use crate::lookup_table_store::LookupTableStore;
-use roaring::RoaringBitmap;
-use memmap2::Mmap;
 use crate::tag_index::TagIndexBuilder;
+use memmap2::Mmap;
+use roaring::RoaringBitmap;
 
 /// Read-only database: union of one or more shards (FST maps + payload stores)
 pub struct Database<V = serde_cbor::Value>
@@ -171,8 +171,8 @@ where
         exclude_tags: &[&str],
         mode: TagMode,
         prefix: Option<&'a str>,
-) -> Result<Box<dyn DbStreamer<Item = Entry<V>> + 'a>> {
-		let mut streams: Vec<Box<dyn DbStreamer<Item = Entry<V>> + 'a>> = Vec::new();
+    ) -> Result<Box<dyn DbStreamer<Item = Entry<V>> + 'a>> {
+        let mut streams: Vec<Box<dyn DbStreamer<Item = Entry<V>> + 'a>> = Vec::new();
         for shard in &self.shards {
             streams.push(shard.stream_by_tags(include_tags, exclude_tags, mode, prefix)?);
         }
@@ -227,8 +227,8 @@ where
     /// Return a slice of shards in the database.
     pub fn shards(&self) -> &[Shard<V>] {
         &self.shards
-	}
-	}
+    }
+}
 
 /// Build or rebuild the tag index files by scanning existing JSON payloads for the given tag field.
 ///

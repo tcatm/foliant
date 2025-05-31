@@ -10,11 +10,11 @@ mod streamer;
 mod tag_index;
 
 pub use builder::DatabaseBuilder;
+pub use database::build_tags_index;
 pub use database::Database;
 pub use database::TagMode;
-pub use database::build_tags_index;
 pub use entry::Entry;
 pub use error::{IndexError, Result};
 pub use shard::Shard;
-pub use tag_index::{TagIndex, TagIndexBuilder};
 pub use streamer::{PrefixStream, Streamer};
+pub use tag_index::{TagIndex, TagIndexBuilder};

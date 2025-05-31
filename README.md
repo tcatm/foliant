@@ -37,11 +37,10 @@ foliant index -i data.idx --input input.txt
 foliant index -i data.idx -j path --input sample.jsonl
 ```
 
-### Build an index with tags extracted at index time
+### Build an index with tags (two-pass)
 ```bash
-foliant index -i data.idx --json path --tag-field tags --input sample.jsonl
+foliant index -i data.idx --json path --input sample.jsonl --tag-index tags
 ```
- 
 ### Build an index with a custom prefix
 ```bash
 foliant index -i data.idx --json path --prefix foo/ --input sample.jsonl

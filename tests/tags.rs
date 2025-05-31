@@ -1,5 +1,5 @@
-use foliant::{Database, DatabaseBuilder, Entry, Streamer, TagMode};
-use serde_cbor::Value;
+use foliant::{build_tags_index, Database, DatabaseBuilder, Entry, Streamer, TagMode};
+use serde_json::{json, Value};
 use std::fs;
 use tempfile::tempdir;
 
@@ -8,12 +8,13 @@ fn list_by_tags_basic() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
-    builder.insert_ext("apple", None, vec!["fruit", "red"]);
-    builder.insert_ext("banana", None, vec!["fruit", "yellow"]);
-    builder.insert_ext("cherry", None, vec!["fruit", "red"]);
-    builder.insert_ext("date", None, vec!["fruit", "brown"]);
-    builder.insert_ext("eggplant", None, vec!["vegetable", "purple"]);
+    builder.insert("apple", Some(json!({"tags":["fruit","red"]})));
+    builder.insert("banana", Some(json!({"tags":["fruit","yellow"]})));
+    builder.insert("cherry", Some(json!({"tags":["fruit","red"]})));
+    builder.insert("date", Some(json!({"tags":["fruit","brown"]})));
+    builder.insert("eggplant", Some(json!({"tags":["vegetable","purple"]})));
     builder.close()?;
+    build_tags_index(&base, "tags")?;
 
     let db: Database<Value> = Database::open(&base)?;
 
@@ -41,8 +42,9 @@ fn list_by_tags_empty_tags() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db_empty");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
-    builder.insert_ext("a", None, vec!["tag"]);
+    builder.insert("a", Some(json!({"tags":["tag"]})));
     builder.close()?;
+    build_tags_index(&base, "tags")?;
     let db: Database<Value> = Database::open(&base)?;
     assert!(db_list_tags(&db, &[], TagMode::Or, None).is_empty());
     assert!(db_list_tags(&db, &[], TagMode::And, None).is_empty());
@@ -54,9 +56,10 @@ fn list_by_tags_unknown_tags() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db_unknown");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
-    builder.insert_ext("a", None, vec!["t1"]);
-    builder.insert_ext("b", None, vec!["t2"]);
+    builder.insert("a", Some(json!({"tags":["t1"]})));
+    builder.insert("b", Some(json!({"tags":["t2"]})));
     builder.close()?;
+    build_tags_index(&base, "tags")?;
     let db: Database<Value> = Database::open(&base)?;
     assert!(db_list_tags(&db, &["nope"], TagMode::Or, None).is_empty());
     assert!(db_list_tags(&db, &["nope"], TagMode::And, None).is_empty());
@@ -68,9 +71,10 @@ fn list_by_tags_no_overlap_and() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db_no_overlap");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
-    builder.insert_ext("a", None, vec!["x"]);
-    builder.insert_ext("b", None, vec!["y"]);
+    builder.insert("a", Some(json!({"tags":["x"]})));
+    builder.insert("b", Some(json!({"tags":["y"]})));
     builder.close()?;
+    build_tags_index(&base, "tags")?;
     let db: Database<Value> = Database::open(&base)?;
     assert!(db_list_tags(&db, &["x", "y"], TagMode::And, None).is_empty());
     Ok(())
@@ -81,10 +85,11 @@ fn list_by_tags_with_values() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db_values");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
-    builder.insert_ext("x", Some(Value::Integer(1)), vec!["a"]);
-    builder.insert_ext("y", Some(Value::Integer(2)), vec!["b"]);
-    builder.insert_ext("z", Some(Value::Integer(3)), vec!["a", "b"]);
+    builder.insert("x", Some(json!({"tags":["a"],"value":1})));
+    builder.insert("y", Some(json!({"tags":["b"],"value":2})));
+    builder.insert("z", Some(json!({"tags":["a","b"],"value":3})));
     builder.close()?;
+    build_tags_index(&base, "tags")?;
     let db: Database<Value> = Database::open(&base)?;
     let entries: Vec<Entry<Value>> = db.list_by_tags(&["a"], &[], TagMode::Or, None)?.collect();
     let mut kvs: Vec<(String, Option<Value>)> = entries
@@ -96,8 +101,8 @@ fn list_by_tags_with_values() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     kvs.sort_by(|a, b| a.0.cmp(&b.0));
     let expected = vec![
-        ("x".to_string(), Some(Value::Integer(1))),
-        ("z".to_string(), Some(Value::Integer(3))),
+        ("x".to_string(), Some(json!({"tags":["a"],"value":1}))),
+        ("z".to_string(), Some(json!({"tags":["a","b"],"value":3}))),
     ];
     assert_eq!(kvs, expected);
     Ok(())
@@ -110,16 +115,17 @@ fn list_by_tags_multi_shard() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir(&base_dir)?;
     {
         let mut b = DatabaseBuilder::<Value>::new(&base_dir.join("s1"))?;
-        b.insert_ext("foo", None, vec!["t1"]);
-        b.insert_ext("bar", None, vec!["t1", "t2"]);
+        b.insert("foo", Some(json!({"tags":["t1"]})));
+        b.insert("bar", Some(json!({"tags":["t1","t2"]})));
         b.close()?;
     }
     {
         let mut b = DatabaseBuilder::<Value>::new(&base_dir.join("s2"))?;
-        b.insert_ext("baz", None, vec!["t2"]);
-        b.insert_ext("qux", None, vec!["t3"]);
+        b.insert("baz", Some(json!({"tags":["t2"]})));
+        b.insert("qux", Some(json!({"tags":["t3"]})));
         b.close()?;
     }
+    build_tags_index(&base_dir, "tags")?;
     let db: Database<Value> = Database::open(&base_dir)?;
     let or_list = db_list_tags(&db, &["t1", "t2"], TagMode::Or, None);
     assert_eq!(
@@ -142,10 +148,11 @@ fn list_by_tags_merge_reorder_tags() -> Result<(), Box<dyn std::error::Error>> {
     for i in 0..TOTAL {
         let key = format!("k{:05}", TOTAL - i);
         let tag = if i % 2 == 0 { "even" } else { "odd" };
-        builder.insert_ext(&key, None, vec![tag]);
+        builder.insert(&key, Some(json!({"tags":[tag]})));
     }
     builder.flush_fst()?;
     builder.close()?;
+    build_tags_index(&base, "tags")?;
 
     let db: Database<Value> = Database::open(&base)?;
     let even_keys = db_list_tags(&db, &["even"], TagMode::Or, None);
@@ -174,9 +181,15 @@ fn list_by_tags_merge_reorder_image_text() -> Result<(), Box<dyn std::error::Err
     const IMAGE_COUNT: usize = 10_000;
     for i in 1..=IMAGE_COUNT {
         if i % 2 == 0 {
-            builder.insert_ext(&format!("img{:05}", i), None, vec!["Image", "English"]);
+            builder.insert(
+                &format!("img{:05}", i),
+                Some(json!({"tags":["Image","English"]})),
+            );
         } else {
-            builder.insert_ext(&format!("img{:05}", i), None, vec!["English", "Image"]);
+            builder.insert(
+                &format!("img{:05}", i),
+                Some(json!({"tags":["English","Image"]})),
+            );
         }
     }
     builder.flush_fst()?;
@@ -185,20 +198,19 @@ fn list_by_tags_merge_reorder_image_text() -> Result<(), Box<dyn std::error::Err
     const TEXT_COUNT: usize = 3;
     for i in 1..=TEXT_COUNT {
         if i % 2 == 0 {
-            builder.insert_ext(
+            builder.insert(
                 &format!("txt{:02}", i),
-                None,
-                vec!["Text", "Structured Data"],
+                Some(json!({"tags":["Text","Structured Data"]})),
             );
         } else {
-            builder.insert_ext(
+            builder.insert(
                 &format!("txt{:02}", i),
-                None,
-                vec!["Structured Data", "Text"],
+                Some(json!({"tags":["Structured Data","Text"]})),
             );
         }
     }
     builder.close()?;
+    build_tags_index(&base, "tags")?;
 
     let db: Database<Value> = Database::open(&base)?;
     // Single-tag queries should return exactly the respective keys.
