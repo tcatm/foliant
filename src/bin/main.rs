@@ -1,19 +1,20 @@
 use clap::{Parser, Subcommand};
 use foliant::IndexError;
+use foliant::SegmentInfo;
 use foliant::Streamer;
 use foliant::TagMode;
 use foliant::{build_tags_index, Database, DatabaseBuilder, Entry};
+use fst::map::Map;
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
+use memmap2::Mmap;
 use serde::de::DeserializeOwned;
 use serde_json::{self, Value};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
 use std::sync::Arc;
-use memmap2::Mmap;
-use fst::map::Map;
+use std::time::{Duration, Instant};
 
 mod shell;
 use shell::{run_shell, run_shell_commands};
@@ -271,9 +272,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pb.finish();
             let duration = start.elapsed();
             // Write out database files (.idx and .payload)
-            eprintln!("Writing index...");
+            // show progress for writing the index
+            let idx_pb = ProgressBar::new(entries as u64);
+            idx_pb.set_style(
+                ProgressStyle::with_template(
+                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] [{eta_precise}] \
+                     {pos}/{len} ({percent}%, {per_sec:.0}) {msg}",
+                )?
+                .progress_chars("#>-"),
+            );
+            idx_pb.set_message("Writing index");
             let write_start = Instant::now();
+            let idx_pb2 = idx_pb.clone();
+            builder = builder.with_write_progress(move || idx_pb2.inc(1));
+            // print segment count and size before final merge
+            builder = builder.with_segment_stats(|stats: &[SegmentInfo]| {
+                let count = stats.len();
+                let sum: usize = stats.iter().map(|s| s.size_bytes).sum();
+                let avg = if count > 0 {
+                    sum as f64 / count as f64
+                } else {
+                    0.0
+                };
+                let stddev = if count > 0 {
+                    (stats
+                        .iter()
+                        .map(|s| {
+                            let diff = s.size_bytes as f64 - avg;
+                            diff * diff
+                        })
+                        .sum::<f64>()
+                        / count as f64)
+                        .sqrt()
+                } else {
+                    0.0
+                };
+                eprintln!(
+                    "Merging {} segment(s): avg size {:.0} bytes, stddev {:.0} bytes",
+                    count, avg, stddev
+                );
+            });
             builder.close()?;
+            idx_pb.finish();
             // If a JSON parsing error occurred, exit now after saving indexed data
             if let Some(err_msg) = parse_error {
                 eprintln!("Error processing entry {}: {}", entries, err_msg);
@@ -310,12 +350,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Generate tag index if requested (two-pass)
             if let Some(tf) = tag_field {
                 let ti_dur = run_tag_index(&index, &tf)?;
-                eprintln!("Tag index generated in {:.3} ms", ti_dur.as_secs_f64() * 1000.0);
+                eprintln!(
+                    "Tag index generated in {:.3} ms",
+                    ti_dur.as_secs_f64() * 1000.0
+                );
             }
         }
         Commands::TagIndex { index, tag_field } => {
             let dur = run_tag_index(&index, &tag_field)?;
-            eprintln!("Tag index generated in {:.3} ms", dur.as_secs_f64() * 1000.0);
+            eprintln!(
+                "Tag index generated in {:.3} ms",
+                dur.as_secs_f64() * 1000.0
+            );
         }
         Commands::List {
             index,

@@ -1,24 +1,176 @@
-use fst::map::Map;
+use fst::map::{Map, OpBuilder};
+use fst::IntoStreamer;
 use fst::MapBuilder;
 use fst::Streamer;
-use memmap2::Mmap;
+use memmap2::MmapOptions;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_cbor::Value;
-use std::convert::TryInto;
-use std::fs;
-use std::fs::File;
-use std::io;
+use std::fs::{remove_file, rename, File, OpenOptions};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use crate::database::Database;
 use crate::error::{IndexError, Result};
-use crate::lookup_table_store::LookupTableStoreBuilder;
+use crate::lookup_table_store::{LookupTableStoreBuilder, LookupTableStore};
 use crate::payload_store::PayloadStoreBuilder;
 
 pub(crate) const CHUNK_SIZE: usize = 128 * 1024;
 const INSERT_BATCH_SIZE: usize = 10_000;
+use crc32fast::Hasher;
+use std::io::{Seek, SeekFrom, Write};
+
+/// One 16-byte trailer per sub-FST: [seg_id: u32 | start_off: u64 | crc32: u32]
+#[repr(C, packed)]
+#[derive(Copy, Clone, Debug)]
+struct SegmentTrailer {
+    seg_id: u32,
+    start_off: u64,
+    crc32: u32,
+}
+
+/// Statistics for one inline FST segment (before final merge).
+#[derive(Debug)]
+pub struct SegmentInfo {
+    /// 0-based segment ID, as written in the trailer.
+    pub seg_id: u32,
+    /// Byte length of the segment's FST image (excluding the trailer).
+    pub size_bytes: usize,
+}
+
+impl SegmentTrailer {
+    pub const SIZE: usize = std::mem::size_of::<SegmentTrailer>();
+
+    #[inline]
+    pub fn from_bytes(buf: &[u8]) -> SegmentTrailer {
+        unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const _) }
+    }
+
+    #[inline]
+    pub fn compute_crc(&self) -> u32 {
+        let mut h = Hasher::new();
+        let raw =
+            unsafe { std::slice::from_raw_parts((self as *const SegmentTrailer) as *const u8, 12) };
+        h.update(raw);
+        h.finalize()
+    }
+
+    #[inline]
+    pub fn validate_crc(&self) -> bool {
+        self.crc32 == self.compute_crc()
+    }
+}
+
+/// Inline builder writing sub-FSTs directly into `<base>.idx` with trailers.
+struct IndexedBuilder {
+    /// Path to the temporary idx file (inline segments are written here).
+    idx_tmp_path: PathBuf,
+    /// Path to the temporary lookup file (lookup table is built here).
+    lut_tmp_path: PathBuf,
+    /// Optional writer for the idx file (owns the file handle across segments).
+    writer: Option<BufWriter<File>>,
+    /// Active FST builder for the current segment, if any; owns its own writer while building.
+    builder: Option<MapBuilder<BufWriter<File>>>,
+    lookup: LookupTableStoreBuilder,
+    /// Next segment ID to assign for a new FST segment.
+    next_seg: u32,
+    /// Last key inserted (for lexicographic segment roll-over checks).
+    last_key: Vec<u8>,
+    /// Byte offset in the idx file where the current segment started.
+    current_start: u64,
+}
+
+impl IndexedBuilder {
+    pub fn new(base: &Path) -> Result<Self> {
+        // Prepare temporary paths for the inline index and lookup files.
+        let idx_tmp_path = base.with_extension("idx.tmp");
+        let lut_tmp_path = base.with_extension("lookup.tmp");
+        // Create/truncate the temp idx writer and lookup builder.
+        let file = File::create(&idx_tmp_path)?;
+        let writer = BufWriter::with_capacity(CHUNK_SIZE, file);
+        let lookup = LookupTableStoreBuilder::open(&lut_tmp_path)?;
+        Ok(IndexedBuilder {
+            idx_tmp_path,
+            lut_tmp_path,
+            writer: Some(writer),
+            builder: None,
+            lookup,
+            next_seg: 0,
+            last_key: Vec::new(),
+            current_start: 0,
+        })
+    }
+
+    /// Start a fresh inline FST segment at the current end of the idx file.
+    fn start_new_segment(&mut self) -> Result<()> {
+        let mut writer = self.writer.take().unwrap();
+        let start = writer.seek(SeekFrom::End(0))?;
+        let mb = MapBuilder::new(writer)?;
+        self.current_start = start;
+        self.builder = Some(mb);
+        Ok(())
+    }
+
+    /// Finish the current FST segment, write its trailer, and advance segment counter.
+    fn finish_current_segment(&mut self) -> Result<()> {
+        let mb = self.builder.take().unwrap();
+        let mut writer = mb.into_inner()?;
+
+        let mut trailer = SegmentTrailer {
+            seg_id: self.next_seg,
+            start_off: self.current_start,
+            crc32: 0,
+        };
+        trailer.crc32 = trailer.compute_crc();
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&trailer as *const SegmentTrailer) as *const u8,
+                SegmentTrailer::SIZE,
+            )
+        };
+        writer.write_all(bytes)?;
+        writer.flush()?;
+        self.next_seg += 1;
+        self.writer = Some(writer);
+        Ok(())
+    }
+
+    pub fn append_batch(&mut self, entries: &mut Vec<(Vec<u8>, u32)>) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        // If first batch ever, or if this batch's first key would break the sort order,
+        // finalize the previous segment (if any) and start a new one.
+        let first_key = &entries[0].0;
+        if let Some(_) = self.builder {
+            if first_key < &self.last_key {
+                self.finish_current_segment()?;
+            }
+        }
+        if self.builder.is_none() {
+            self.start_new_segment()?;
+        }
+
+        // Insert all entries into the active FST builder.
+        let mb = self.builder.as_mut().unwrap();
+        for (key, payload_ptr) in entries.drain(..) {
+            let lut_id = self.lookup.append(payload_ptr)?;
+            mb.insert(&key, lut_id.into())?;
+            self.last_key = key;
+        }
+        Ok(())
+    }
+
+    /// Finalize any in-flight segment, close lookup store,
+    /// and return number of segments written plus temp file paths.
+    pub fn finish(mut self) -> Result<(u32, PathBuf, PathBuf)> {
+        if self.builder.is_some() {
+            self.finish_current_segment()?;
+        }
+        self.lookup.close()?;
+        Ok((self.next_seg, self.idx_tmp_path, self.lut_tmp_path))
+    }
+}
 
 /// Builder for creating a new on-disk database with values of type V.
 /// Insert keys with `insert()`, then call `close()` or `into_database()`.
@@ -28,80 +180,12 @@ where
 {
     base: PathBuf,
     payload_store: PayloadStoreBuilder<V>,
-    lookup_store: LookupTableStoreBuilder,
     buffer: Vec<(Vec<u8>, u32)>,
-    partials: Vec<PartialBuilder>,
-}
-
-/// Internal partial FST builder segment (on-disk).
-struct PartialBuilder {
-    idx_path: PathBuf,
-    builder: MapBuilder<BufWriter<File>>,
-    last_key: Vec<u8>,
-}
-
-impl PartialBuilder {
-    /// Create a new partial builder writing to `<base>.idx.<seg_idx>`.
-    fn new(base: &Path, seg_idx: usize) -> Result<Self> {
-        let idx_path = base.with_extension(format!("idx.{}", seg_idx));
-        let fst_file = File::create(&idx_path).map_err(|e| {
-            IndexError::Io(io::Error::new(
-                e.kind(),
-                format!(
-                    "failed to create partial index file {}: {}",
-                    idx_path.display(),
-                    e
-                ),
-            ))
-        })?;
-        let fst_writer = BufWriter::with_capacity(CHUNK_SIZE, fst_file);
-        let builder = MapBuilder::new(fst_writer).map_err(|e| {
-            IndexError::Io(io::Error::new(
-                io::ErrorKind::Other,
-                format!(
-                    "failed to create index builder for {}: {}",
-                    idx_path.display(),
-                    e
-                ),
-            ))
-        })?;
-        Ok(PartialBuilder {
-            idx_path,
-            builder,
-            last_key: Vec::new(),
-        })
-    }
-
-    fn append_batch(
-        &mut self,
-        entries: &mut Vec<(Vec<u8>, u32)>,
-        lookup: &mut LookupTableStoreBuilder,
-    ) {
-        for (key, payload_ptr) in entries.drain(..) {
-            let lut_ptr = lookup
-                .append(payload_ptr)
-                .expect("lookup append failed in batch flush");
-            self.builder
-                .insert(&key, lut_ptr.into())
-                .expect("FST insert failed in batch flush");
-            self.last_key = key;
-        }
-    }
-
-    /// Finalize builder, close the FST, and return its file path.
-    fn finish(self) -> Result<PathBuf> {
-        self.builder.finish().map_err(|e| {
-            IndexError::Io(io::Error::new(
-                io::ErrorKind::Other,
-                format!(
-                    "failed to finalize index builder {}: {}",
-                    self.idx_path.display(),
-                    e
-                ),
-            ))
-        })?;
-        Ok(self.idx_path)
-    }
+    idx_builder: Option<IndexedBuilder>,
+    /// Optional callback for each key merged during final index write.
+    write_cb: Box<dyn FnMut()>,
+    /// Optional callback invoked once before merging segments, with per-segment stats.
+    before_merge_cb: Box<dyn FnMut(&[SegmentInfo])>,
 }
 
 impl<V: Serialize> DatabaseBuilder<V> {
@@ -110,19 +194,14 @@ impl<V: Serialize> DatabaseBuilder<V> {
         let base = base.as_ref().to_path_buf();
         let payload_path = base.with_extension("payload");
         let payload_store = PayloadStoreBuilder::<V>::open(&payload_path)?;
-        let lut_path = base.with_extension("lookup");
-        let lookup_store = LookupTableStoreBuilder::open(&lut_path).map_err(|e| {
-            IndexError::Io(io::Error::new(
-                e.kind(),
-                format!("failed to open lookup file {:?}: {}", lut_path.display(), e),
-            ))
-        })?;
+
         Ok(DatabaseBuilder {
             base,
             payload_store,
-            lookup_store,
             buffer: Vec::with_capacity(INSERT_BATCH_SIZE),
-            partials: Vec::new(),
+            idx_builder: None,
+            write_cb: Box::new(|| {}),
+            before_merge_cb: Box::new(|_stats| {}),
         })
     }
 
@@ -139,147 +218,102 @@ impl<V: Serialize> DatabaseBuilder<V> {
         }
     }
 
-    /// Flush buffered entries into partial FST segment(s).
+    /// Flush buffered entries into the inline index, creating sub-FST segments as needed.
+    pub fn flush_fst(&mut self) -> Result<()> {
+        self.flush_buffer()
+    }
+
+    /// Flush buffered entries into inline idx builder.
     fn flush_buffer(&mut self) -> Result<()> {
         if self.buffer.is_empty() {
             return Ok(());
         }
         self.buffer.sort_by(|a, b| a.0.cmp(&b.0));
-        match self.partials.last_mut() {
-            Some(pb) => {
-                let first_key = &self.buffer[0].0;
-                if first_key >= &pb.last_key {
-                    pb.append_batch(&mut self.buffer, &mut self.lookup_store);
-                } else {
-                    let seg_idx = self.partials.len();
-                    let mut new_pb = PartialBuilder::new(&self.base, seg_idx)?;
-                    new_pb.append_batch(&mut self.buffer, &mut self.lookup_store);
-                    self.partials.push(new_pb);
-                }
-            }
-            None => {
-                let mut pb = PartialBuilder::new(&self.base, 0)?;
-                pb.append_batch(&mut self.buffer, &mut self.lookup_store);
-                self.partials.push(pb);
-            }
+
+        if self.idx_builder.is_none() {
+            self.idx_builder = Some(IndexedBuilder::new(&self.base)?);
         }
+        self.idx_builder
+            .as_mut()
+            .unwrap()
+            .append_batch(&mut self.buffer)?;
         Ok(())
     }
 
-    /// Flush buffered entries into partial FST segments, merging with existing segments when possible.
-    pub fn flush_fst(&mut self) -> Result<()> {
-        self.flush_buffer()
-    }
-
-    /// Drain and finalize all partial index builders, returning their file paths.
-    fn drain_and_finish_partials(&mut self) -> Result<Vec<PathBuf>> {
-        let paths = self
-            .partials
-            .drain(..)
-            .map(PartialBuilder::finish)
-            .collect::<Result<Vec<_>>>()?;
-        Ok(paths)
-    }
-
-    /// Finish the index by either using a single partial or merging multiple partial indices.
-    fn finish_index(&mut self, partial_paths: Vec<PathBuf>) -> Result<()> {
-        if partial_paths.len() <= 1 {
-            self.finish_small_index(partial_paths)
-        } else {
-            self.finish_and_merge_partials(partial_paths)
-        }
-    }
-
-    /// Finalize and write index, tag, and payload files to disk.
+    /// Finalize the index file, merging inline sub-FSTs if any; then close payloads.
     pub fn close(mut self) -> Result<()> {
         self.flush_fst()?;
-        let partial_paths = self.drain_and_finish_partials()?;
-        self.finish_index(partial_paths)?;
+
+        if let Some(ib) = self.idx_builder.take() {
+            let (seg_count, tmp_idx, tmp_lut) = ib.finish()?;
+            let infos = load_submaps_raw(&tmp_idx)?;
+            let stats: Vec<SegmentInfo> = infos
+                .iter()
+                .map(|(trailer, bytes)| SegmentInfo {
+                    seg_id: trailer.seg_id,
+                    size_bytes: bytes.len(),
+                })
+                .collect();
+            (self.before_merge_cb)(&stats);
+
+            let final_idx = self.base.with_extension("idx");
+            let final_lut = self.base.with_extension("lookup");
+
+            if seg_count > 1 {
+                let old_lut_store = LookupTableStore::open(&tmp_lut)?;
+
+                let maps = infos
+                    .into_iter()
+                    .map(|(_, bytes)| Map::new(bytes).map_err(IndexError::from))
+                    .collect::<Result<Vec<_>>>()?;
+
+                multi_way_merge(maps, &old_lut_store, &final_idx, &final_lut, &mut *self.write_cb)?;
+
+                drop(old_lut_store);
+                remove_file(&tmp_lut)?;
+                remove_file(&tmp_idx)?;
+            } else {
+                let f = OpenOptions::new().write(true).open(&tmp_idx)?;
+                let new_len = f
+                    .metadata()?
+                    .len()
+                    .saturating_sub(SegmentTrailer::SIZE as u64);
+                f.set_len(new_len)?;
+                f.sync_all()?;
+                rename(&tmp_idx, &final_idx)?;
+                rename(&tmp_lut, &final_lut)?;
+            }
+        } else {
+            // No entries: write empty FST
+            let final_idx = self.base.with_extension("idx");
+            let final_lut = self.base.with_extension("lookup");
+            let file = File::create(&final_idx)?;
+            let writer = BufWriter::with_capacity(CHUNK_SIZE, file);
+            let builder = MapBuilder::new(writer)?;
+            builder.finish()?;
+            LookupTableStoreBuilder::open(&final_lut)?.close()?;
+        }
+
         self.payload_store.close()?;
         Ok(())
     }
 
-    fn finish_small_index(&mut self, partial_paths: Vec<PathBuf>) -> Result<()> {
-        if partial_paths.is_empty() {
-            let idx_path = self.base.with_extension("idx");
-            let fst_file = File::create(&idx_path)?;
-            let fst_writer = BufWriter::with_capacity(CHUNK_SIZE, fst_file);
-            let fst_builder = MapBuilder::new(fst_writer)?;
-            fst_builder.finish()?;
-        } else {
-            let src = &partial_paths[0];
-            let dst = self.base.with_extension("idx");
-            fs::rename(src, &dst)?;
-        }
-        self.lookup_store.close()?;
-        Ok(())
+    /// Set a callback to be invoked for each key merged during index write.
+    pub fn with_write_progress<F>(mut self, cb: F) -> Self
+    where
+        F: FnMut() + 'static,
+    {
+        self.write_cb = Box::new(cb);
+        self
     }
-
-    fn finish_and_merge_partials(&mut self, partial_paths: Vec<PathBuf>) -> Result<()> {
-        self.lookup_store.close()?;
-
-        let lut_path = self.base.with_extension("lookup");
-        let lut_file = File::open(&lut_path)?;
-        let lut_mmap = unsafe { Mmap::map(&lut_file)? };
-        let mut old_lut = Vec::with_capacity(lut_mmap.len() / 4);
-        for chunk in lut_mmap.chunks_exact(4) {
-            old_lut.push(u32::from_le_bytes(chunk.try_into().unwrap()));
-        }
-
-        self.lookup_store = LookupTableStoreBuilder::open(&lut_path)?;
-
-        let final_idx = self.base.with_extension("idx");
-        let final_file = File::create(&final_idx)?;
-        let final_writer = BufWriter::with_capacity(CHUNK_SIZE, final_file);
-        let mut final_builder = MapBuilder::new(final_writer)?;
-
-        let mut maps = Vec::new();
-        for path in &partial_paths {
-            let file = File::open(path)?;
-            let mmap = unsafe { Mmap::map(&file)? };
-            let map = Map::new(mmap)?;
-            maps.push(map);
-        }
-        let mut streams: Vec<_> = maps.iter().map(|m| m.stream()).collect();
-        let mut heads: Vec<Option<(Vec<u8>, u64)>> = streams
-            .iter_mut()
-            .map(|s| s.next().map(|(k, v)| (k.to_vec(), v)))
-            .collect();
-
-        for path in &partial_paths {
-            fs::remove_file(path)?;
-        }
-
-        while heads.iter().any(Option::is_some) {
-            let (i, _) = heads
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, head)| head.as_ref().map(|(key, _)| (idx, key)))
-                .min_by(|a, b| a.1.cmp(b.1))
-                .unwrap();
-            let (key_vec, val) = heads[i].take().unwrap();
-            let payload_ptr = old_lut[val as usize - 1];
-            let new_lut_id = self.lookup_store.append(payload_ptr)?;
-            final_builder
-                .insert(&key_vec, new_lut_id.into())
-                .expect("FST insert failed during merge");
-            heads[i] = streams[i].next().map(|(k, v)| (k.to_vec(), v));
-            for (j, head) in heads.iter_mut().enumerate() {
-                if j != i {
-                    if let Some((ref other_key, _)) = head {
-                        if other_key == &key_vec {
-                            *head = streams[j].next().map(|(k, v)| (k.to_vec(), v));
-                        }
-                    }
-                }
-            }
-        }
-        final_builder.finish()?;
-
-        self.lookup_store.close()?;
-        Ok(())
+    /// Set a callback invoked once before merging segments, receiving per-segment stats.
+    pub fn with_segment_stats<F>(mut self, cb: F) -> Self
+    where
+        F: FnMut(&[SegmentInfo]) + 'static,
+    {
+        self.before_merge_cb = Box::new(cb);
+        self
     }
-
     /// Consume the builder, write files, and open a read-only Database<V> via mmap.
     pub fn into_database(self) -> Result<Database<V>>
     where
@@ -289,4 +323,60 @@ impl<V: Serialize> DatabaseBuilder<V> {
         self.close()?;
         Database::<V>::open(base)
     }
+}
+
+/// Read inline sub‑FST segments and their trailers by walking trailers backward from the end of `<base>.idx`.
+/// Returns each segment's `SegmentTrailer` and owned bytes for further processing.
+fn load_submaps_raw(idx_path: &Path) -> Result<Vec<(SegmentTrailer, Vec<u8>)>> {
+    let file = File::open(idx_path)?;
+    let mmap = unsafe { MmapOptions::new().map(&file)? };
+    let buf = &mmap[..];
+    let mut end = buf.len();
+    let mut infos = Vec::new();
+    while end >= SegmentTrailer::SIZE {
+        let ts = end - SegmentTrailer::SIZE;
+        let trailer = SegmentTrailer::from_bytes(&buf[ts..end]);
+        if !trailer.validate_crc() {
+            return Err(IndexError::InvalidFormat("CRC mismatch in idx trailer"));
+        }
+        let start = trailer.start_off as usize;
+        let seg_bytes = buf[start..ts].to_vec();
+        infos.push((trailer, seg_bytes));
+        end = start;
+    }
+    infos.reverse();
+    Ok(infos)
+}
+
+/// Multi-way merge inline sub-FSTs into a final `<base>.idx`, rebuilding the lookup store.
+/// Streaming merge of an `OpBuilder::union()` of maps into a new FST at `final_idx`,
+/// using `old_lut` for payload remapping and writing into `lookup_store`.
+/// Merge all segments via an FST union into `final_idx`, rebuilding the lookup table in `final_lut`.
+fn multi_way_merge<F: AsRef<[u8]>, Cb: FnMut() + ?Sized>(
+    maps: Vec<Map<F>>,
+    old_lut: &LookupTableStore,
+    final_idx: &Path,
+    final_lut: &Path,
+    cb: &mut Cb,
+) -> Result<()> {
+    let mut lut_builder = LookupTableStoreBuilder::open(final_lut)?;
+    let final_file = File::create(final_idx)?;
+    let writer = BufWriter::with_capacity(CHUNK_SIZE, final_file);
+    let mut builder = MapBuilder::new(writer)?;
+
+    let mut opb = OpBuilder::new();
+    for m in &maps {
+        opb = opb.add(m.stream());
+    }
+    let mut stream = opb.union().into_stream();
+    while let Some((key, vals)) = stream.next() {
+        let iv = &vals[0];
+        let entry = old_lut.get(iv.value as u32)?;
+        let new_id = lut_builder.append(entry.payload_ptr)?;
+        builder.insert(&key, new_id.into())?;
+        cb();
+    }
+    builder.finish()?;
+    lut_builder.close()?;
+    Ok(())
 }

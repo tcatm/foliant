@@ -19,9 +19,9 @@ use crate::payload_store::PayloadStore;
 use crate::shard::Shard;
 use crate::streamer::{PrefixStream, Streamer as DbStreamer};
 use crate::tag_index::TagIndexBuilder;
-use std::sync::Arc;
 use memmap2::Mmap;
 use roaring::RoaringBitmap;
+use std::sync::Arc;
 
 /// Read-only database: union of one or more shards (FST maps + payload stores)
 pub struct Database<V = serde_cbor::Value>
@@ -236,7 +236,11 @@ where
 /// This implements a two-pass tag-index process: if you deferred tag extraction during
 /// initial indexing (or omitted --tag-field), you can generate the `<base>.tags` files
 /// later by invoking this function with the name of the JSON field storing an array of tags.
-pub fn build_tags_index<P: AsRef<Path>>(path: P, tag_field: &str, on_progress: Option<Arc<dyn Fn(u64)>>) -> Result<()> {
+pub fn build_tags_index<P: AsRef<Path>>(
+    path: P,
+    tag_field: &str,
+    on_progress: Option<Arc<dyn Fn(u64)>>,
+) -> Result<()> {
     let base = path.as_ref();
     if base.is_dir() {
         for entry in read_dir(base)? {
@@ -259,7 +263,11 @@ pub fn build_tags_index<P: AsRef<Path>>(path: P, tag_field: &str, on_progress: O
 }
 
 /// Helper: scan the payloads for a single shard and write its `<base>.tags` file.
-fn build_tags_index_file(base: &Path, tag_field: &str, on_progress: Option<Arc<dyn Fn(u64)>>) -> Result<()> {
+fn build_tags_index_file(
+    base: &Path,
+    tag_field: &str,
+    on_progress: Option<Arc<dyn Fn(u64)>>,
+) -> Result<()> {
     let idx_path = base.with_extension("idx");
     let idx_file = File::open(&idx_path)?;
     let idx_mmap = unsafe { Mmap::map(&idx_file)? };
