@@ -45,7 +45,7 @@ impl<V: Serialize> PayloadStoreBuilder<V> {
     }
 
     /// Append an optional payload; returns an identifier (offset+1), 0 means no payload.
-    pub fn append(&mut self, value: Option<V>) -> io::Result<u32> {
+    pub fn append(&mut self, value: Option<V>) -> io::Result<u64> {
         if let Some(val) = value {
             let data = serde_cbor::to_vec(&val)
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "CBOR serialize failed"))?;
@@ -56,7 +56,7 @@ impl<V: Serialize> PayloadStoreBuilder<V> {
             self.writer.write_all(&header.len.to_le_bytes())?;
             self.writer.write_all(&data)?;
             self.offset += std::mem::size_of::<PayloadEntryHeader>() as u64 + data.len() as u64;
-            Ok((current + 1) as u32)
+            Ok(current + 1)
         } else {
             Ok(0)
         }
@@ -116,7 +116,7 @@ impl<V: DeserializeOwned> PayloadStore<V> {
     }
 
     /// Retrieve the payload for a given identifier, deserializing to V.
-    pub fn get(&self, ptr_val: u32) -> io::Result<Option<V>> {
+    pub fn get(&self, ptr_val: u64) -> io::Result<Option<V>> {
         if ptr_val == 0 {
             return Ok(None);
         }

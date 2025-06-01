@@ -124,7 +124,7 @@ foliant produces up to four files per database (the tag index is optional):
   u32 seg_id | u64 start_off | u32 crc32(seg_id∥start_off)
   ```
   To read the index, `mmap` the file and scan backwards reading trailers from the end, validating each CRC, and extracting each sub-FST.  The segments are then merged in a single pass into the final lookup structure for queries.
-- `<base>.lookup`: a flat file storing fixed-size lookup table entries (`LookupEntry`), each mapping to a payload pointer. Each entry is a 4-byte little-endian `u32` payload pointer (`offset+1` into the `.payload` file).
+- `<base>.lookup`: a flat file storing fixed-size lookup table entries (`LookupEntry`), each mapping to a payload pointer. Each entry is an 8-byte little-endian `u64` payload pointer (`offset+1` into the `.payload` file).
 - `<base>.payload`: a flat file storing CBOR‑encoded payloads. The file begins with a 4-byte magic header (`FPAY`) and a 2-byte little-endian format version (`1`). Format v1 is uncompressed. Each payload record then consists of:
 
 1. A 2-byte little-endian length (`u16`)

@@ -3,6 +3,13 @@ name = "foliant"
 version = "0.1.0"
 edition = "2021"
 
+[profile.release]
+opt-level = 3
+lto = true
+debug = false
+panic = "abort"
+overflow-checks = false
+
 [dependencies]
 smallvec = "1.12"
 indicatif = "0.17"

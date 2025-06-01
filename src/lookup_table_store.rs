@@ -11,8 +11,8 @@ const CHUNK_SIZE: usize = 128 * 1024;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LookupEntry {
-    /// 32-bit pointer into the payload file (offset+1); zero means no payload.
-    pub payload_ptr: u32,
+    /// 64-bit pointer into the payload file (offset+1); zero means no payload.
+    pub payload_ptr: u64,
 }
 
 const RECSZ: usize = std::mem::size_of::<LookupEntry>();
@@ -32,7 +32,7 @@ impl LookupTableStoreBuilder {
     }
 
     /// Append a `LookupEntry` with the given payload pointer; returns an identifier (index+1).
-    pub fn append(&mut self, payload_ptr: u32) -> io::Result<u32> {
+    pub fn append(&mut self, payload_ptr: u64) -> io::Result<u32> {
         let idx = self.count;
         let entry = LookupEntry { payload_ptr };
         self.writer.write_all(&entry.payload_ptr.to_le_bytes())?;
@@ -77,7 +77,7 @@ impl LookupTableStore {
         }
         let slice = &self.buf[start..end];
         let raw = unsafe { ptr::read_unaligned(slice.as_ptr() as *const LookupEntry) };
-        let payload_ptr = u32::from_le(raw.payload_ptr);
+        let payload_ptr = u64::from_le(raw.payload_ptr);
         Ok(LookupEntry { payload_ptr })
     }
 }

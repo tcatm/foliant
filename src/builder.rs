@@ -135,7 +135,7 @@ impl IndexedBuilder {
         Ok(())
     }
 
-    pub fn append_batch(&mut self, entries: &mut Vec<(Vec<u8>, u32)>) -> Result<()> {
+    pub fn append_batch(&mut self, entries: &mut Vec<(Vec<u8>, u64)>) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
         }
@@ -180,7 +180,7 @@ where
 {
     base: PathBuf,
     payload_store: PayloadStoreBuilder<V>,
-    buffer: Vec<(Vec<u8>, u32)>,
+    buffer: Vec<(Vec<u8>, u64)>,
     idx_builder: Option<IndexedBuilder>,
     /// Optional callback for each key merged during final index write.
     write_cb: Box<dyn FnMut()>,
