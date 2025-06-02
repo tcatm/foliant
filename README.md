@@ -125,10 +125,14 @@ foliant produces up to four files per database (the tag index is optional):
   ```
   To read the index, `mmap` the file and scan backwards reading trailers from the end, validating each CRC, and extracting each sub-FST.  The segments are then merged in a single pass into the final lookup structure for queries.
 - `<base>.lookup`: a flat file storing fixed-size lookup table entries (`LookupEntry`), each mapping to a payload pointer. Each entry is an 8-byte little-endian `u64` payload pointer (`offset+1` into the `.payload` file).
-- `<base>.payload`: a flat file storing CBOR‑encoded payloads. The file begins with a 4-byte magic header (`FPAY`) and a 2-byte little-endian format version (`1`). Format v1 is uncompressed. Each payload record then consists of:
-
-1. A 2-byte little-endian length (`u16`)
-2. The CBOR‑encoded value bytes
+- `<base>.payload`: a flat file storing CBOR‑encoded payloads. The file begins with a 4-byte magic header (`FPAY`) and a 2-byte little-endian format version (`1` or `2`).
+  - Format v1 is uncompressed; each payload record then consists of:
+    1. A 2-byte little-endian length (`u16`)
+    2. The CBOR‑encoded value bytes
+  - Format v2 is compressed in zstd blocks of up to 128 KiB uncompressed; each block consists of:
+    1. A 4-byte little-endian uncompressed length (`u32`)
+    2. A 4-byte little-endian compressed length (`u32`)
+    3. The zstd-compressed block data
 
 - `<base>.tags`: (variant C) a monolithic tag index file embedding an FST mapping each tag string to a packed `(offset_in_blob<<32)|length` weight, followed by concatenated Roaring bitmap blobs.
 
