@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::database::Database;
 use crate::error::{IndexError, Result};
-use crate::lookup_table_store::{LookupTableStoreBuilder, LookupTableStore};
+use crate::lookup_table_store::{LookupTableStore, LookupTableStoreBuilder};
 use crate::payload_store::PayloadStoreBuilder;
 
 pub(crate) const CHUNK_SIZE: usize = 128 * 1024;
@@ -267,7 +267,13 @@ impl<V: Serialize> DatabaseBuilder<V> {
                     .map(|(_, bytes)| Map::new(bytes).map_err(IndexError::from))
                     .collect::<Result<Vec<_>>>()?;
 
-                multi_way_merge(maps, &old_lut_store, &final_idx, &final_lut, &mut *self.write_cb)?;
+                multi_way_merge(
+                    maps,
+                    &old_lut_store,
+                    &final_idx,
+                    &final_lut,
+                    &mut *self.write_cb,
+                )?;
 
                 drop(old_lut_store);
                 remove_file(&tmp_lut)?;
