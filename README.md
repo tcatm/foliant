@@ -102,7 +102,7 @@ Sample lines in `sample.jsonl`:
 - `DatabaseBuilder<V>`: builder for creating a new on-disk database; insert keys with optional values (`V: Serialize`), then finalize to write the `.idx`, `.lookup`, and `.payload` files.
 - `Database<V>`: read-only handle (`V: DeserializeOwned`) for querying the index; supports prefix listing (`list`) and value lookup (`get_value`)
 - `Entry`: enum returned by `Database::list`, either `Entry::Key(String)` for full keys or `Entry::CommonPrefix(String)` for grouped prefixes
-- `PayloadStoreBuilder<V>` and `PayloadStore<V>`: internal types for writing and reading the `.payload` file
+- `PayloadStoreBuilder<V, C = CborPayloadCodec>` and `PayloadStore<V, C = CborPayloadCodec>`: internal types for writing and reading the `.payload` file using the provided `PayloadCodec` (defaults to CBOR)
 
 - `TagIndex`: read-only handle for querying a tag index file; supports listing tags (`list_tags`) and retrieving bitmap for a tag (`get`)
 - `TagIndexBuilder`: builder for creating a new tag index file; insert lookup IDs with associated tags, then finalize to write the `.tags` file
@@ -110,7 +110,7 @@ Sample lines in `sample.jsonl`:
 ### Design Notes
 - The index uses the `fst` crate's `MapBuilder` to store keys with `u64` lookup identifiers as weights, each pointing into the flat lookup table.
 - Lookup table entries are fixed-size records mapping lookup IDs to payload pointers, allowing the table to be reordered independently of the FST.
-- Payloads are encoded with CBOR and stored sequentially with a 2-byte little-endian length prefix
+- Payloads are encoded using the provided `PayloadCodec` (defaults to CBOR) and stored sequentially with a 2-byte little-endian length prefix
 - Memory-mapped I/O enables zero-copy, zero-allocation prefix listing and fast value lookup
 - Listings can be grouped by the first occurrence of a custom delimiter
 
