@@ -3,7 +3,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::convert::TryInto;
 use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::Path;
 use std::ptr;
 use std::sync::Arc;
@@ -23,21 +23,21 @@ pub struct PayloadEntryHeader {
     pub len: u16,
 }
 
-/// Builder for appending payloads of type V to a file-backed store, buffering writes in 128KiB.
-pub struct PayloadStoreBuilder<V: Serialize> {
+/// Version 1 (uncompressed) builder for appending payloads of type V to a file-backed store, buffering writes in 128KiB.
+pub struct PayloadStoreBuilderV1<V: Serialize> {
     writer: BufWriter<File>,
     offset: u64,
     phantom: std::marker::PhantomData<V>,
 }
 
-impl<V: Serialize> PayloadStoreBuilder<V> {
+impl<V: Serialize> PayloadStoreBuilderV1<V> {
     /// Open a disk-backed payload store for writing, truncating any existing file.
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let file = File::create(path)?;
         let mut writer = BufWriter::with_capacity(CHUNK_SIZE, file);
         writer.write_all(PAYLOAD_STORE_MAGIC)?;
         writer.write_all(&PAYLOAD_STORE_VERSION.to_le_bytes())?;
-        Ok(PayloadStoreBuilder {
+        Ok(PayloadStoreBuilderV1 {
             writer,
             offset: 0,
             phantom: std::marker::PhantomData,
@@ -70,15 +70,15 @@ impl<V: Serialize> PayloadStoreBuilder<V> {
     }
 }
 
-/// Read-only payload store backed by a memory-mapped file, deserializing into V.
-pub struct PayloadStore<V: DeserializeOwned> {
+/// Version 1 (uncompressed) read-only payload store backed by a memory-mapped file, deserializing into V.
+pub struct PayloadStoreV1<V: DeserializeOwned> {
     buf: Arc<Mmap>,
     /// Offset where payload entries begin (just after the file header).
     data_start: usize,
     phantom: std::marker::PhantomData<V>,
 }
 
-impl<V: DeserializeOwned> PayloadStore<V> {
+impl<V: DeserializeOwned> PayloadStoreV1<V> {
     /// Open a read-only payload store by memory-mapping the file at `path`.
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let file = File::open(path)?;
@@ -108,7 +108,7 @@ impl<V: DeserializeOwned> PayloadStore<V> {
                 "unsupported payload store version",
             ));
         }
-        Ok(PayloadStore {
+        Ok(PayloadStoreV1 {
             buf,
             data_start: PAYLOAD_STORE_HEADER_SIZE,
             phantom: std::marker::PhantomData,
@@ -148,12 +148,55 @@ impl<V: DeserializeOwned> PayloadStore<V> {
     }
 }
 
-impl<V: DeserializeOwned> Clone for PayloadStore<V> {
+impl<V: DeserializeOwned> Clone for PayloadStoreV1<V> {
     fn clone(&self) -> Self {
-        PayloadStore {
+        PayloadStoreV1 {
             buf: self.buf.clone(),
             data_start: self.data_start,
             phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+/// Version 1 (uncompressed) payload store builder.
+pub type PayloadStoreBuilder<V> = PayloadStoreBuilderV1<V>;
+
+/// A versioned read-only payload store that auto-detects the file version
+/// and delegates to the appropriate payload store implementation.
+pub enum PayloadStore<V: DeserializeOwned> {
+    /// Version 1 (uncompressed) payload store.
+    V1(PayloadStoreV1<V>),
+}
+
+impl<V: DeserializeOwned> PayloadStore<V> {
+    /// Open a read-only payload store by memory-mapping the file at `path`
+    /// and auto-detecting the payload store version.
+    pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        let file = File::open(&path)?;
+        let mut header = [0u8; PAYLOAD_STORE_HEADER_SIZE];
+        (&file).read_exact(&mut header)?;
+        if &header[..PAYLOAD_STORE_MAGIC.len()] != PAYLOAD_STORE_MAGIC {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid payload store magic"));
+        }
+        let version = u16::from_le_bytes(header[PAYLOAD_STORE_MAGIC.len()..].try_into().unwrap());
+        match version {
+            1 => PayloadStoreV1::open(path).map(PayloadStore::V1),
+            _ => Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported payload store version")),
+        }
+    }
+
+    /// Retrieve the payload for a given identifier, deserializing to V.
+    pub fn get(&self, ptr_val: u64) -> io::Result<Option<V>> {
+        match self {
+            PayloadStore::V1(store) => store.get(ptr_val),
+        }
+    }
+}
+
+impl<V: DeserializeOwned> Clone for PayloadStore<V> {
+    fn clone(&self) -> Self {
+        match self {
+            PayloadStore::V1(store) => PayloadStore::V1(store.clone()),
         }
     }
 }
