@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::io;
 use std::fs::read_dir;
+use std::io;
 use std::path::Path;
 
 use fst::automaton::Str;
@@ -13,7 +13,7 @@ use serde::de::DeserializeOwned;
 use crate::entry::Entry;
 use crate::error::{IndexError, Result};
 use crate::multi_list::MultiShardListStreamer;
-use crate::payload_store::{PayloadCodec, CborPayloadCodec};
+use crate::payload_store::{CborPayloadCodec, PayloadCodec};
 use crate::shard::Shard;
 use crate::streamer::{PrefixStream, Streamer as DbStreamer};
 use roaring::RoaringBitmap;
@@ -226,5 +226,9 @@ where
     /// Return a slice of shards in the database.
     pub fn shards(&self) -> &[Shard<V, C>] {
         &self.shards
+    }
+    /// Mutable access to shards for attaching tag indices.
+    pub fn shards_mut(&mut self) -> &mut [Shard<V, C>] {
+        &mut self.shards
     }
 }

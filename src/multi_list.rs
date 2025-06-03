@@ -8,8 +8,8 @@ const MAX_KEY_LEN: usize = 256;
 type Bucket = (u8, Vec<(usize, usize, Output)>);
 /// Fixed-capacity small buffer for transitions (inline up to 8 distinct bytes)
 type Transitions = SmallVec<[Bucket; 8]>;
+use crate::payload_store::{CborPayloadCodec, PayloadCodec};
 use serde::de::DeserializeOwned;
-use crate::payload_store::{PayloadCodec, CborPayloadCodec};
 /// Per-frame per-shard traversal state: shard index, current node, and accumulated output
 struct FrameState<'a> {
     shard_idx: usize,
@@ -85,7 +85,11 @@ where
     fn walk_prefix(
         shards: &'a [Shard<V, C>],
         prefix: &[u8],
-    ) -> (Vec<&'a Fst<SharedMmap>>, Vec<&'a Shard<V, C>>, FrameMulti<'a>) {
+    ) -> (
+        Vec<&'a Fst<SharedMmap>>,
+        Vec<&'a Shard<V, C>>,
+        FrameMulti<'a>,
+    ) {
         // Filter shards by prefix and build per-shard state, pre-allocating for efficiency
         let mut fsts: Vec<&'a Fst<SharedMmap>> = Vec::with_capacity(shards.len());
         let mut shards_f: Vec<&'a Shard<V, C>> = Vec::with_capacity(shards.len());

@@ -2,7 +2,6 @@ use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use std::sync::Arc;
 use crate::shard::Shard;
 use fst::automaton::Str;
 use fst::map::Map;
@@ -11,10 +10,13 @@ use fst::IntoStreamer;
 use fst::Streamer as FstStreamer;
 use memmap2::Mmap;
 use roaring::RoaringBitmap;
+use std::sync::Arc;
 
 use crate::builder::CHUNK_SIZE;
 use crate::error::{IndexError, Result};
 use fst::map::MapBuilder;
+use serde_json;
+use crate::Database;
 use std::collections::BTreeMap;
 use std::io::{BufWriter, Write};
 
@@ -29,7 +31,6 @@ pub struct TagIndex {
     /// Byte offset where the Roaring bitmap blobs begin
     blob_offset: usize,
 }
-
 
 /// Backing buffer and slice indices for the embedded FST section within the tags file.
 #[derive(Clone)]
@@ -138,7 +139,6 @@ impl TagIndex {
     }
 }
 
-
 /// Builder for creating a variant-C tag index file (`<base>.tags`).
 pub struct TagIndexBuilder {
     base: PathBuf,
@@ -227,13 +227,13 @@ impl TagIndexBuilder {
         self
     }
 
-    /// Scan a shard's .idx/.payload/.lookup for the given JSON field array of tags
-    /// and write out `<base>.tags`. The optional `on_progress` callback receives
-    /// the cumulative tag-entry count after each record.
-    pub fn build<P: AsRef<Path>>(base: P, tag_field: &str, on_progress: Option<Arc<dyn Fn(u64)>>) -> Result<()> {
-        let base = base.as_ref();
-        let shard = Shard::<serde_json::Value>::open(base)?;
-
+    /// Build a tag index for the given already-open shard.
+    fn build_shard(
+        shard: &Shard<serde_json::Value>,
+        tag_field: &str,
+        on_progress: Option<Arc<dyn Fn(u64)>>,
+    ) -> Result<()> {
+        let base = shard.base();
         let mut builder = TagIndexBuilder::new(base);
         if let Some(cb) = on_progress {
             builder = builder.with_progress(move |n| cb(n));
@@ -249,24 +249,34 @@ impl TagIndexBuilder {
                 }
             }
         }
-
         builder.finish()?;
         Ok(())
     }
 
-    /// Build or rebuild the tag index files by scanning existing JSON payloads for the given tag field.
-    /// This implements the two-pass tag-index process: for a directory of shards or a single shard.
-    pub fn build_index<P: AsRef<Path>>(path: P, tag_field: &str, on_progress: Option<Arc<dyn Fn(u64)>>) -> Result<()> {
-    let base = path.as_ref();
-    if base.is_dir() {
-        for entry in std::fs::read_dir(base)? {
-            let ent = entry?;
-            let shard_base = ent.path();
-            TagIndexBuilder::build(&shard_base, tag_field, on_progress.clone())?;
-        }
-    } else {
-        TagIndexBuilder::build(base, tag_field, on_progress)?;
+    /// Scan a shard's .idx/.payload/.lookup for the given JSON field array of tags
+    /// and write out `<base>.tags`. The optional `on_progress` callback receives
+    /// the cumulative tag-entry count after each record.
+    pub fn build<P: AsRef<Path>>(
+        base: P,
+        tag_field: &str,
+        on_progress: Option<Arc<dyn Fn(u64)>>,
+    ) -> Result<()> {
+        let shard = Shard::<serde_json::Value>::open(base.as_ref())?;
+        TagIndexBuilder::build_shard(&shard, tag_field, on_progress)
     }
-    Ok(())
+
+    /// Build or rebuild the tag index files by scanning existing JSON payloads for the given tag field.
+    /// This requires the database to be opened outside and passed as mutable.
+    /// It writes a `.tags` file for each shard and attaches the loaded TagIndex to the shard.
+    pub fn build_index(
+        db: &mut Database<serde_json::Value>,
+        tag_field: &str,
+        on_progress: Option<Arc<dyn Fn(u64)>>,
+    ) -> Result<()> {
+        for shard in db.shards_mut() {
+            TagIndexBuilder::build_shard(shard, tag_field, on_progress.clone())?;
+            shard.tags = Some(TagIndex::open(shard.base())?);
+        }
+        Ok(())
     }
 }

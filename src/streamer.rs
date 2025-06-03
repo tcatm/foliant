@@ -3,8 +3,8 @@ use fst::Streamer as FstStreamer;
 use serde::de::DeserializeOwned;
 
 use crate::entry::Entry;
+use crate::payload_store::{CborPayloadCodec, PayloadCodec};
 use crate::shard::Shard;
-use crate::payload_store::{PayloadCodec, CborPayloadCodec};
 
 /// Trait for streaming items, similar to `Iterator`.
 pub trait Streamer {

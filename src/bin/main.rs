@@ -149,7 +149,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .progress_chars("#>-")
         );
         let pb_clone = pb.clone();
-        TagIndexBuilder::build_index(index, tag_field, Some(Arc::new(move |_| pb_clone.inc(1))))?;
+        let mut db = Database::<Value>::open(index)?;
+        TagIndexBuilder::build_index(&mut db, tag_field, Some(Arc::new(move |_| pb_clone.inc(1))))?;
         pb.finish();
         Ok(start.elapsed())
     }

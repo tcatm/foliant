@@ -1,7 +1,7 @@
 use memmap2::Mmap;
 use std::fs::File;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Shared memory map cloneable via reference counting.
@@ -24,7 +24,7 @@ use serde::de::DeserializeOwned;
 
 use crate::error::{IndexError, Result};
 use crate::lookup_table_store::LookupTableStore;
-use crate::payload_store::{PayloadStore, PayloadCodec, CborPayloadCodec};
+use crate::payload_store::{CborPayloadCodec, PayloadCodec, PayloadStore};
 use crate::tag_index::TagIndex;
 use fst::automaton::Str;
 use fst::raw::Fst as RawFst;
@@ -39,6 +39,8 @@ pub struct Shard<V, C: PayloadCodec = CborPayloadCodec>
 where
     V: DeserializeOwned,
 {
+    /// Base path prefix for this shard (without extension)
+    pub(crate) base: PathBuf,
     /// Memory-mapped raw index data (shared)
     pub(crate) idx_mmap: SharedMmap,
     /// Parsed FST map for lookups (backed by a shared memory map)
@@ -59,6 +61,7 @@ where
     /// Open a shard from `<base>.idx` and `<base>.payload` files.
     pub fn open<P: AsRef<Path>>(base: P) -> Result<Self> {
         let base = base.as_ref();
+        let base_buf = base.to_path_buf();
         let idx_path = base.with_extension("idx");
         let payload_path = base.with_extension("payload");
         let idx_file = File::open(&idx_path).map_err(|e| {
@@ -101,12 +104,18 @@ where
             Err(IndexError::Io(_)) | Err(IndexError::InvalidFormat(_)) => None,
         };
         Ok(Shard {
+            base: base_buf,
             idx_mmap,
             fst,
             lookup,
             payload,
             tags,
         })
+    }
+
+    /// Return the base path prefix for this shard (without extension).
+    pub fn base(&self) -> &Path {
+        &self.base
     }
 
     /// Return the longest common prefix of all indexed keys in this shard.

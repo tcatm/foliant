@@ -1,3 +1,4 @@
+use lru::LruCache;
 use memmap2::Mmap;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -5,11 +6,10 @@ use serde_cbor;
 use std::convert::TryInto;
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Write};
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::ptr;
 use std::sync::{Arc, Mutex};
-use std::num::NonZeroUsize;
-use lru::LruCache;
 use zstd::block;
 
 const CHUNK_SIZE: usize = 64 * 1024;
@@ -70,13 +70,15 @@ mod tests {
         let path = tmp.path();
         let mut f = File::create(path).unwrap();
         f.write_all(PAYLOAD_STORE_MAGIC).unwrap();
-        f.write_all(&PAYLOAD_STORE_VERSION_V2.to_le_bytes()).unwrap();
+        f.write_all(&PAYLOAD_STORE_VERSION_V2.to_le_bytes())
+            .unwrap();
 
         for i in 0..(V2_CACHE_CAPACITY + 1) {
             let raw = vec![i as u8; CHUNK_SIZE];
             let compressed = block::compress(&raw, 0).unwrap();
             f.write_all(&(raw.len() as u32).to_le_bytes()).unwrap();
-            f.write_all(&(compressed.len() as u32).to_le_bytes()).unwrap();
+            f.write_all(&(compressed.len() as u32).to_le_bytes())
+                .unwrap();
             f.write_all(&compressed).unwrap();
         }
         f.sync_all().unwrap();
@@ -177,8 +179,11 @@ impl<V: Serialize, C: PayloadCodec> PayloadStoreBuilderV2<V, C> {
             let intra = self.uncompressed_buf.len() as u16;
             // pack reserved upper 16 bits (zero), chunk index (next 32 bits), intra-chunk offset (lower 16 bits)
             let id = ((self.chunk_idx as u64) << 16) | (intra as u64);
-            let header = PayloadEntryHeader { len: (data.len() as u16).to_le() };
-            self.uncompressed_buf.extend_from_slice(&header.len.to_le_bytes());
+            let header = PayloadEntryHeader {
+                len: (data.len() as u16).to_le(),
+            };
+            self.uncompressed_buf
+                .extend_from_slice(&header.len.to_le_bytes());
             self.uncompressed_buf.extend_from_slice(&data);
             if self.uncompressed_buf.len() >= CHUNK_SIZE {
                 let compressed = block::compress(&self.uncompressed_buf, 0)
@@ -327,10 +332,16 @@ impl<V: DeserializeOwned, C: PayloadCodec> PayloadStoreV2<V, C> {
         let buf = Arc::new(mmap);
         let raw = buf.as_ref();
         if raw.len() < PAYLOAD_STORE_HEADER_SIZE {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "payload file too small for header"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "payload file too small for header",
+            ));
         }
         if &raw[..PAYLOAD_STORE_MAGIC.len()] != PAYLOAD_STORE_MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid payload store magic"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid payload store magic",
+            ));
         }
         let version = u16::from_le_bytes(
             raw[PAYLOAD_STORE_MAGIC.len()..PAYLOAD_STORE_HEADER_SIZE]
@@ -338,7 +349,10 @@ impl<V: DeserializeOwned, C: PayloadCodec> PayloadStoreV2<V, C> {
                 .unwrap(),
         );
         if version != PAYLOAD_STORE_VERSION_V2 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported payload store version"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported payload store version",
+            ));
         }
         // Build an index of block-header offsets so we can seek directly to chunk N.
         let mut chunk_offsets = Vec::new();
@@ -347,9 +361,8 @@ impl<V: DeserializeOwned, C: PayloadCodec> PayloadStoreV2<V, C> {
         while off + 8 <= raw.len() {
             chunk_offsets.push(off);
             // read lengths to skip this block
-            let compressed_len = u32::from_le_bytes(
-                raw[off + 4..off + 8].try_into().unwrap()
-            ) as usize;
+            let compressed_len =
+                u32::from_le_bytes(raw[off + 4..off + 8].try_into().unwrap()) as usize;
             off = off + 8 + compressed_len;
         }
         Ok(PayloadStoreV2 {
@@ -357,7 +370,7 @@ impl<V: DeserializeOwned, C: PayloadCodec> PayloadStoreV2<V, C> {
             data_start: PAYLOAD_STORE_HEADER_SIZE,
             chunk_offsets,
             cache: Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(V2_CACHE_CAPACITY).unwrap()
+                NonZeroUsize::new(V2_CACHE_CAPACITY).unwrap(),
             ))),
             phantom: std::marker::PhantomData,
         })
@@ -368,12 +381,12 @@ impl<V: DeserializeOwned, C: PayloadCodec> PayloadStoreV2<V, C> {
         if ptr_val == 0 {
             return Ok(None);
         }
-        
+
         // decode chunk index (bits 16..47) and intra-chunk offset (lower 16 bits)
         let id = ptr_val - 1;
         let chunk_idx = ((id >> 16) & 0xFFFF_FFFF) as usize;
         let intra = (id & 0xFFFF) as usize;
-        
+
         let block_data = self.get_chunk(chunk_idx)?;
         self.read_payload_from_chunk(&block_data, intra)
     }
@@ -386,54 +399,69 @@ impl<V: DeserializeOwned, C: PayloadCodec> PayloadStoreV2<V, C> {
                 return Ok(Arc::clone(data));
             }
         }
-        
+
         // locate the target chunk via precomputed offsets
-        let off = *self.chunk_offsets.get(chunk_idx).ok_or_else(||
-            io::Error::new(io::ErrorKind::UnexpectedEof, "missing block header for chunk")
-        )?;
-        
+        let off = *self.chunk_offsets.get(chunk_idx).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "missing block header for chunk",
+            )
+        })?;
+
         let buf = self.buf.as_ref();
         if off + 8 > buf.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated block header"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "truncated block header",
+            ));
         }
-        
+
         let uncompressed_len = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
         let compressed_len = u32::from_le_bytes(buf[off + 4..off + 8].try_into().unwrap()) as usize;
         let comp_off = off + 8;
-        
+
         if comp_off + compressed_len > buf.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated block data"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "truncated block data",
+            ));
         }
-        
+
         let comp = &buf[comp_off..comp_off + compressed_len];
-        let data = Arc::new(
-            block::decompress(comp, uncompressed_len)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "zstd decompress failed"))?
-        );
-        
+        let data =
+            Arc::new(block::decompress(comp, uncompressed_len).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "zstd decompress failed")
+            })?);
+
         {
             let mut cache = self.cache.lock().unwrap();
             cache.put(chunk_idx, Arc::clone(&data));
         }
-        
+
         Ok(data)
     }
 
     fn read_payload_from_chunk(&self, block_data: &[u8], intra: usize) -> io::Result<Option<V>> {
         if intra + std::mem::size_of::<PayloadEntryHeader>() > block_data.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated payload length"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "truncated payload length",
+            ));
         }
-        
+
         let header = unsafe {
             ptr::read_unaligned(block_data.as_ptr().add(intra) as *const PayloadEntryHeader)
         };
         let val_len = u16::from_le(header.len) as usize;
         let start = intra + std::mem::size_of::<PayloadEntryHeader>();
-        
+
         if start + val_len > block_data.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated payload data"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "truncated payload data",
+            ));
         }
-        
+
         let val = C::decode(&block_data[start..start + val_len])?;
         Ok(Some(val))
     }
@@ -474,7 +502,10 @@ impl<V: DeserializeOwned, C: PayloadCodec> PayloadStore<V, C> {
         let mut header = [0u8; PAYLOAD_STORE_HEADER_SIZE];
         (&file).read_exact(&mut header)?;
         if &header[..PAYLOAD_STORE_MAGIC.len()] != PAYLOAD_STORE_MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid payload store magic"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid payload store magic",
+            ));
         }
         let version = u16::from_le_bytes(header[PAYLOAD_STORE_MAGIC.len()..].try_into().unwrap());
         match version {

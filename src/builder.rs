@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use crate::database::Database;
 use crate::error::{IndexError, Result};
 use crate::lookup_table_store::{LookupTableStore, LookupTableStoreBuilder};
-use crate::payload_store::{PayloadStoreBuilderV2, PayloadCodec, CborPayloadCodec};
+use crate::payload_store::{CborPayloadCodec, PayloadCodec, PayloadStoreBuilderV2};
 
 pub(crate) const CHUNK_SIZE: usize = 128 * 1024;
 const INSERT_BATCH_SIZE: usize = 10_000;

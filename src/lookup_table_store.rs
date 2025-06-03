@@ -3,8 +3,8 @@ use std::io::{self, BufWriter};
 use std::path::Path;
 use std::sync::Arc;
 
-use memmap2::Mmap;
 use fst::{Map, MapBuilder};
+use memmap2::Mmap;
 
 /// Wrapper around an atomically-reference-counted memory map for FST data.
 #[derive(Clone)]
@@ -36,15 +36,16 @@ impl LookupTableStoreBuilder {
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let file = File::create(path)?;
         let writer = BufWriter::new(file);
-        let inner = MapBuilder::new(writer)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let inner =
+            MapBuilder::new(writer).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         Ok(LookupTableStoreBuilder { inner, count: 0 })
     }
 
     /// Append a payload pointer and return a new 32-bit identifier (starting from 1).
     pub fn append(&mut self, payload_ptr: u64) -> io::Result<u32> {
         let id = self.count.wrapping_add(1);
-        self.inner.insert(&id.to_be_bytes(), payload_ptr)
+        self.inner
+            .insert(&id.to_be_bytes(), payload_ptr)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         self.count = id;
         Ok(id)
@@ -52,7 +53,8 @@ impl LookupTableStoreBuilder {
 
     /// Finish writing and flush the lookup FST to disk.
     pub fn close(self) -> io::Result<()> {
-        self.inner.finish()
+        self.inner
+            .finish()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         Ok(())
     }
@@ -64,15 +66,14 @@ pub struct LookupTableStore {
     map: Map<MmapArc>,
 }
 
-
 impl LookupTableStore {
     /// Open a read-only lookup table store by memory-mapping the FST at `path`.
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let file = File::open(path)?;
         let mmap = unsafe { Mmap::map(&file)? };
         let data = MmapArc(Arc::new(mmap));
-        let map = Map::new(data.clone())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let map =
+            Map::new(data.clone()).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         Ok(LookupTableStore { map })
     }
 

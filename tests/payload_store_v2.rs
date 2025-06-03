@@ -1,8 +1,8 @@
 use foliant::{PayloadStoreBuilderV2, PayloadStoreV2};
+use std::convert::TryInto;
 use std::error::Error;
 use std::fs::File;
 use std::io::Read;
-use std::convert::TryInto;
 use tempfile::NamedTempFile;
 use zstd::block;
 
@@ -61,7 +61,8 @@ fn v2_multi_chunk_inspection() -> Result<(), Box<dyn Error>> {
     eprintln!("=== V2 multi-chunk block inspection ===");
     for (i, &id) in [id1, id2, id3].iter().enumerate() {
         let uncompressed_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
-        let compressed_len = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let compressed_len =
+            u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
         pos += 8;
         let comp = &data[pos..pos + compressed_len];
         let block_data = block::decompress(comp, uncompressed_len)?;
@@ -101,7 +102,10 @@ fn v2_header_length_truncation() -> Result<(), Box<dyn Error>> {
     let block_data = block::decompress(comp, uncompressed_len)?;
     // Read the truncated header.len value
     let stored_len = u16::from_le_bytes(block_data[0..2].try_into().unwrap()) as usize;
-    eprintln!("stored header.len = {}, actual payload bytes = {}", stored_len, huge);
+    eprintln!(
+        "stored header.len = {}, actual payload bytes = {}",
+        stored_len, huge
+    );
     assert!(stored_len != huge, "header.len did not overflow/truncate");
     Ok(())
 }
