@@ -108,8 +108,8 @@ Sample lines in `sample.jsonl`:
 - `TagIndexBuilder`: builder for creating a new tag index file; insert lookup IDs with associated tags, then finalize to write the `.tags` file
 
 ### Design Notes
-- The index uses the `fst` crate's `MapBuilder` to store keys with `u64` lookup identifiers as weights, each pointing into the flat lookup table.
-- Lookup table entries are fixed-size records mapping lookup IDs to payload pointers, allowing the table to be reordered independently of the FST.
+- The index uses the `fst` crate's `MapBuilder` to store keys with `u64` lookup identifiers as weights, each pointing into the lookup-FST mapping IDs to payload pointers.
+- The lookup table is itself an on-disk FST mapping 32-bit big-endian lookup IDs to 64-bit payload pointers as weights, enabling atomic, checksum-validated writes and zero-copy memory-mapped queries.
 - Payloads are encoded using the provided `PayloadCodec` (defaults to CBOR) and stored sequentially with a 2-byte little-endian length prefix
 - Memory-mapped I/O enables zero-copy, zero-allocation prefix listing and fast value lookup
 - Listings can be grouped by the first occurrence of a custom delimiter
@@ -124,7 +124,7 @@ foliant produces up to four files per database (the tag index is optional):
   u32 seg_id | u64 start_off | u32 crc32(seg_id∥start_off)
   ```
   To read the index, `mmap` the file and scan backwards reading trailers from the end, validating each CRC, and extracting each sub-FST.  The segments are then merged in a single pass into the final lookup structure for queries.
-- `<base>.lookup`: a flat file storing fixed-size lookup table entries (`LookupEntry`), each mapping to a payload pointer. Each entry is an 8-byte little-endian `u64` payload pointer (`offset+1` into the `.payload` file).
+- `<base>.lookup`: an on-disk FST mapping 32-bit big-endian lookup IDs to 64-bit payload pointers (encoded as FST weights). To read it, memory-map the file and use the `fst::Map` API (e.g. `map.get(&id.to_be_bytes())`) to fetch the payload file offset (stored as `offset+1` in the `.payload` file).
 - `<base>.payload`: a flat file storing CBOR‑encoded payloads. The file begins with a 4-byte magic header (`FPAY`) and a 2-byte little-endian format version (`1` or `2`).
   - Format v1 is uncompressed; each payload record then consists of:
     1. A 2-byte little-endian length (`u16`)
