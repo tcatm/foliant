@@ -3,7 +3,7 @@ use foliant::IndexError;
 use foliant::SegmentInfo;
 use foliant::Streamer;
 use foliant::TagMode;
-use foliant::{build_tags_index, Database, DatabaseBuilder, Entry};
+use foliant::{Database, DatabaseBuilder, Entry, TagIndexBuilder};
 use fst::map::Map;
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
@@ -149,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .progress_chars("#>-")
         );
         let pb_clone = pb.clone();
-        build_tags_index(index, tag_field, Some(Arc::new(move |_| pb_clone.inc(1))))?;
+        TagIndexBuilder::build_index(index, tag_field, Some(Arc::new(move |_| pb_clone.inc(1))))?;
         pb.finish();
         Ok(start.elapsed())
     }

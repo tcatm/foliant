@@ -24,7 +24,7 @@ use serde::de::DeserializeOwned;
 
 use crate::error::{IndexError, Result};
 use crate::lookup_table_store::LookupTableStore;
-use crate::payload_store::PayloadStore;
+use crate::payload_store::{PayloadStore, PayloadCodec, CborPayloadCodec};
 use crate::tag_index::TagIndex;
 use fst::automaton::Str;
 use fst::raw::Fst as RawFst;
@@ -34,7 +34,8 @@ use fst::Streamer as FstStreamer;
 use roaring::bitmap::IntoIter;
 use roaring::RoaringBitmap;
 /// One shard of a database: a memory-mapped FST map and its payload store.
-pub struct Shard<V>
+/// One shard of a database: a memory-mapped FST map and its payload store.
+pub struct Shard<V, C: PayloadCodec = CborPayloadCodec>
 where
     V: DeserializeOwned,
 {
@@ -45,14 +46,15 @@ where
     /// Read-only lookup table for payload indirection
     pub(crate) lookup: LookupTableStore,
     /// Associated payload store
-    pub(crate) payload: PayloadStore<V>,
+    pub(crate) payload: PayloadStore<V, C>,
     /// Optional tag index for this shard (variant-C .tags file)
     pub(crate) tags: Option<TagIndex>,
 }
 
-impl<V> Shard<V>
+impl<V, C> Shard<V, C>
 where
     V: DeserializeOwned,
+    C: PayloadCodec,
 {
     /// Open a shard from `<base>.idx` and `<base>.payload` files.
     pub fn open<P: AsRef<Path>>(base: P) -> Result<Self> {
@@ -87,7 +89,7 @@ where
                 format!("failed to open lookup file {:?}: {}", lookup_path, e),
             ))
         })?;
-        let payload = PayloadStore::open(&payload_path).map_err(|e| {
+        let payload = PayloadStore::<V, C>::open(&payload_path).map_err(|e| {
             IndexError::Io(io::Error::new(
                 e.kind(),
                 format!("failed to open payload file {:?}: {}", payload_path, e),
@@ -229,17 +231,19 @@ where
             }
         }
 
-        struct ShardPtrStreamer<'a, V>
+        struct ShardPtrStreamer<'a, V, C>
         where
             V: DeserializeOwned,
+            C: PayloadCodec,
         {
-            shard: &'a Shard<V>,
+            shard: &'a Shard<V, C>,
             ptr_iter: IntoIter,
             prefix: Option<&'a str>,
         }
-        impl<'a, V> crate::Streamer for ShardPtrStreamer<'a, V>
+        impl<'a, V, C> crate::Streamer for ShardPtrStreamer<'a, V, C>
         where
             V: DeserializeOwned,
+            C: PayloadCodec,
         {
             type Item = crate::Entry<V>;
             fn next(&mut self) -> Option<Self::Item> {

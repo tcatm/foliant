@@ -99,8 +99,8 @@ Sample lines in `sample.jsonl`:
 ## Developer Guide
 
 ### Key Types
-- `DatabaseBuilder<V>`: builder for creating a new on-disk database; insert keys with optional values (`V: Serialize`), then finalize to write the `.idx`, `.lookup`, and `.payload` files.
-- `Database<V>`: read-only handle (`V: DeserializeOwned`) for querying the index; supports prefix listing (`list`) and value lookup (`get_value`)
+- `DatabaseBuilder<V, C = CborPayloadCodec>`: builder for creating a new on-disk database; insert keys with optional values (`V: Serialize`), then finalize to write the `.idx`, `.lookup`, and `.payload` files.
+- `Database<V, C = CborPayloadCodec>`: read-only handle (`V: DeserializeOwned`) for querying the index; supports prefix listing (`list`) and value lookup (`get_value`)
 - `Entry`: enum returned by `Database::list`, either `Entry::Key(String)` for full keys or `Entry::CommonPrefix(String)` for grouped prefixes
 - `PayloadStoreBuilder<V, C = CborPayloadCodec>` and `PayloadStore<V, C = CborPayloadCodec>`: internal types for writing and reading the `.payload` file using the provided `PayloadCodec` (defaults to CBOR)
 

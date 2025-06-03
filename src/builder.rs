@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use crate::database::Database;
 use crate::error::{IndexError, Result};
 use crate::lookup_table_store::{LookupTableStore, LookupTableStoreBuilder};
-use crate::payload_store::PayloadStoreBuilder;
+use crate::payload_store::{PayloadStoreBuilderV2, PayloadCodec, CborPayloadCodec};
 
 pub(crate) const CHUNK_SIZE: usize = 128 * 1024;
 const INSERT_BATCH_SIZE: usize = 10_000;
@@ -172,14 +172,15 @@ impl IndexedBuilder {
     }
 }
 
-/// Builder for creating a new on-disk database with values of type V.
+/// Builder for creating a new on-disk database with values of type `V`, encoded via `C`.
 /// Insert keys with `insert()`, then call `close()` or `into_database()`.
-pub struct DatabaseBuilder<V = Value>
+pub struct DatabaseBuilder<V = Value, C: PayloadCodec = CborPayloadCodec>
 where
     V: Serialize,
+    C: PayloadCodec,
 {
     base: PathBuf,
-    payload_store: PayloadStoreBuilder<V>,
+    payload_store: PayloadStoreBuilderV2<V, C>,
     buffer: Vec<(Vec<u8>, u64)>,
     idx_builder: Option<IndexedBuilder>,
     /// Optional callback for each key merged during final index write.
@@ -188,14 +189,18 @@ where
     before_merge_cb: Box<dyn FnMut(&[SegmentInfo])>,
 }
 
-impl<V: Serialize> DatabaseBuilder<V> {
+impl<V, C> DatabaseBuilder<V, C>
+where
+    V: Serialize,
+    C: PayloadCodec,
+{
     /// Create a new database builder writing to `<base>.payload`, buffering keys for sorted insertion.
     pub fn new<P: AsRef<Path>>(base: P) -> Result<Self> {
         let base = base.as_ref().to_path_buf();
         let payload_path = base.with_extension("payload");
-        let payload_store = PayloadStoreBuilder::<V>::open(&payload_path)?;
+        let payload_store = PayloadStoreBuilderV2::<V, C>::open(&payload_path)?;
 
-        Ok(DatabaseBuilder {
+        Ok(DatabaseBuilder::<V, C> {
             base,
             payload_store,
             buffer: Vec::with_capacity(INSERT_BATCH_SIZE),
@@ -320,14 +325,14 @@ impl<V: Serialize> DatabaseBuilder<V> {
         self.before_merge_cb = Box::new(cb);
         self
     }
-    /// Consume the builder, write files, and open a read-only Database<V> via mmap.
-    pub fn into_database(self) -> Result<Database<V>>
+    /// Consume the builder, write files, and open a read-only `Database<V, C>` via mmap.
+    pub fn into_database(self) -> Result<Database<V, C>>
     where
         V: DeserializeOwned,
     {
         let base = self.base.clone();
         self.close()?;
-        Database::<V>::open(base)
+        Database::<V, C>::open(base)
     }
 }
 

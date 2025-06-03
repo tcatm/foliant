@@ -1,4 +1,4 @@
-use foliant::{build_tags_index, Database, DatabaseBuilder, Entry, Streamer, TagMode};
+use foliant::{Database, DatabaseBuilder, Entry, Streamer, TagMode, TagIndexBuilder};
 use serde_json::{json, Value};
 use std::fs;
 use tempfile::tempdir;
@@ -14,7 +14,7 @@ fn list_by_tags_basic() -> Result<(), Box<dyn std::error::Error>> {
     builder.insert("date", Some(json!({"tags":["fruit","brown"]})));
     builder.insert("eggplant", Some(json!({"tags":["vegetable","purple"]})));
     builder.close()?;
-    build_tags_index(&base, "tags", None)?;
+    TagIndexBuilder::build_index(&base, "tags", None)?;
 
     let db: Database<Value> = Database::open(&base)?;
 
@@ -44,7 +44,7 @@ fn list_by_tags_empty_tags() -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("a", Some(json!({"tags":["tag"]})));
     builder.close()?;
-    build_tags_index(&base, "tags", None)?;
+    TagIndexBuilder::build_index(&base, "tags", None)?;
     let db: Database<Value> = Database::open(&base)?;
     assert!(db_list_tags(&db, &[], TagMode::Or, None).is_empty());
     assert!(db_list_tags(&db, &[], TagMode::And, None).is_empty());
@@ -59,7 +59,7 @@ fn list_by_tags_unknown_tags() -> Result<(), Box<dyn std::error::Error>> {
     builder.insert("a", Some(json!({"tags":["t1"]})));
     builder.insert("b", Some(json!({"tags":["t2"]})));
     builder.close()?;
-    build_tags_index(&base, "tags", None)?;
+    TagIndexBuilder::build_index(&base, "tags", None)?;
     let db: Database<Value> = Database::open(&base)?;
     assert!(db_list_tags(&db, &["nope"], TagMode::Or, None).is_empty());
     assert!(db_list_tags(&db, &["nope"], TagMode::And, None).is_empty());
@@ -74,7 +74,7 @@ fn list_by_tags_no_overlap_and() -> Result<(), Box<dyn std::error::Error>> {
     builder.insert("a", Some(json!({"tags":["x"]})));
     builder.insert("b", Some(json!({"tags":["y"]})));
     builder.close()?;
-    build_tags_index(&base, "tags", None)?;
+    TagIndexBuilder::build_index(&base, "tags", None)?;
     let db: Database<Value> = Database::open(&base)?;
     assert!(db_list_tags(&db, &["x", "y"], TagMode::And, None).is_empty());
     Ok(())
@@ -89,7 +89,7 @@ fn list_by_tags_with_values() -> Result<(), Box<dyn std::error::Error>> {
     builder.insert("y", Some(json!({"tags":["b"],"value":2})));
     builder.insert("z", Some(json!({"tags":["a","b"],"value":3})));
     builder.close()?;
-    build_tags_index(&base, "tags", None)?;
+    TagIndexBuilder::build_index(&base, "tags", None)?;
     let db: Database<Value> = Database::open(&base)?;
     let entries: Vec<Entry<Value>> = db.list_by_tags(&["a"], &[], TagMode::Or, None)?.collect();
     let mut kvs: Vec<(String, Option<Value>)> = entries
@@ -125,7 +125,7 @@ fn list_by_tags_multi_shard() -> Result<(), Box<dyn std::error::Error>> {
         b.insert("qux", Some(json!({"tags":["t3"]})));
         b.close()?;
     }
-    build_tags_index(&base_dir, "tags", None)?;
+    TagIndexBuilder::build_index(&base_dir, "tags", None)?;
     let db: Database<Value> = Database::open(&base_dir)?;
     let or_list = db_list_tags(&db, &["t1", "t2"], TagMode::Or, None);
     assert_eq!(
@@ -152,7 +152,7 @@ fn list_by_tags_merge_reorder_tags() -> Result<(), Box<dyn std::error::Error>> {
     }
     builder.flush_fst()?;
     builder.close()?;
-    build_tags_index(&base, "tags", None)?;
+    TagIndexBuilder::build_index(&base, "tags", None)?;
 
     let db: Database<Value> = Database::open(&base)?;
     let even_keys = db_list_tags(&db, &["even"], TagMode::Or, None);
@@ -210,7 +210,7 @@ fn list_by_tags_merge_reorder_image_text() -> Result<(), Box<dyn std::error::Err
         }
     }
     builder.close()?;
-    build_tags_index(&base, "tags", None)?;
+    TagIndexBuilder::build_index(&base, "tags", None)?;
 
     let db: Database<Value> = Database::open(&base)?;
     // Single-tag queries should return exactly the respective keys.

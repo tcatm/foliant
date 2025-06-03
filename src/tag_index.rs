@@ -2,6 +2,8 @@ use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use std::sync::Arc;
+use crate::shard::Shard;
 use fst::automaton::Str;
 use fst::map::Map;
 use fst::Automaton;
@@ -27,6 +29,7 @@ pub struct TagIndex {
     /// Byte offset where the Roaring bitmap blobs begin
     blob_offset: usize,
 }
+
 
 /// Backing buffer and slice indices for the embedded FST section within the tags file.
 #[derive(Clone)]
@@ -135,44 +138,6 @@ impl TagIndex {
     }
 }
 
-/// Write a variant-C tag index file (`<base>.tags`) from precomputed tag bitmaps.
-pub fn write_tag_index_file<P: AsRef<Path>>(
-    base: P,
-    tag_bitmaps: &BTreeMap<String, RoaringBitmap>,
-) -> Result<()> {
-    let base = base.as_ref();
-    if tag_bitmaps.is_empty() {
-        return Ok(());
-    }
-    let mut blobs = Vec::with_capacity(tag_bitmaps.len());
-    for bitmap in tag_bitmaps.values() {
-        let mut buf = Vec::new();
-        bitmap.serialize_into(&mut buf).map_err(IndexError::Io)?;
-        blobs.push(buf);
-    }
-    let mut fst_section = Vec::new();
-    let mut fst_builder = MapBuilder::new(&mut fst_section)?;
-    let mut offset = 0u64;
-    for ((tag, _), blob_data) in tag_bitmaps.iter().zip(blobs.iter()) {
-        let len = blob_data.len() as u64;
-        let packed = (offset << 32) | len;
-        fst_builder.insert(tag, packed)?;
-        offset += len;
-    }
-    fst_builder.finish()?;
-
-    let tags_path = base.with_extension("tags");
-    let tags_file = File::create(&tags_path)?;
-    let mut writer = BufWriter::with_capacity(CHUNK_SIZE, tags_file);
-    writer.write_all(b"FTGT")?;
-    writer.write_all(&1u16.to_le_bytes())?;
-    writer.write_all(&(fst_section.len() as u64).to_le_bytes())?;
-    writer.write_all(&fst_section)?;
-    for blob in blobs {
-        writer.write_all(&blob)?;
-    }
-    Ok(())
-}
 
 /// Builder for creating a variant-C tag index file (`<base>.tags`).
 pub struct TagIndexBuilder {
@@ -212,7 +177,44 @@ impl TagIndexBuilder {
 
     /// Consume the builder and write out the `.tags` file.
     pub fn finish(self) -> Result<()> {
-        write_tag_index_file(self.base, &self.tag_bitmaps)
+        let base = self.base;
+        let tag_bitmaps = self.tag_bitmaps;
+        if tag_bitmaps.is_empty() {
+            return Ok(());
+        }
+
+        // Serialize each bitmap into its own Vec<u8>
+        let mut blobs = Vec::with_capacity(tag_bitmaps.len());
+        for bitmap in tag_bitmaps.values() {
+            let mut buf = Vec::new();
+            bitmap.serialize_into(&mut buf).map_err(IndexError::Io)?;
+            blobs.push(buf);
+        }
+
+        // Build an FST mapping tag -> packed(offset<<32 | length)
+        let mut fst_section = Vec::new();
+        let mut fst_builder = MapBuilder::new(&mut fst_section)?;
+        let mut offset = 0u64;
+        for ((tag, _), blob_data) in tag_bitmaps.iter().zip(blobs.iter()) {
+            let len = blob_data.len() as u64;
+            let packed = (offset << 32) | len;
+            fst_builder.insert(tag, packed)?;
+            offset += len;
+        }
+        fst_builder.finish()?;
+
+        // Write header, FST section, and blobs to `<base>.tags`
+        let tags_path = base.with_extension("tags");
+        let tags_file = File::create(&tags_path)?;
+        let mut writer = BufWriter::with_capacity(CHUNK_SIZE, tags_file);
+        writer.write_all(b"FTGT")?;
+        writer.write_all(&1u16.to_le_bytes())?;
+        writer.write_all(&(fst_section.len() as u64).to_le_bytes())?;
+        writer.write_all(&fst_section)?;
+        for blob in blobs {
+            writer.write_all(&blob)?;
+        }
+        Ok(())
     }
 
     /// Attach a progress‐callback: called with the cumulative tag‐entry count
@@ -223,5 +225,48 @@ impl TagIndexBuilder {
     {
         self.on_progress = Some(Box::new(cb));
         self
+    }
+
+    /// Scan a shard's .idx/.payload/.lookup for the given JSON field array of tags
+    /// and write out `<base>.tags`. The optional `on_progress` callback receives
+    /// the cumulative tag-entry count after each record.
+    pub fn build<P: AsRef<Path>>(base: P, tag_field: &str, on_progress: Option<Arc<dyn Fn(u64)>>) -> Result<()> {
+        let base = base.as_ref();
+        let shard = Shard::<serde_json::Value>::open(base)?;
+
+        let mut builder = TagIndexBuilder::new(base);
+        if let Some(cb) = on_progress {
+            builder = builder.with_progress(move |n| cb(n));
+        }
+        let mut stream = shard.fst.stream();
+        while let Some((_, weight)) = stream.next() {
+            let shard_ptr = weight as u32;
+            let lut = shard.lookup.get(shard_ptr)?;
+            let payload_ptr = lut.payload_ptr;
+            if let Some(val) = shard.payload.get(payload_ptr)? {
+                if let Some(arr) = val.get(tag_field).and_then(|v| v.as_array()) {
+                    builder.insert_tags(shard_ptr, arr.iter().filter_map(|v| v.as_str()));
+                }
+            }
+        }
+
+        builder.finish()?;
+        Ok(())
+    }
+
+    /// Build or rebuild the tag index files by scanning existing JSON payloads for the given tag field.
+    /// This implements the two-pass tag-index process: for a directory of shards or a single shard.
+    pub fn build_index<P: AsRef<Path>>(path: P, tag_field: &str, on_progress: Option<Arc<dyn Fn(u64)>>) -> Result<()> {
+    let base = path.as_ref();
+    if base.is_dir() {
+        for entry in std::fs::read_dir(base)? {
+            let ent = entry?;
+            let shard_base = ent.path();
+            TagIndexBuilder::build(&shard_base, tag_field, on_progress.clone())?;
+        }
+    } else {
+        TagIndexBuilder::build(base, tag_field, on_progress)?;
+    }
+    Ok(())
     }
 }

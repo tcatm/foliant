@@ -4,6 +4,7 @@ use serde::de::DeserializeOwned;
 
 use crate::entry::Entry;
 use crate::shard::Shard;
+use crate::payload_store::{PayloadCodec, CborPayloadCodec};
 
 /// Trait for streaming items, similar to `Iterator`.
 pub trait Streamer {
@@ -36,17 +37,19 @@ where
 }
 
 /// Streamer for direct prefix listing when no delimiter grouping is needed
-pub struct PrefixStream<'a, V>
+pub struct PrefixStream<'a, V, C: PayloadCodec = CborPayloadCodec>
 where
     V: DeserializeOwned,
+    C: PayloadCodec,
 {
     pub(crate) stream: Union<'a>,
-    pub(crate) shards: Vec<&'a Shard<V>>,
+    pub(crate) shards: Vec<&'a Shard<V, C>>,
 }
 
-impl<V> Streamer for PrefixStream<'_, V>
+impl<V, C> Streamer for PrefixStream<'_, V, C>
 where
     V: DeserializeOwned,
+    C: PayloadCodec,
 {
     type Item = Entry<V>;
     fn next(&mut self) -> Option<Self::Item> {

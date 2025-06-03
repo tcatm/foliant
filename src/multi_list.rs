@@ -9,6 +9,7 @@ type Bucket = (u8, Vec<(usize, usize, Output)>);
 /// Fixed-capacity small buffer for transitions (inline up to 8 distinct bytes)
 type Transitions = SmallVec<[Bucket; 8]>;
 use serde::de::DeserializeOwned;
+use crate::payload_store::{PayloadCodec, CborPayloadCodec};
 /// Per-frame per-shard traversal state: shard index, current node, and accumulated output
 struct FrameState<'a> {
     shard_idx: usize,
@@ -53,14 +54,15 @@ impl<'a> FrameMulti<'a> {
 }
 
 /// Multi-shard DFS streamer that groups at a delimiter, yielding keys and common prefixes
-pub struct MultiShardListStreamer<'a, V>
+pub struct MultiShardListStreamer<'a, V, C: PayloadCodec = CborPayloadCodec>
 where
     V: DeserializeOwned,
+    C: PayloadCodec,
 {
     /// Raw FSTs for each matching shard
     fsts: Vec<&'a Fst<SharedMmap>>,
     /// References to shards corresponding to each FST
-    shards: Vec<&'a Shard<V>>,
+    shards: Vec<&'a Shard<V, C>>,
     /// Optional delimiter byte for grouping
     delim: Option<u8>,
     /// Shared buffer of the current key prefix bytes
@@ -74,18 +76,19 @@ where
 }
 
 /// Walks each shard’s FST by `prefix`, keeping only those that match.
-impl<'a, V> MultiShardListStreamer<'a, V>
+impl<'a, V, C> MultiShardListStreamer<'a, V, C>
 where
     V: DeserializeOwned,
+    C: PayloadCodec,
 {
     /// Walks each shard’s FST by `prefix`, returning the FSTs, shards, and the initial frame.
     fn walk_prefix(
-        shards: &'a [Shard<V>],
+        shards: &'a [Shard<V, C>],
         prefix: &[u8],
-    ) -> (Vec<&'a Fst<SharedMmap>>, Vec<&'a Shard<V>>, FrameMulti<'a>) {
+    ) -> (Vec<&'a Fst<SharedMmap>>, Vec<&'a Shard<V, C>>, FrameMulti<'a>) {
         // Filter shards by prefix and build per-shard state, pre-allocating for efficiency
         let mut fsts: Vec<&'a Fst<SharedMmap>> = Vec::with_capacity(shards.len());
-        let mut shards_f: Vec<&'a Shard<V>> = Vec::with_capacity(shards.len());
+        let mut shards_f: Vec<&'a Shard<V, C>> = Vec::with_capacity(shards.len());
         let mut states: Vec<FrameState<'a>> = Vec::with_capacity(shards.len());
         for shard in shards {
             let raw_fst = shard.fst.as_fst();
@@ -126,10 +129,10 @@ where
     }
 
     /// Create a new multi-shard listing streamer for prefix bytes and optional delimiter
-    pub(crate) fn new(shards: &'a [Shard<V>], prefix: Vec<u8>, delim: Option<u8>) -> Self {
+    pub(crate) fn new(shards: &'a [Shard<V, C>], prefix: Vec<u8>, delim: Option<u8>) -> Self {
         let (fsts, shards_f, initial_frame) = Self::walk_prefix(shards, &prefix);
 
-        let mut streamer = MultiShardListStreamer {
+        let mut streamer = Self {
             fsts,
             shards: shards_f,
             delim,
@@ -148,9 +151,10 @@ where
     }
 }
 
-impl<'a, V> Streamer for MultiShardListStreamer<'a, V>
+impl<'a, V, C> Streamer for MultiShardListStreamer<'a, V, C>
 where
     V: DeserializeOwned,
+    C: PayloadCodec,
 {
     type Item = Entry<V>;
     fn next(&mut self) -> Option<Self::Item> {

@@ -1,34 +1,31 @@
 use std::collections::HashMap;
-use std::fs::{read_dir, File};
 use std::io;
+use std::fs::read_dir;
 use std::path::Path;
 
 use fst::automaton::Str;
-use fst::map::{Map, OpBuilder};
+use fst::map::OpBuilder;
 use fst::Automaton;
 use fst::IntoStreamer;
-use fst::Streamer;
 use regex_automata::sparse::SparseDFA;
 use serde::de::DeserializeOwned;
 
 use crate::entry::Entry;
 use crate::error::{IndexError, Result};
-use crate::lookup_table_store::LookupTableStore;
 use crate::multi_list::MultiShardListStreamer;
-use crate::payload_store::PayloadStore;
+use crate::payload_store::{PayloadCodec, CborPayloadCodec};
 use crate::shard::Shard;
 use crate::streamer::{PrefixStream, Streamer as DbStreamer};
-use crate::tag_index::TagIndexBuilder;
-use memmap2::Mmap;
 use roaring::RoaringBitmap;
-use std::sync::Arc;
 
 /// Read-only database: union of one or more shards (FST maps + payload stores)
-pub struct Database<V = serde_cbor::Value>
+/// Read-only database: union of one or more shards (FST maps + payload stores)
+pub struct Database<V = serde_cbor::Value, C: PayloadCodec = CborPayloadCodec>
 where
     V: DeserializeOwned,
+    C: PayloadCodec,
 {
-    shards: Vec<Shard<V>>,
+    shards: Vec<Shard<V, C>>,
 }
 
 /// Mode for combining multiple tags in `list_by_tags`.
@@ -40,9 +37,10 @@ pub enum TagMode {
     Or,
 }
 
-impl<V> Database<V>
+impl<V, C> Database<V, C>
 where
     V: DeserializeOwned,
+    C: PayloadCodec,
 {
     /// Create an empty database (no shards).
     pub fn new() -> Self {
@@ -51,7 +49,7 @@ where
 
     /// Add one shard (opened from `<base>.idx` and `<base>.payload`).
     pub fn add_shard<P: AsRef<Path>>(&mut self, base: P) -> Result<()> {
-        let shard = Shard::open(base)?;
+        let shard = Shard::<V, C>::open(base)?;
         self.shards.push(shard);
         Ok(())
     }
@@ -59,7 +57,7 @@ where
     /// Open a database from either a single shard (file) or a directory of shards.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let base = path.as_ref();
-        let mut db = Database::new();
+        let mut db = Database::<V, C>::new();
         if base.is_dir() {
             for entry in read_dir(base)? {
                 let ent = entry?;
@@ -108,7 +106,7 @@ where
     /// `re`: a regex string; matches are anchored to the full key.
     ///
     /// Returns a stream of `Entry<V>` (keys matching the regex).
-    pub fn grep<'a>(&'a self, prefix: Option<&'a str>, re: &str) -> Result<PrefixStream<'a, V>> {
+    pub fn grep<'a>(&'a self, prefix: Option<&'a str>, re: &str) -> Result<PrefixStream<'a, V, C>> {
         let dfa = SparseDFA::new(re).map_err(|e| {
             IndexError::Io(io::Error::new(
                 io::ErrorKind::Other,
@@ -117,7 +115,7 @@ where
         })?;
         let prefix_str = prefix.unwrap_or("");
         let start = Str::new(prefix_str).starts_with();
-        let relevant_shards: Vec<&Shard<V>> = if prefix_str.is_empty() {
+        let relevant_shards: Vec<&Shard<V, C>> = if prefix_str.is_empty() {
             self.shards.iter().collect()
         } else {
             self.shards
@@ -226,71 +224,7 @@ where
     }
 
     /// Return a slice of shards in the database.
-    pub fn shards(&self) -> &[Shard<V>] {
+    pub fn shards(&self) -> &[Shard<V, C>] {
         &self.shards
     }
-}
-
-/// Build or rebuild the tag index files by scanning existing JSON payloads for the given tag field.
-///
-/// This implements a two-pass tag-index process: if you deferred tag extraction during
-/// initial indexing (or omitted --tag-field), you can generate the `<base>.tags` files
-/// later by invoking this function with the name of the JSON field storing an array of tags.
-pub fn build_tags_index<P: AsRef<Path>>(
-    path: P,
-    tag_field: &str,
-    on_progress: Option<Arc<dyn Fn(u64)>>,
-) -> Result<()> {
-    let base = path.as_ref();
-    if base.is_dir() {
-        for entry in read_dir(base)? {
-            let ent = entry?;
-            let p = ent.path();
-            if p.extension().and_then(|s| s.to_str()) != Some("idx") {
-                continue;
-            }
-            let stem = p
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .ok_or(IndexError::InvalidFormat("invalid shard file name"))?;
-            let shard_base = base.join(stem);
-            build_tags_index_file(&shard_base, tag_field, on_progress.clone())?;
-        }
-    } else {
-        build_tags_index_file(base, tag_field, on_progress)?;
-    }
-    Ok(())
-}
-
-/// Helper: scan the payloads for a single shard and write its `<base>.tags` file.
-fn build_tags_index_file(
-    base: &Path,
-    tag_field: &str,
-    on_progress: Option<Arc<dyn Fn(u64)>>,
-) -> Result<()> {
-    let idx_path = base.with_extension("idx");
-    let idx_file = File::open(&idx_path)?;
-    let idx_mmap = unsafe { Mmap::map(&idx_file)? };
-    let idx_map = Map::new(idx_mmap)?;
-
-    let payload = PayloadStore::<serde_json::Value>::open(&base.with_extension("payload"))?;
-    let lookup = LookupTableStore::open(&base.with_extension("lookup"))?;
-
-    let mut builder = TagIndexBuilder::new(base);
-    if let Some(cb) = on_progress {
-        builder = builder.with_progress(move |n| cb(n));
-    }
-    let mut stream = idx_map.stream();
-    while let Some((_, weight)) = stream.next() {
-        let shard_ptr = weight as u32;
-        let lut = lookup.get(shard_ptr)?;
-        let payload_ptr = lut.payload_ptr;
-        if let Some(val) = payload.get(payload_ptr)? {
-            if let Some(arr) = val.get(tag_field).and_then(|v| v.as_array()) {
-                builder.insert_tags(shard_ptr, arr.iter().filter_map(|v| v.as_str()));
-            }
-        }
-    }
-    builder.finish()?;
-    Ok(())
 }

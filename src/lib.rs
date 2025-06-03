@@ -12,7 +12,6 @@ mod tag_index;
 
 pub use builder::DatabaseBuilder;
 pub use builder::SegmentInfo;
-pub use database::build_tags_index;
 pub use database::Database;
 pub use database::TagMode;
 pub use entry::Entry;

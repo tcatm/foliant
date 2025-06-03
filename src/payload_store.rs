@@ -81,7 +81,7 @@ mod tests {
         }
         f.sync_all().unwrap();
 
-        let mut store = PayloadStoreV2::<Vec<u8>>::open(path).unwrap();
+        let store = PayloadStoreV2::<Vec<u8>>::open(path).unwrap();
         // Decompress each chunk to populate the cache.
         for idx in 0..(V2_CACHE_CAPACITY + 1) {
             let block = store.get_chunk(idx).unwrap();
