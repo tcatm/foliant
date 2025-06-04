@@ -135,6 +135,44 @@ where
         })
     }
 
+    /// Fuzzy substring search using shard-local Tantivy search indexes,
+    /// optionally restricted to keys starting with `prefix`.
+    pub fn search<'a>(
+        &'a self,
+        prefix: Option<&'a str>,
+        query: &str,
+    ) -> Result<Box<dyn DbStreamer<Item = Entry<V>> + 'a>> {
+        let mut streams: Vec<Box<dyn DbStreamer<Item = Entry<V>> + 'a>> = Vec::new();
+        for shard in &self.shards {
+            if shard.search.is_some() {
+                streams.push(shard.stream_by_search(query, prefix)?);
+            }
+        }
+        struct ChainStreamer<'a, V>
+        where
+            V: DeserializeOwned,
+        {
+            streams: Vec<Box<dyn DbStreamer<Item = Entry<V>> + 'a>>,
+            idx: usize,
+        }
+        impl<'a, V> DbStreamer for ChainStreamer<'a, V>
+        where
+            V: DeserializeOwned,
+        {
+            type Item = Entry<V>;
+            fn next(&mut self) -> Option<Self::Item> {
+                while self.idx < self.streams.len() {
+                    if let Some(item) = self.streams[self.idx].next() {
+                        return Some(item);
+                    }
+                    self.idx += 1;
+                }
+                None
+            }
+        }
+        Ok(Box::new(ChainStreamer { streams, idx: 0 }))
+    }
+
     /// Retrieve the payload for `key`, if any.
     pub fn get_value(&self, key: &str) -> Result<Option<V>> {
         for shard in &self.shards {

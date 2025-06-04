@@ -66,9 +66,20 @@ foliant index -i data.idx --json path --prefix foo/ --input sample.jsonl
 foliant shell -i data.idx
 ```
 
+### Search entries in interactive shell
+```bash
+# Once inside the shell:
+> search <query>
+```
+
 ### Generate a tag index for an existing database
 ```bash
 foliant tag-index -i data.idx --tag-field tags
+```
+
+### Generate a search index for an existing database
+```bash
+foliant tantivy-index -i data.idx
 ```
 
 When values are present, they are shown after the key in dim ANSI color, serialized as one-line JSON.
@@ -106,6 +117,8 @@ Sample lines in `sample.jsonl`:
 
 - `TagIndex`: read-only handle for querying a tag index file; supports listing tags (`list_tags`) and retrieving bitmap for a tag (`get`)
 - `TagIndexBuilder`: builder for creating a new tag index file; insert lookup IDs with associated tags, then finalize to write the `.tags` file
+- `TantivyIndex`: read-only handle for querying a full-text search index per shard; supports executing raw Tantivy queries against keys.
+- `TantivyIndexBuilder`: builder for creating or updating a full-text search index; insert keys and finalize to write the `.search/` directories.
 
 ### Design Notes
 - The index uses the `fst` crate's `MapBuilder` to store keys with `u64` lookup identifiers as weights, each pointing into the lookup-FST mapping IDs to payload pointers.

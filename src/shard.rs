@@ -26,6 +26,7 @@ use crate::error::{IndexError, Result};
 use crate::lookup_table_store::LookupTableStore;
 use crate::payload_store::{CborPayloadCodec, PayloadCodec, PayloadStore};
 use crate::tag_index::TagIndex;
+use crate::tantivy_index::TantivyIndex;
 use fst::automaton::Str;
 use fst::raw::Fst as RawFst;
 use fst::Automaton;
@@ -33,6 +34,7 @@ use fst::IntoStreamer;
 use fst::Streamer as FstStreamer;
 use roaring::bitmap::IntoIter;
 use roaring::RoaringBitmap;
+use std::marker::PhantomData;
 /// One shard of a database: a memory-mapped FST map and its payload store.
 /// One shard of a database: a memory-mapped FST map and its payload store.
 pub struct Shard<V, C: PayloadCodec = CborPayloadCodec>
@@ -51,6 +53,8 @@ where
     pub(crate) payload: PayloadStore<V, C>,
     /// Optional tag index for this shard (variant-C .tags file)
     pub(crate) tags: Option<TagIndex>,
+    /// Optional search index for this shard (Tantivy .search/ folder)
+    pub(crate) search: Option<TantivyIndex>,
 }
 
 impl<V, C> Shard<V, C>
@@ -103,6 +107,11 @@ where
             Ok(idx) => Some(idx),
             Err(IndexError::Io(_)) | Err(IndexError::InvalidFormat(_)) => None,
         };
+        // Try loading a Tantivy search index if present
+        let search = match TantivyIndex::open(base) {
+            Ok(idx) => Some(idx),
+            Err(IndexError::Io(_)) | Err(IndexError::InvalidFormat(_)) => None,
+        };
         Ok(Shard {
             base: base_buf,
             idx_mmap,
@@ -110,6 +119,7 @@ where
             lookup,
             payload,
             tags,
+            search,
         })
     }
 
@@ -292,5 +302,66 @@ where
             ptr_iter: filter_bm.into_iter(),
             prefix,
         }))
+    }
+
+    /// Stream entries matching the given query via the shard's Tantivy search index,
+    /// optionally restricted to those whose key starts with `prefix`.
+    pub fn stream_by_search<'a>(
+        &'a self,
+        query: &str,
+        prefix: Option<&'a str>,
+    ) -> Result<Box<dyn crate::Streamer<Item = crate::Entry<V>> + 'a>> {
+        if let Some(idx) = &self.search {
+            let ids = idx.search_stream(query, self.len())?;
+            struct SearchStreamer<'a, V, C>
+            where
+                V: DeserializeOwned,
+                C: PayloadCodec,
+            {
+                shard: &'a Shard<V, C>,
+                ids: Box<dyn Iterator<Item = u64> + 'a>,
+                prefix: Option<&'a str>,
+            }
+            impl<'a, V, C> crate::Streamer for SearchStreamer<'a, V, C>
+            where
+                V: DeserializeOwned,
+                C: PayloadCodec,
+            {
+                type Item = crate::Entry<V>;
+                fn next(&mut self) -> Option<Self::Item> {
+                    while let Some(id) = self.ids.next() {
+                        if let Ok(Some(entry)) = self.shard.get_entry(id) {
+                            if let Some(pref) = self.prefix {
+                                if let crate::Entry::Key(ref k, _, _) = entry {
+                                    if !k.starts_with(pref) {
+                                        continue;
+                                    }
+                                }
+                            }
+                            return Some(entry);
+                        }
+                    }
+                    None
+                }
+            }
+            return Ok(Box::new(SearchStreamer {
+                shard: self,
+                ids: Box::new(ids),
+                prefix,
+            }));
+        }
+        // no search index: empty stream
+        struct EmptyStreamer<V, C>(PhantomData<(V, C)>);
+        impl<V, C> crate::Streamer for EmptyStreamer<V, C>
+        where
+            V: DeserializeOwned,
+            C: PayloadCodec,
+        {
+            type Item = crate::Entry<V>;
+            fn next(&mut self) -> Option<Self::Item> {
+                None
+            }
+        }
+        Ok(Box::new(EmptyStreamer::<V, C>(PhantomData)))
     }
 }

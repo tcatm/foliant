@@ -35,6 +35,7 @@ Available commands:
     -d <c>   one-off custom delimiter character
   cd [dir]                        change directory
   find <regex>                    search entries matching regex
+  search <query>                  fuzzy search entries matching substring using search index
   tags [-a|-o] [<tag1> [tag2...]]   list entries with tags (default: all); prefix tags with '-' or '!' to exclude; no args lists all tags with counts
     -a       match all tags (AND, default)
     -o       match any tag (OR)
@@ -141,16 +142,18 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
         let mut candidates = Vec::new();
         if start == 0 {
             let cmds = [
-                "cd", "ls", "find", "pwd", "val", "tags", "shards", "exit", "quit", "help",
+                "cd", "ls", "find", "search", "pwd", "val", "tags", "shards", "exit", "quit",
+                "help",
             ];
             for &cmd in &cmds {
                 if cmd.starts_with(word) {
                     // Commands that take an argument get a trailing space
-                    let replacement = if ["cd", "ls", "find", "val", "tags"].contains(&cmd) {
-                        format!("{} ", cmd)
-                    } else {
-                        cmd.to_string()
-                    };
+                    let replacement =
+                        if ["cd", "ls", "find", "search", "val", "tags"].contains(&cmd) {
+                            format!("{} ", cmd)
+                        } else {
+                            cmd.to_string()
+                        };
                     candidates.push(Pair {
                         display: cmd.to_string(),
                         replacement,
@@ -454,6 +457,36 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                 Ok(s) => s,
                 Err(e) => {
                     println!("Error running find: {}", e);
+                    return Ok(false);
+                }
+            };
+            handle_print_result(print_entries(
+                cwd_owned.as_str(),
+                &mut stream,
+                false,
+                true,
+                abort_rx,
+            ));
+        }
+        "search" => {
+            let query = match parts.next() {
+                Some(q) => q,
+                None => {
+                    println!("Usage: search <query>");
+                    return Ok(false);
+                }
+            };
+            let state_ref = state.borrow();
+            let cwd_owned = state_ref.cwd.clone();
+            let prefix_opt = if cwd_owned.is_empty() {
+                None
+            } else {
+                Some(cwd_owned.as_str())
+            };
+            let mut stream = match state_ref.db.search(prefix_opt, query) {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("Error running search: {}", e);
                     return Ok(false);
                 }
             };

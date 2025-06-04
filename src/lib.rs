@@ -19,3 +19,5 @@ pub use error::{IndexError, Result};
 pub use shard::Shard;
 pub use streamer::{PrefixStream, Streamer};
 pub use tag_index::{TagIndex, TagIndexBuilder};
+mod tantivy_index;
+pub use tantivy_index::{TantivyIndex, TantivyIndexBuilder};

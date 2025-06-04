@@ -14,9 +14,9 @@ use std::sync::Arc;
 
 use crate::builder::CHUNK_SIZE;
 use crate::error::{IndexError, Result};
+use crate::Database;
 use fst::map::MapBuilder;
 use serde_json;
-use crate::Database;
 use std::collections::BTreeMap;
 use std::io::{BufWriter, Write};
 

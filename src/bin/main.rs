@@ -3,7 +3,7 @@ use foliant::IndexError;
 use foliant::SegmentInfo;
 use foliant::Streamer;
 use foliant::TagMode;
-use foliant::{Database, DatabaseBuilder, Entry, TagIndexBuilder};
+use foliant::{Database, DatabaseBuilder, Entry, TagIndexBuilder, TantivyIndexBuilder};
 use fst::map::Map;
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
@@ -87,6 +87,12 @@ enum Commands {
         #[arg(long, value_name = "TAGFIELD")]
         tag_field: String,
     },
+    /// Generate or update the search index (.search) for an existing database by scanning keys
+    TantivyIndex {
+        /// Path to the serialized index (file or directory)
+        #[arg(short, long, value_name = "FILE")]
+        index: PathBuf,
+    },
     List {
         /// Path to the serialized index
         #[arg(short, long, value_name = "FILE")]
@@ -151,6 +157,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pb_clone = pb.clone();
         let mut db = Database::<Value>::open(index)?;
         TagIndexBuilder::build_index(&mut db, tag_field, Some(Arc::new(move |_| pb_clone.inc(1))))?;
+        pb.finish();
+        Ok(start.elapsed())
+    }
+
+    /// Helper to build a search index (.search) for an existing database, with a progress bar.
+    fn run_tantivy_index(index: &PathBuf) -> Result<Duration, Box<dyn std::error::Error>> {
+        let start = Instant::now();
+        let idx_path = index.with_extension("idx");
+        let idx_file = File::open(&idx_path)?;
+        let idx_mmap = unsafe { Mmap::map(&idx_file)? };
+        let idx_map = Map::new(idx_mmap)?;
+        let total = idx_map.len() as u64;
+        let pb = ProgressBar::new(total);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] [{eta_precise}] {pos}/{len} ({percent}%) {msg}"
+            )?
+            .progress_chars("#>-")
+        );
+        let pb_clone = pb.clone();
+        let mut db = Database::<Value>::open(index)?;
+        TantivyIndexBuilder::build_index(&mut db, Some(Arc::new(move |_| pb_clone.inc(1))))?;
         pb.finish();
         Ok(start.elapsed())
     }
@@ -361,6 +389,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let dur = run_tag_index(&index, &tag_field)?;
             eprintln!(
                 "Tag index generated in {:.3} ms",
+                dur.as_secs_f64() * 1000.0
+            );
+        }
+        Commands::TantivyIndex { index } => {
+            let dur = run_tantivy_index(&index)?;
+            eprintln!(
+                "Search index generated in {:.3} ms",
                 dur.as_secs_f64() * 1000.0
             );
         }
