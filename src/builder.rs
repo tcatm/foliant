@@ -78,6 +78,8 @@ struct IndexedBuilder {
     last_key: Vec<u8>,
     /// Byte offset in the idx file where the current segment started.
     current_start: u64,
+    /// If true, duplicate keys (equal to the previous key) are silently ignored.
+    ignore_duplicates: bool,
 }
 
 impl IndexedBuilder {
@@ -98,6 +100,7 @@ impl IndexedBuilder {
             next_seg: 0,
             last_key: Vec::new(),
             current_start: 0,
+            ignore_duplicates: false,
         })
     }
 
@@ -154,6 +157,10 @@ impl IndexedBuilder {
         // Insert all entries into the active FST builder.
         let mb = self.builder.as_mut().unwrap();
         for (key, payload_ptr) in entries.drain(..) {
+            // If ignoring duplicates, skip keys equal to the previous key.
+            if self.ignore_duplicates && key == self.last_key {
+                continue;
+            }
             let lut_id = self.lookup.append(payload_ptr)?;
             mb.insert(&key, lut_id.into())?;
             self.last_key = key;
@@ -169,6 +176,12 @@ impl IndexedBuilder {
         }
         self.lookup.close()?;
         Ok((self.next_seg, self.idx_tmp_path, self.lut_tmp_path))
+    }
+
+    /// Enable or disable ignoring duplicate keys during index building.
+    pub fn set_ignore_duplicates(&mut self, ignore: bool) -> &mut Self {
+        self.ignore_duplicates = ignore;
+        self
     }
 }
 
@@ -187,6 +200,8 @@ where
     write_cb: Box<dyn FnMut()>,
     /// Optional callback invoked once before merging segments, with per-segment stats.
     before_merge_cb: Box<dyn FnMut(&[SegmentInfo])>,
+    /// If true, duplicate keys will be ignored when building the inline index.
+    ignore_duplicates: bool,
 }
 
 impl<V, C> DatabaseBuilder<V, C>
@@ -207,7 +222,14 @@ where
             idx_builder: None,
             write_cb: Box::new(|| {}),
             before_merge_cb: Box::new(|_stats| {}),
+            ignore_duplicates: false,
         })
+    }
+
+    /// Configure the builder to ignore duplicate keys when building the inline index.
+    pub fn ignore_duplicates(&mut self) -> &mut Self {
+        self.ignore_duplicates = true;
+        self
     }
 
     /// Insert a key with an optional value `V` into the database.
@@ -236,7 +258,11 @@ where
         self.buffer.sort_by(|a, b| a.0.cmp(&b.0));
 
         if self.idx_builder.is_none() {
-            self.idx_builder = Some(IndexedBuilder::new(&self.base)?);
+            let mut ib = IndexedBuilder::new(&self.base)?;
+            if self.ignore_duplicates {
+                ib.set_ignore_duplicates(true);
+            }
+            self.idx_builder = Some(ib);
         }
         self.idx_builder
             .as_mut()

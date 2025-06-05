@@ -26,6 +26,27 @@ fn simple_list() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+// IgnoreDuplicates: inserting duplicate keys with ignore_duplicates skips extra entries
+#[test]
+fn ignore_duplicates_integration() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let base = dir.path().join("db_ignore");
+    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    builder.ignore_duplicates();
+    builder.insert("key1", None);
+    builder.insert("key1", None);
+    builder.insert("key2", None);
+    let db = builder.into_database()?;
+    let mut list: Vec<Entry> = db.list("", None).unwrap().collect();
+    list.sort();
+    let expected = vec![
+        Entry::Key("key1".to_string(), 0, None),
+        Entry::Key("key2".to_string(), 0, None),
+    ];
+    assert_eq!(list, expected);
+    Ok(())
+}
+
 // DelimiterGrouping: group on '/'
 #[test]
 fn delimiter_grouping() -> Result<(), Box<dyn Error>> {

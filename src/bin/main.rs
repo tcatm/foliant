@@ -60,7 +60,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Build a new trie index from input lines
+        /// Build a new trie index from input lines
     Index {
         /// Path to write the serialized index
         #[arg(short, long, value_name = "FILE")]
@@ -77,6 +77,9 @@ enum Commands {
         /// Prefix to prepend to all keys
         #[arg(short, long, value_name = "PREFIX")]
         prefix: Option<String>,
+        /// Ignore duplicate keys during indexing
+        #[arg(long)]
+        ignore_duplicates: bool,
     },
     /// Generate or update the tag index (.tags) for an existing database by scanning JSON payloads
     TagIndex {
@@ -190,9 +193,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             json,
             tag_field,
             prefix,
+            ignore_duplicates,
         } => {
             // Build the database on-disk via builder, measuring throughput
             let mut builder = DatabaseBuilder::<Value>::new(&index)?;
+            if ignore_duplicates {
+                builder.ignore_duplicates();
+            }
             // Setup progress bar using indicatif
             let total_bytes = input
                 .as_ref()
