@@ -51,9 +51,9 @@ impl TagIndex {
     const MAGIC: &'static [u8; 4] = b"FTGT";
     const VERSION: u16 = 1;
 
-    /// Open a variant-C tag index at `<base>.tags`, validating header and preparing FST.
-    pub fn open<P: AsRef<Path>>(base: P) -> Result<Self> {
-        let path = base.as_ref().with_extension("tags");
+/// Open a variant-C tag index at `<idx_path>.tags`, validating header and preparing FST.
+pub fn open<P: AsRef<Path>>(idx_path: P) -> Result<Self> {
+    let path = idx_path.as_ref().with_extension("tags");
         let file = File::open(&path).map_err(|e| {
             IndexError::Io(io::Error::new(
                 e.kind(),
@@ -139,19 +139,20 @@ impl TagIndex {
     }
 }
 
-/// Builder for creating a variant-C tag index file (`<base>.tags`).
+/// Builder for creating a variant-C tag index file (`<idx_path>.tags`).
 pub struct TagIndexBuilder {
-    base: PathBuf,
+    /// Full path to the `.idx` file that this tag index extends.
+    idx_path: PathBuf,
     tag_bitmaps: BTreeMap<String, RoaringBitmap>,
     /// Optional hook that gets called after each insert_tags, passing the total count so far.
     on_progress: Option<Box<dyn Fn(u64)>>,
 }
 
 impl TagIndexBuilder {
-    /// Create a new TagIndexBuilder for writing `<base>.tags`.
-    pub fn new<P: AsRef<Path>>(base: P) -> Self {
+    /// Create a new TagIndexBuilder for writing `<idx_path>.tags`.
+    pub fn new<P: AsRef<Path>>(idx_path: P) -> Self {
         TagIndexBuilder {
-            base: base.as_ref().to_path_buf(),
+            idx_path: idx_path.as_ref().to_path_buf(),
             tag_bitmaps: BTreeMap::new(),
             on_progress: None,
         }
@@ -177,7 +178,7 @@ impl TagIndexBuilder {
 
     /// Consume the builder and write out the `.tags` file.
     pub fn finish(self) -> Result<()> {
-        let base = self.base;
+        let idx_path = self.idx_path;
         let tag_bitmaps = self.tag_bitmaps;
         if tag_bitmaps.is_empty() {
             return Ok(());
@@ -204,7 +205,7 @@ impl TagIndexBuilder {
         fst_builder.finish()?;
 
         // Write header, FST section, and blobs to `<base>.tags`
-        let tags_path = base.with_extension("tags");
+        let tags_path = idx_path.with_extension("tags");
         let tags_file = File::create(&tags_path)?;
         let mut writer = BufWriter::with_capacity(CHUNK_SIZE, tags_file);
         writer.write_all(b"FTGT")?;
@@ -233,8 +234,8 @@ impl TagIndexBuilder {
         tag_field: &str,
         on_progress: Option<Arc<dyn Fn(u64)>>,
     ) -> Result<()> {
-        let base = shard.base();
-        let mut builder = TagIndexBuilder::new(base);
+        let idx_path = shard.idx_path();
+        let mut builder = TagIndexBuilder::new(idx_path);
         if let Some(cb) = on_progress {
             builder = builder.with_progress(move |n| cb(n));
         }
@@ -254,14 +255,14 @@ impl TagIndexBuilder {
     }
 
     /// Scan a shard's .idx/.payload/.lookup for the given JSON field array of tags
-    /// and write out `<base>.tags`. The optional `on_progress` callback receives
+    /// and write out `<idx_path>.tags`. The optional `on_progress` callback receives
     /// the cumulative tag-entry count after each record.
     pub fn build<P: AsRef<Path>>(
-        base: P,
+        idx_path: P,
         tag_field: &str,
         on_progress: Option<Arc<dyn Fn(u64)>>,
     ) -> Result<()> {
-        let shard = Shard::<serde_json::Value>::open(base.as_ref())?;
+        let shard = Shard::<serde_json::Value>::open(idx_path.as_ref())?;
         TagIndexBuilder::build_shard(&shard, tag_field, on_progress)
     }
 
@@ -275,7 +276,7 @@ impl TagIndexBuilder {
     ) -> Result<()> {
         for shard in db.shards_mut() {
             TagIndexBuilder::build_shard(shard, tag_field, on_progress.clone())?;
-            shard.tags = Some(TagIndex::open(shard.base())?);
+            shard.tags = Some(TagIndex::open(shard.idx_path())?);
         }
         Ok(())
     }

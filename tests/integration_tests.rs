@@ -8,7 +8,7 @@ use tempfile::tempdir;
 #[test]
 fn simple_list() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db");
+    let base = dir.path().join("db.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     let keys = ["alpha", "beta", "gamma"];
     for &k in &keys {
@@ -30,7 +30,7 @@ fn simple_list() -> Result<(), Box<dyn Error>> {
 #[test]
 fn ignore_duplicates_integration() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db_ignore");
+    let base = dir.path().join("db_ignore.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.ignore_duplicates();
     builder.insert("key1", None);
@@ -51,7 +51,7 @@ fn ignore_duplicates_integration() -> Result<(), Box<dyn Error>> {
 #[test]
 fn delimiter_grouping() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db");
+    let base = dir.path().join("db.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     let paths = ["foo/bar", "foo/baz", "foobar"];
     for &p in &paths {
@@ -72,7 +72,7 @@ fn delimiter_grouping() -> Result<(), Box<dyn Error>> {
 #[test]
 fn empty_key() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db");
+    let base = dir.path().join("db.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("", None);
     let db = builder.into_database()?;
@@ -85,7 +85,7 @@ fn empty_key() -> Result<(), Box<dyn Error>> {
 #[test]
 fn prefix_split() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db");
+    let base = dir.path().join("db.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("team", None);
     builder.insert("test", None);
@@ -105,7 +105,7 @@ fn prefix_split() -> Result<(), Box<dyn Error>> {
 #[test]
 fn mid_edge_prefix() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db");
+    let base = dir.path().join("db.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("abcde", None);
     builder.insert("abcdx", None);
@@ -125,7 +125,7 @@ fn mid_edge_prefix() -> Result<(), Box<dyn Error>> {
 #[test]
 fn unicode_keys() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db");
+    let base = dir.path().join("db.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     let words = ["こん", "こんにちは", "こんばんは"];
     for &w in &words {
@@ -147,7 +147,7 @@ fn unicode_keys() -> Result<(), Box<dyn Error>> {
 #[test]
 fn in_memory_payload_roundtrip() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db");
+    let base = dir.path().join("db.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("alpha", Some(Value::Integer(42)));
     builder.insert("beta", Some(Value::Text("hello".into())));
@@ -164,7 +164,7 @@ fn in_memory_payload_roundtrip() -> Result<(), Box<dyn Error>> {
 #[test]
 fn mmap_payload_access() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db");
+    let base = dir.path().join("db.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("x", Some(Value::Bool(true)));
     builder.insert(
@@ -193,7 +193,7 @@ fn mmap_payload_access() -> Result<(), Box<dyn Error>> {
 #[test]
 fn serialize_vs_mmap_listing() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db");
+    let base = dir.path().join("db.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     let keys = ["alpha", "beta", "gamma/delta", "gamma/epsilon"];
     for &k in &keys {
@@ -213,7 +213,7 @@ fn serialize_vs_mmap_listing() -> Result<(), Box<dyn Error>> {
 #[test]
 fn roundtrip_prefixes() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db");
+    let base = dir.path().join("db.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     let keys = ["", "a", "ab", "abc", "companion", "compression"];
     for &k in &keys {
@@ -235,7 +235,7 @@ fn roundtrip_prefixes() -> Result<(), Box<dyn Error>> {
 #[test]
 fn multi_list_utf8_truncate() {
     let dir = tempdir().unwrap();
-    let base = dir.path().join("testdb");
+    let base = dir.path().join("testdb.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base).unwrap();
     builder.insert("é", None);
     builder.close().unwrap();
@@ -249,7 +249,7 @@ fn multi_list_utf8_truncate() {
 #[test]
 fn batching_and_sorted() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db");
+    let base = dir.path().join("db.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("d", None);
     builder.insert("a", None);
@@ -265,7 +265,7 @@ fn batching_and_sorted() -> Result<(), Box<dyn Error>> {
 #[test]
 fn batching_and_sorted_with_values() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db_values");
+    let base = dir.path().join("db_values.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("d", Some(Value::Integer(1)));
     builder.insert("a", Some(Value::Text("alpha".into())));
@@ -291,7 +291,7 @@ fn batching_and_sorted_with_values() -> Result<(), Box<dyn Error>> {
 #[test]
 fn get_key_basic() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db_get_key_basic");
+    let base = dir.path().join("db_get_key_basic.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("foo", Some(Value::Integer(1)));
     builder.insert("bar", Some(Value::Text("two".into())));
@@ -318,7 +318,7 @@ fn get_key_basic() -> Result<(), Box<dyn Error>> {
 #[test]
 fn get_key_with_new_fst_segment() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db_get_key_new_fst");
+    let base = dir.path().join("db_get_key_new_fst.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     // First segment: foo and bar
     builder.insert("foo", Some(Value::Integer(1)));
@@ -348,7 +348,7 @@ fn get_key_with_new_fst_segment() -> Result<(), Box<dyn Error>> {
 #[test]
 fn get_key_multiple_fst_segments() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db_get_key_multiple_fst");
+    let base = dir.path().join("db_get_key_multiple_fst.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     // Partition many keys into three batches, flushing fst after the first two batches
     // to create multiple fst segments and stress fst's memory caching behavior on insert.

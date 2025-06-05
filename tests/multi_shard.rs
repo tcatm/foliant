@@ -12,7 +12,7 @@ fn multi_shard_listing_complex() -> Result<(), Box<dyn Error>> {
 
     // Shard 1
     {
-        let base1 = db_dir.join("shard1");
+        let base1 = db_dir.join("shard1.idx");
         let mut b1 = DatabaseBuilder::<Value>::new(&base1)?;
         b1.insert("alpha/a", None);
         b1.insert("alpha/b", None);
@@ -21,7 +21,7 @@ fn multi_shard_listing_complex() -> Result<(), Box<dyn Error>> {
     }
     // Shard 2
     {
-        let base2 = db_dir.join("shard2");
+        let base2 = db_dir.join("shard2.idx");
         let mut b2 = DatabaseBuilder::<Value>::new(&base2)?;
         // Keys must be inserted in lex order
         b2.insert("alpha/b", None);
@@ -71,7 +71,7 @@ fn multi_shard_listing_complex_with_values() -> Result<(), Box<dyn Error>> {
 
     // Shard 1
     {
-        let base1 = db_dir.join("shard1");
+        let base1 = db_dir.join("shard1.idx");
         let mut b1 = DatabaseBuilder::<Value>::new(&base1)?;
         b1.insert("alpha/a", Some(Value::Integer(1)));
         b1.insert("alpha/b", Some(Value::Integer(2)));
@@ -80,7 +80,7 @@ fn multi_shard_listing_complex_with_values() -> Result<(), Box<dyn Error>> {
     }
     // Shard 2
     {
-        let base2 = db_dir.join("shard2");
+        let base2 = db_dir.join("shard2.idx");
         let mut b2 = DatabaseBuilder::<Value>::new(&base2)?;
         // Keys must be inserted in lex order
         b2.insert("alpha/b", Some(Value::Integer(20)));
@@ -140,7 +140,7 @@ fn multi_shard_listing_deep_prefix() -> Result<(), Box<dyn Error>> {
 
     // Shard 1: nested under foo/a and foo/b
     {
-        let base = db_dir.join("s1");
+        let base = db_dir.join("s1.idx");
         let mut b = DatabaseBuilder::<Value>::new(&base)?;
         b.insert("foo/a/1", None);
         b.insert("foo/a/2", None);
@@ -149,7 +149,7 @@ fn multi_shard_listing_deep_prefix() -> Result<(), Box<dyn Error>> {
     }
     // Shard 2: some overlap and deeper path
     {
-        let base = db_dir.join("s2");
+        let base = db_dir.join("s2.idx");
         let mut b = DatabaseBuilder::<Value>::new(&base)?;
         b.insert("foo/a/3/x", None);
         b.insert("foo/c/1", None);
@@ -190,7 +190,7 @@ fn multi_shard_listing_none_values() -> Result<(), Box<dyn Error>> {
 
     // Shard A
     {
-        let base = db_dir.join("A");
+        let base = db_dir.join("A.idx");
         let mut b = DatabaseBuilder::<Value>::new(&base)?;
         b.insert("x/1", None);
         b.insert("x/2", None);
@@ -199,7 +199,7 @@ fn multi_shard_listing_none_values() -> Result<(), Box<dyn Error>> {
     }
     // Shard B
     {
-        let base = db_dir.join("B");
+        let base = db_dir.join("B.idx");
         let mut b = DatabaseBuilder::<Value>::new(&base)?;
         // keys in sorted order
         b.insert("x/2", None);
@@ -244,7 +244,7 @@ fn multi_shard_listing_with_prefix() -> Result<(), Box<dyn Error>> {
 
     // Shard 1 (keys in lex order)
     {
-        let base = db_dir.join("sh1");
+        let base = db_dir.join("sh1.idx");
         let mut b = DatabaseBuilder::<Value>::new(&base)?;
         b.insert("bar/1", Some(Value::Integer(1)));
         b.insert("foo/a", Some(Value::Integer(10)));
@@ -252,7 +252,7 @@ fn multi_shard_listing_with_prefix() -> Result<(), Box<dyn Error>> {
     }
     // Shard 2 (keys in lex order)
     {
-        let base = db_dir.join("sh2");
+        let base = db_dir.join("sh2.idx");
         let mut b = DatabaseBuilder::<Value>::new(&base)?;
         b.insert("baz/x", Some(Value::Integer(2)));
         b.insert("foo/b", Some(Value::Integer(20)));

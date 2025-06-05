@@ -33,9 +33,9 @@ pub struct TantivyIndex {
 }
 
 impl TantivyIndex {
-    /// Open a shard-local Tantivy index in the `<base>.search/` directory.
-    pub fn open<P: AsRef<Path>>(base: P) -> Result<Self> {
-        let dir = base.as_ref().with_extension(SEARCH_DIR_EXT);
+    /// Open a shard-local Tantivy index in the `<idx_path>.search/` directory.
+    pub fn open<P: AsRef<Path>>(idx_path: P) -> Result<Self> {
+        let dir = idx_path.as_ref().with_extension(SEARCH_DIR_EXT);
         let index = Index::open_in_dir(&dir).map_err(|e| {
             IndexError::Io(io::Error::new(
                 io::ErrorKind::Other,
@@ -202,9 +202,9 @@ pub struct TantivyIndexBuilder {
 }
 
 impl TantivyIndexBuilder {
-    /// Create a new builder for writing `<base>.search/`.
-    pub fn new<P: AsRef<Path>>(base: P) -> Result<Self> {
-        let dir = base.as_ref().with_extension(SEARCH_DIR_EXT);
+    /// Create a new builder for writing `<idx_path>.search/`.
+    pub fn new<P: AsRef<Path>>(idx_path: P) -> Result<Self> {
+        let dir = idx_path.as_ref().with_extension(SEARCH_DIR_EXT);
         fs::create_dir_all(&dir).map_err(|e| {
             IndexError::Io(io::Error::new(
                 io::ErrorKind::Other,
@@ -266,7 +266,7 @@ impl TantivyIndexBuilder {
 
     /// Build a search index for a single shard's keys, invoking an optional progress hook.
     fn build_shard(shard: &Shard<Value>, on_progress: Option<Arc<dyn Fn(u64)>>) -> Result<()> {
-        let mut builder = TantivyIndexBuilder::new(shard.base())?;
+        let mut builder = TantivyIndexBuilder::new(shard.idx_path())?;
         if let Some(cb) = on_progress.clone() {
             cb(0);
         }
@@ -292,7 +292,7 @@ impl TantivyIndexBuilder {
     ) -> Result<()> {
         for shard in db.shards_mut() {
             TantivyIndexBuilder::build_shard(shard, on_progress.clone())?;
-            shard.search = Some(TantivyIndex::open(shard.base())?);
+            shard.search = Some(TantivyIndex::open(shard.idx_path())?);
         }
         Ok(())
     }

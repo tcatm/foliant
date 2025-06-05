@@ -430,8 +430,9 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
             println!("{} shard(s) loaded", shards.len());
             for (i, shard) in shards.iter().enumerate() {
                 println!(
-                    "shard {}: {} keys, common_prefix=\"{}\"",
+                    "shard {}: {}, {} keys, common_prefix=\"{}\"",
                     i,
+                    shard.idx_path().display(),
                     shard.len(),
                     shard.common_prefix(),
                 );

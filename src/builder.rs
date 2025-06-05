@@ -61,7 +61,7 @@ impl SegmentTrailer {
     }
 }
 
-/// Inline builder writing sub-FSTs directly into `<base>.idx` with trailers.
+/// Inline builder writing sub-FSTs directly into `<idx_path>.idx` with trailers.
 struct IndexedBuilder {
     /// Path to the temporary idx file (inline segments are written here).
     idx_tmp_path: PathBuf,
@@ -83,10 +83,10 @@ struct IndexedBuilder {
 }
 
 impl IndexedBuilder {
-    pub fn new(base: &Path) -> Result<Self> {
+    pub fn new(idx_path: &Path) -> Result<Self> {
         // Prepare temporary paths for the inline index and lookup files.
-        let idx_tmp_path = base.with_extension("idx.tmp");
-        let lut_tmp_path = base.with_extension("lookup.tmp");
+        let idx_tmp_path = idx_path.with_extension("idx.tmp");
+        let lut_tmp_path = idx_path.with_extension("lookup.tmp");
         // Create/truncate the temp idx writer and lookup builder.
         let file = File::create(&idx_tmp_path)?;
         let writer = BufWriter::with_capacity(CHUNK_SIZE, file);
@@ -192,7 +192,8 @@ where
     V: Serialize,
     C: PayloadCodec,
 {
-    base: PathBuf,
+    /// Full path to the `.idx` file.
+    idx_path: PathBuf,
     payload_store: PayloadStoreBuilderV2<V, C>,
     buffer: Vec<(Vec<u8>, u64)>,
     idx_builder: Option<IndexedBuilder>,
@@ -209,14 +210,14 @@ where
     V: Serialize,
     C: PayloadCodec,
 {
-    /// Create a new database builder writing to `<base>.payload`, buffering keys for sorted insertion.
-    pub fn new<P: AsRef<Path>>(base: P) -> Result<Self> {
-        let base = base.as_ref().to_path_buf();
-        let payload_path = base.with_extension("payload");
+    /// Create a new database builder for the given `.idx` file path; writes payloads to `<idx_path>.payload` and lookup index to `<idx_path>.lookup`, buffering keys for sorted insertion.
+    pub fn new<P: AsRef<Path>>(idx_path: P) -> Result<Self> {
+        let idx_path = idx_path.as_ref().to_path_buf();
+        let payload_path = idx_path.with_extension("payload");
         let payload_store = PayloadStoreBuilderV2::<V, C>::open(&payload_path)?;
 
         Ok(DatabaseBuilder::<V, C> {
-            base,
+            idx_path,
             payload_store,
             buffer: Vec::with_capacity(INSERT_BATCH_SIZE),
             idx_builder: None,
@@ -258,7 +259,7 @@ where
         self.buffer.sort_by(|a, b| a.0.cmp(&b.0));
 
         if self.idx_builder.is_none() {
-            let mut ib = IndexedBuilder::new(&self.base)?;
+            let mut ib = IndexedBuilder::new(&self.idx_path)?;
             if self.ignore_duplicates {
                 ib.set_ignore_duplicates(true);
             }
@@ -287,8 +288,8 @@ where
                 .collect();
             (self.before_merge_cb)(&stats);
 
-            let final_idx = self.base.with_extension("idx");
-            let final_lut = self.base.with_extension("lookup");
+            let final_idx = self.idx_path.with_extension("idx");
+            let final_lut = self.idx_path.with_extension("lookup");
 
             if seg_count > 1 {
                 let old_lut_store = LookupTableStore::open(&tmp_lut)?;
@@ -322,8 +323,8 @@ where
             }
         } else {
             // No entries: write empty FST
-            let final_idx = self.base.with_extension("idx");
-            let final_lut = self.base.with_extension("lookup");
+            let final_idx = self.idx_path.with_extension("idx");
+            let final_lut = self.idx_path.with_extension("lookup");
             let file = File::create(&final_idx)?;
             let writer = BufWriter::with_capacity(CHUNK_SIZE, file);
             let builder = MapBuilder::new(writer)?;
@@ -356,13 +357,13 @@ where
     where
         V: DeserializeOwned,
     {
-        let base = self.base.clone();
+        let idx_path = self.idx_path.clone();
         self.close()?;
-        Database::<V, C>::open(base)
+        Database::<V, C>::open(idx_path)
     }
 }
 
-/// Read inline sub‑FST segments and their trailers by walking trailers backward from the end of `<base>.idx`.
+/// Read inline sub‑FST segments and their trailers by walking trailers backward from the end of the given index file (`idx_path`).
 /// Returns each segment's `SegmentTrailer` and owned bytes for further processing.
 fn load_submaps_raw(idx_path: &Path) -> Result<Vec<(SegmentTrailer, Vec<u8>)>> {
     let file = File::open(idx_path)?;
@@ -385,7 +386,7 @@ fn load_submaps_raw(idx_path: &Path) -> Result<Vec<(SegmentTrailer, Vec<u8>)>> {
     Ok(infos)
 }
 
-/// Multi-way merge inline sub-FSTs into a final `<base>.idx`, rebuilding the lookup store.
+/// Multi-way merge inline sub-FSTs into a final index file (`final_idx`), rebuilding the lookup store.
 /// Streaming merge of an `OpBuilder::union()` of maps into a new FST at `final_idx`,
 /// using `old_lut` for payload remapping and writing into `lookup_store`.
 /// Merge all segments via an FST union into `final_idx`, rebuilding the lookup table in `final_lut`.

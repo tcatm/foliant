@@ -6,7 +6,7 @@ use tempfile::tempdir;
 #[test]
 fn list_by_tags_basic() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db");
+    let base = dir.path().join("db.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("apple", Some(json!({"tags":["fruit","red"]})));
     builder.insert("banana", Some(json!({"tags":["fruit","yellow"]})));
@@ -41,7 +41,7 @@ fn list_by_tags_basic() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn list_by_tags_empty_tags() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db_empty");
+    let base = dir.path().join("db_empty.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("a", Some(json!({"tags":["tag"]})));
     builder.close()?;
@@ -56,7 +56,7 @@ fn list_by_tags_empty_tags() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn list_by_tags_unknown_tags() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db_unknown");
+    let base = dir.path().join("db_unknown.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("a", Some(json!({"tags":["t1"]})));
     builder.insert("b", Some(json!({"tags":["t2"]})));
@@ -72,7 +72,7 @@ fn list_by_tags_unknown_tags() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn list_by_tags_no_overlap_and() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db_no_overlap");
+    let base = dir.path().join("db_no_overlap.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("a", Some(json!({"tags":["x"]})));
     builder.insert("b", Some(json!({"tags":["y"]})));
@@ -87,7 +87,7 @@ fn list_by_tags_no_overlap_and() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn list_by_tags_with_values() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db_values");
+    let base = dir.path().join("db_values.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("x", Some(json!({"tags":["a"],"value":1})));
     builder.insert("y", Some(json!({"tags":["b"],"value":2})));
@@ -119,13 +119,13 @@ fn list_by_tags_multi_shard() -> Result<(), Box<dyn std::error::Error>> {
     let base_dir = dir.path().join("db_multi");
     fs::create_dir(&base_dir)?;
     {
-        let mut b = DatabaseBuilder::<Value>::new(&base_dir.join("s1"))?;
+        let mut b = DatabaseBuilder::<Value>::new(&base_dir.join("s1.idx"))?;
         b.insert("foo", Some(json!({"tags":["t1"]})));
         b.insert("bar", Some(json!({"tags":["t1","t2"]})));
         b.close()?;
     }
     {
-        let mut b = DatabaseBuilder::<Value>::new(&base_dir.join("s2"))?;
+        let mut b = DatabaseBuilder::<Value>::new(&base_dir.join("s2.idx"))?;
         b.insert("baz", Some(json!({"tags":["t2"]})));
         b.insert("qux", Some(json!({"tags":["t3"]})));
         b.close()?;
@@ -148,7 +148,7 @@ fn list_by_tags_multi_shard() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn list_by_tags_merge_reorder_tags() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db_tags_merge");
+    let base = dir.path().join("db_tags_merge.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     const TOTAL: usize = 10_001;
     for i in 0..TOTAL {
@@ -182,7 +182,7 @@ fn list_by_tags_merge_reorder_tags() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn list_by_tags_merge_reorder_image_text() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db_tags_merge_image_text");
+    let base = dir.path().join("db_tags_merge_image_text.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     // 1. Insert a large number of Image+English-tagged entries, then flush to create segment #1.
     const IMAGE_COUNT: usize = 10_000;

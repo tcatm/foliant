@@ -27,6 +27,8 @@ cargo test
 
 ## CLI Usage Examples
 
+> **Note:** the `-i`/`--index` flag now requires the full `.idx` filepath (no implicit extension).
+
 ### Build an index from plain text lines
 ```
 foliant index -i data.idx --input input.txt
@@ -110,7 +112,7 @@ Sample lines in `sample.jsonl`:
 ## Developer Guide
 
 ### Key Types
-- `DatabaseBuilder<V, C = CborPayloadCodec>`: builder for creating a new on-disk database; insert keys with optional values (`V: Serialize`), then finalize to write the `.idx`, `.lookup`, and `.payload` files.
+- `DatabaseBuilder<V, C = CborPayloadCodec>`: builder for creating a new on-disk database; insert keys with optional values (`V: Serialize`), then finalize to write the `<idx_path>.idx`, `<idx_path>.lookup`, and `<idx_path>.payload` files.
 - `Database<V, C = CborPayloadCodec>`: read-only handle (`V: DeserializeOwned`) for querying the index; supports prefix listing (`list`) and value lookup (`get_value`)
 - `Entry`: enum returned by `Database::list`, either `Entry::Key(String)` for full keys or `Entry::CommonPrefix(String)` for grouped prefixes
 - `PayloadStoreBuilder<V, C = CborPayloadCodec>` and `PayloadStore<V, C = CborPayloadCodec>`: internal types for writing and reading the `.payload` file using the provided `PayloadCodec` (defaults to CBOR)
@@ -130,15 +132,15 @@ Sample lines in `sample.jsonl`:
 ## On-Disk Format
 foliant produces up to four files per database (the tag index is optional):
 
-- During index building, intermediate files `<base>.idx.tmp` and `<base>.lookup.tmp` are written in-place and then atomically renamed to `<base>.idx>` and `<base>.lookup>` once complete.
+- During index building, intermediate files `<idx_path>.idx.tmp` and `<idx_path>.lookup.tmp` are written in-place and then atomically renamed to `<idx_path>.idx` and `<idx_path>.lookup` once complete.
 
-- `<base>.idx`: an on-disk FST index comprising one or more inlined sub-FST segments, each followed by a 16-byte trailer.  The trailer is a packed little-endian struct:
+- `<idx_path>.idx`: an on-disk FST index comprising one or more inlined sub-FST segments, each followed by a 16-byte trailer.  The trailer is a packed little-endian struct:
   ```text
   u32 seg_id | u64 start_off | u32 crc32(seg_id∥start_off)
   ```
   To read the index, `mmap` the file and scan backwards reading trailers from the end, validating each CRC, and extracting each sub-FST.  The segments are then merged in a single pass into the final lookup structure for queries.
-- `<base>.lookup`: an on-disk FST mapping 32-bit big-endian lookup IDs to 64-bit payload pointers (encoded as FST weights). To read it, memory-map the file and use the `fst::Map` API (e.g. `map.get(&id.to_be_bytes())`) to fetch the payload file offset (stored as `offset+1` in the `.payload` file).
-- `<base>.payload`: a flat file storing CBOR‑encoded payloads. The file begins with a 4-byte magic header (`FPAY`) and a 2-byte little-endian format version (`1` or `2`).
+- `<idx_path>.lookup`: an on-disk FST mapping 32-bit big-endian lookup IDs to 64-bit payload pointers (encoded as FST weights). To read it, memory-map the file and use the `fst::Map` API (e.g. `map.get(&id.to_be_bytes())`) to fetch the payload file offset (stored as `offset+1` in the `.payload` file).
+- `<idx_path>.payload`: a flat file storing CBOR‑encoded payloads. The file begins with a 4-byte magic header (`FPAY`) and a 2-byte little-endian format version (`1` or `2`).
   - Format v1 is uncompressed; each payload record then consists of:
     1. A 2-byte little-endian length (`u16`)
     2. The CBOR‑encoded value bytes
@@ -147,6 +149,6 @@ foliant produces up to four files per database (the tag index is optional):
     2. A 4-byte little-endian compressed length (`u32`)
     3. The zstd-compressed block data
 
-- `<base>.tags`: (variant C) a monolithic tag index file embedding an FST mapping each tag string to a packed `(offset_in_blob<<32)|length` weight, followed by concatenated Roaring bitmap blobs.
+- `<idx_path>.tags`: (variant C) a monolithic tag index file embedding an FST mapping each tag string to a packed `(offset_in_blob<<32)|length` weight, followed by concatenated Roaring bitmap blobs.
 
 The `.idx` file begins with the magic header and structure defined by the `fst` crate. This format enables fast, memory-mapped prefix queries and efficient payload retrieval with minimal allocations.

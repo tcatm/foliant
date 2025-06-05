@@ -36,13 +36,12 @@ use roaring::bitmap::IntoIter;
 use roaring::RoaringBitmap;
 use std::marker::PhantomData;
 /// One shard of a database: a memory-mapped FST map and its payload store.
-/// One shard of a database: a memory-mapped FST map and its payload store.
 pub struct Shard<V, C: PayloadCodec = CborPayloadCodec>
 where
     V: DeserializeOwned,
 {
-    /// Base path prefix for this shard (without extension)
-    pub(crate) base: PathBuf,
+    /// Path to the index file
+    pub(crate) idx_path: PathBuf,
     /// Memory-mapped raw index data (shared)
     pub(crate) idx_mmap: SharedMmap,
     /// Parsed FST map for lookups (backed by a shared memory map)
@@ -62,12 +61,9 @@ where
     V: DeserializeOwned,
     C: PayloadCodec,
 {
-    /// Open a shard from `<base>.idx` and `<base>.payload` files.
-    pub fn open<P: AsRef<Path>>(base: P) -> Result<Self> {
-        let base = base.as_ref();
-        let base_buf = base.to_path_buf();
-        let idx_path = base.with_extension("idx");
-        let payload_path = base.with_extension("payload");
+    /// Open a shard from the given index path.
+    pub fn open(idx_path: &Path) -> Result<Self> {
+        let payload_path = idx_path.with_extension("payload");
         let idx_file = File::open(&idx_path).map_err(|e| {
             IndexError::Io(io::Error::new(
                 e.kind(),
@@ -89,7 +85,7 @@ where
                 format!("fst map error: {}", e),
             ))
         })?;
-        let lookup_path = base.with_extension("lookup");
+        let lookup_path = idx_path.with_extension("lookup");
         let lookup = LookupTableStore::open(&lookup_path).map_err(|e| {
             IndexError::Io(io::Error::new(
                 e.kind(),
@@ -103,17 +99,17 @@ where
             ))
         })?;
         // Try loading a variant-C tags index if present
-        let tags = match TagIndex::open(base) {
+        let tags = match TagIndex::open(idx_path) {
             Ok(idx) => Some(idx),
             Err(IndexError::Io(_)) | Err(IndexError::InvalidFormat(_)) => None,
         };
         // Try loading a Tantivy search index if present
-        let search = match TantivyIndex::open(base) {
+        let search = match TantivyIndex::open(idx_path) {
             Ok(idx) => Some(idx),
             Err(IndexError::Io(_)) | Err(IndexError::InvalidFormat(_)) => None,
         };
         Ok(Shard {
-            base: base_buf,
+            idx_path: idx_path.to_path_buf(),
             idx_mmap,
             fst,
             lookup,
@@ -123,9 +119,9 @@ where
         })
     }
 
-    /// Return the base path prefix for this shard (without extension).
-    pub fn base(&self) -> &Path {
-        &self.base
+    /// Return the path to the index file for this shard.
+    pub fn idx_path(&self) -> &Path {
+        &self.idx_path
     }
 
     /// Return the longest common prefix of all indexed keys in this shard.

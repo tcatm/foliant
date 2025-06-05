@@ -6,7 +6,7 @@ use tempfile::tempdir;
 #[test]
 fn common_prefix_empty_shard() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db_empty");
+    let base = dir.path().join("db_empty.idx");
     let db: Database<Value> = DatabaseBuilder::<Value>::new(&base)?.into_database()?;
     let shards = db.shards();
     assert_eq!(shards.len(), 1);
@@ -19,7 +19,7 @@ fn common_prefix_empty_shard() -> Result<(), Box<dyn Error>> {
 #[test]
 fn common_prefix_single_key() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db_single");
+    let base = dir.path().join("db_single.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("hello", None);
     let db = builder.into_database()?;
@@ -32,7 +32,7 @@ fn common_prefix_single_key() -> Result<(), Box<dyn Error>> {
 #[test]
 fn common_prefix_multiple_full_prefix() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db_full");
+    let base = dir.path().join("db_full.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("prefix/one", None);
     builder.insert("prefix/two", None);
@@ -47,7 +47,7 @@ fn common_prefix_multiple_full_prefix() -> Result<(), Box<dyn Error>> {
 #[test]
 fn common_prefix_multiple_partial_prefix() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db_partial");
+    let base = dir.path().join("db_partial.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("foo123", None);
     builder.insert("foo456", None);
@@ -62,7 +62,7 @@ fn common_prefix_multiple_partial_prefix() -> Result<(), Box<dyn Error>> {
 #[test]
 fn common_prefix_multiple_no_prefix() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db_noprefix");
+    let base = dir.path().join("db_noprefix.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("alpha", None);
     builder.insert("beta", None);
@@ -77,7 +77,7 @@ fn common_prefix_multiple_no_prefix() -> Result<(), Box<dyn Error>> {
 #[test]
 fn common_prefix_unicode() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db_unicode");
+    let base = dir.path().join("db_unicode.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("こんにちは", None);
     builder.insert("こんにちわ", None);
@@ -92,7 +92,7 @@ fn common_prefix_unicode() -> Result<(), Box<dyn Error>> {
 #[test]
 fn shard_len_counts_inserted_keys() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db_len");
+    let base = dir.path().join("db_len.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     let keys = ["a", "b", "c", ""];
     for &k in &keys {

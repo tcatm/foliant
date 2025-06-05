@@ -7,7 +7,7 @@ use tempfile::tempdir;
 #[test]
 fn search_without_index_returns_empty() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db");
+    let base = dir.path().join("db.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("alpha", None);
     builder.insert("beta", None);
@@ -27,7 +27,7 @@ fn search_without_index_returns_empty() -> Result<(), Box<dyn Error>> {
 #[test]
 fn search_with_index_returns_matches() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db");
+    let base = dir.path().join("db.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("alpha", None);
     builder.insert("beta", None);
@@ -60,7 +60,7 @@ fn search_with_index_returns_matches() -> Result<(), Box<dyn Error>> {
 #[test]
 fn search_with_prefix_filters_results() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let base = dir.path().join("db");
+    let base = dir.path().join("db.idx");
     let mut builder = DatabaseBuilder::<Value>::new(&base)?;
     builder.insert("band", None);
     builder.insert("banana", None);

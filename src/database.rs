@@ -47,9 +47,9 @@ where
         Database { shards: Vec::new() }
     }
 
-    /// Add one shard (opened from `<base>.idx` and `<base>.payload`).
-    pub fn add_shard<P: AsRef<Path>>(&mut self, base: P) -> Result<()> {
-        let shard = Shard::<V, C>::open(base)?;
+    /// Add one shard by specifying the full `.idx` file path and corresponding `.payload` file.
+    pub fn add_shard<P: AsRef<Path>>(&mut self, idx_path: P) -> Result<()> {
+        let shard = Shard::<V, C>::open(idx_path.as_ref())?;
         self.shards.push(shard);
         Ok(())
     }
@@ -65,17 +65,12 @@ where
                 if p.extension().and_then(|s| s.to_str()) != Some("idx") {
                     continue;
                 }
-                let stem = p
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .ok_or(IndexError::InvalidFormat("invalid shard file name"))?;
-                let b = base.join(stem);
-                if !b.with_extension("payload").exists() {
+                if !p.with_extension("payload").exists() {
                     continue;
                 }
 
-                if let Err(e) = db.add_shard(&b) {
-                    eprintln!("warning: failed to add shard {:?}: {}", b, e);
+                if let Err(e) = db.add_shard(&p) {
+                    eprintln!("warning: failed to add shard {:?}: {}", p, e);
                     continue;
                 }
             }
