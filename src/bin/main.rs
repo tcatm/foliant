@@ -60,7 +60,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-        /// Build a new trie index from input lines
+    /// Build a new trie index from input lines
     Index {
         /// Path to write the serialized index
         #[arg(short, long, value_name = "FILE")]
@@ -130,13 +130,45 @@ enum Commands {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    // Helper to open either a single database or a directory of shards, with optional delimiter
+    /// Load a database from either a single shard (.idx) file or a directory of shards.
+    /// When loading a directory, shows a progress bar counting shards loaded.
     fn load_db<V>(path: &std::path::PathBuf) -> Result<Database<V>, IndexError>
     where
         V: DeserializeOwned + 'static,
     {
-        let db = Database::<V>::open(path)?;
-        Ok(db)
+        if path.is_dir() {
+            let mut db = Database::<V>::new();
+            let mut paths = Vec::new();
+            for entry in std::fs::read_dir(path)? {
+                let p = entry?.path();
+                if p.extension().and_then(|s| s.to_str()) == Some("idx")
+                    && p.with_extension("payload").exists()
+                {
+                    paths.push(p);
+                }
+            }
+            let total = paths.len() as u64;
+            let pb = ProgressBar::new(total);
+            let style = ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] [{eta_precise}] \
+                     {pos}/{len} ({percent}%) {msg}",
+            )
+            .unwrap()
+            .progress_chars("#>-");
+            pb.set_style(style);
+            pb.set_message("loading shards");
+            for p in paths {
+                match db.add_shard(&p) {
+                    Ok(_) => (),
+                    Err(e) => eprintln!("warning: failed to add shard {:?}: {}", p, e),
+                }
+                pb.inc(1);
+            }
+            pb.finish();
+            Ok(db)
+        } else {
+            Database::<V>::open(path)
+        }
     }
 
     // Helper to build a tag index with a progress bar; returns elapsed time
@@ -413,7 +445,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             prefix,
             delimiter,
         } => {
-            // Open read-only database or sharded directory via mmap
+            // Load shards with a progress bar
             let load_start = Instant::now();
             let db_handle: Database<Value> = load_db(&index)?;
             let load_duration = load_start.elapsed();

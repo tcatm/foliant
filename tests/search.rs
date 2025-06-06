@@ -85,11 +85,17 @@ fn search_with_prefix_filters_results() -> Result<(), Box<dyn Error>> {
         })
         .collect();
     all.sort();
-    assert_eq!(all, vec!["banana".to_string(), "band".to_string(), "bandana".to_string()]);
+    assert_eq!(
+        all,
+        vec![
+            "banana".to_string(),
+            "band".to_string(),
+            "bandana".to_string()
+        ]
+    );
 
     // Restrict prefix to "band" yields band and bandana
-    let entries_pref: Vec<Entry<Value>> =
-        db.search(Some("band"), "band banana bandana")?.collect();
+    let entries_pref: Vec<Entry<Value>> = db.search(Some("band"), "band banana bandana")?.collect();
     let mut prefixed: Vec<String> = entries_pref
         .iter()
         .filter_map(|entry| match entry {

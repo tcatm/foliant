@@ -51,9 +51,9 @@ impl TagIndex {
     const MAGIC: &'static [u8; 4] = b"FTGT";
     const VERSION: u16 = 1;
 
-/// Open a variant-C tag index at `<idx_path>.tags`, validating header and preparing FST.
-pub fn open<P: AsRef<Path>>(idx_path: P) -> Result<Self> {
-    let path = idx_path.as_ref().with_extension("tags");
+    /// Open a variant-C tag index at `<idx_path>.tags`, validating header and preparing FST.
+    pub fn open<P: AsRef<Path>>(idx_path: P) -> Result<Self> {
+        let path = idx_path.as_ref().with_extension("tags");
         let file = File::open(&path).map_err(|e| {
             IndexError::Io(io::Error::new(
                 e.kind(),
