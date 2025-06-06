@@ -70,7 +70,8 @@ impl From<u16> for PayloadStoreVersion {
     }
 }
 
-/// Convert in-place a V2 payload store file into V3 by appending a mmap-able index trailer and updating the version.
+/// Convert in-place a V2 payload store file into V3 by appending a mmap-able index trailer
+/// (aligned to a 4 KiB page boundary) and updating the version.
 pub fn convert_v2_to_v3_inplace<P: AsRef<Path>>(path: P) -> io::Result<()> {
     let path = path.as_ref();
     // Read existing file to build offsets
@@ -104,8 +105,14 @@ pub fn convert_v2_to_v3_inplace<P: AsRef<Path>>(path: P) -> io::Result<()> {
         let clen = u32::from_le_bytes(raw[pos + 4..pos + 8].try_into().unwrap()) as usize;
         pos = pos + 8 + clen;
     }
-    // Append index trailer: [offsets...][count][magic]
     let mut out = std::fs::OpenOptions::new().append(true).write(true).open(path)?;
+    const PAGE_SIZE: usize = 4096;
+    let curr_len = raw.len();
+    let pad = (PAGE_SIZE - (curr_len % PAGE_SIZE)) % PAGE_SIZE;
+    if pad != 0 {
+        let zeros = [0u8; PAGE_SIZE];
+        out.write_all(&zeros[..pad])?;
+    }
     for &off in &offsets {
         out.write_all(&off.to_le_bytes())?;
     }
