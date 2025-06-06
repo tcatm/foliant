@@ -180,9 +180,6 @@ impl TagIndexBuilder {
     pub fn finish(self) -> Result<()> {
         let idx_path = self.idx_path;
         let tag_bitmaps = self.tag_bitmaps;
-        if tag_bitmaps.is_empty() {
-            return Ok(());
-        }
 
         // Serialize each bitmap into its own Vec<u8>
         let mut blobs = Vec::with_capacity(tag_bitmaps.len());

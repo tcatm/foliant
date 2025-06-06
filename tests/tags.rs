@@ -254,6 +254,20 @@ fn list_by_tags_merge_reorder_image_text() -> Result<(), Box<dyn std::error::Err
 
     Ok(())
 }
+#[test]
+fn build_tag_index_single_entry_no_tags() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let base = dir.path().join("db_single_no_tags.idx");
+    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    builder.insert("a", Some(json!({"tags":[]})));
+    builder.close()?;
+    let mut db_builder = Database::<Value>::open(&base)?;
+    TagIndexBuilder::build_index(&mut db_builder, "tags", None)?;
+    let db: Database<Value> = Database::open(&base)?;
+    let tags = db.list_tags()?;
+    assert!(tags.is_empty());
+    Ok(())
+}
 
 fn db_list_tags(
     db: &Database<Value>,
