@@ -99,7 +99,7 @@ find "$HOME" -type f \
 On systems without `find -printf` (e.g. BSD/macOS), use `stat -f`:
 ```bash
 find "$HOME" -type f | while IFS= read -r file; do
-  stat -f '{"path":"%N","last_modified":%m,"size":%z}\n' "$file"
+  stat -f '{"path":"%N","last_modified":%m,"size":%z}' "$file"
 done > sample.jsonl
 ```
 
