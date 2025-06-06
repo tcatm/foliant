@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde_cbor;
 use std::convert::TryInto;
 use std::fs::File;
-use std::io::{self, BufWriter, Read, Write};
+use std::io::{self, BufWriter, Read, Seek, Write};
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::ptr;
@@ -16,11 +16,20 @@ const CHUNK_SIZE: usize = 64 * 1024;
 /// Magic header for payload store files.
 const PAYLOAD_STORE_MAGIC: &[u8; 4] = b"FPAY";
 /// Format version (v1 == uncompressed).
-const PAYLOAD_STORE_VERSION: u16 = 1;
+/// On-disk format version 1: uncompressed entries.
+pub const PAYLOAD_STORE_VERSION: u16 = 1;
 /// Size of the payload store file header (magic + version).
-const PAYLOAD_STORE_HEADER_SIZE: usize = PAYLOAD_STORE_MAGIC.len() + std::mem::size_of::<u16>();
+/// Size of the payload store file header (magic + version).
+pub const PAYLOAD_STORE_HEADER_SIZE: usize = PAYLOAD_STORE_MAGIC.len() + std::mem::size_of::<u16>();
 /// Format version (v2 == compressed with zstd blocks of 64KiB).
-const PAYLOAD_STORE_VERSION_V2: u16 = 2;
+/// On-disk format version 2: compressed with zstd blocks of 64KiB.
+pub const PAYLOAD_STORE_VERSION_V2: u16 = 2;
+/// Format version (v3 == compressed with zstd blocks plus appended mmap index).
+/// On-disk format version 3: compressed with zstd blocks plus appended mmap-able index trailer.
+pub const PAYLOAD_STORE_VERSION_V3: u16 = 3;
+/// Magic trailer tag at end of V3 payload store files.
+/// Magic trailer tag at end of V3 payload store files.
+pub const PAYLOAD_STORE_TRAILER_MAGIC: &[u8; 4] = b"FPXI";
 /// Max total bytes of uncompressed blocks kept in the V2 cache (64 MiB).
 const V2_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum number of cached chunks = V2_CACHE_MAX_BYTES / CHUNK_SIZE.
@@ -31,6 +40,87 @@ pub trait PayloadCodec {
     fn encode<V: Serialize>(value: &V) -> io::Result<Vec<u8>>;
     /// Decode a deserializable value from bytes.
     fn decode<V: DeserializeOwned>(bytes: &[u8]) -> io::Result<V>;
+}
+/// On-disk payload store file format version.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u16)]
+pub enum PayloadStoreVersion {
+    /// Version 1: uncompressed entries.
+    V1 = PAYLOAD_STORE_VERSION,
+    /// Version 2: compressed with zstd blocks of 64KiB.
+    V2 = PAYLOAD_STORE_VERSION_V2,
+    /// Version 3: compressed blocks plus mmap-able index trailer.
+    V3 = PAYLOAD_STORE_VERSION_V3,
+}
+
+impl PayloadStoreVersion {
+    /// Numeric version as used on disk.
+    pub fn as_u16(self) -> u16 {
+        self as u16
+    }
+}
+impl From<u16> for PayloadStoreVersion {
+    fn from(v: u16) -> Self {
+        match v {
+            PAYLOAD_STORE_VERSION => PayloadStoreVersion::V1,
+            PAYLOAD_STORE_VERSION_V2 => PayloadStoreVersion::V2,
+            PAYLOAD_STORE_VERSION_V3 => PayloadStoreVersion::V3,
+            _ => panic!("unsupported payload store version: {}", v),
+        }
+    }
+}
+
+/// Convert in-place a V2 payload store file into V3 by appending a mmap-able index trailer and updating the version.
+pub fn convert_v2_to_v3_inplace<P: AsRef<Path>>(path: P) -> io::Result<()> {
+    let path = path.as_ref();
+    // Read existing file to build offsets
+    let file = File::open(path)?;
+    let mmap = unsafe { Mmap::map(&file)? };
+    let raw = mmap.as_ref();
+    if raw.len() < PAYLOAD_STORE_HEADER_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "payload store too small for header",
+        ));
+    }
+    if &raw[..PAYLOAD_STORE_MAGIC.len()] != PAYLOAD_STORE_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid payload store magic",
+        ));
+    }
+    let version = u16::from_le_bytes(raw[PAYLOAD_STORE_MAGIC.len()..PAYLOAD_STORE_HEADER_SIZE].try_into().unwrap());
+    if version != PAYLOAD_STORE_VERSION_V2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "only V2 payload stores can be converted",
+        ));
+    }
+    // Reconstruct chunk offsets via existing scan logic
+    let mut offsets = Vec::new();
+    let mut pos = PAYLOAD_STORE_HEADER_SIZE;
+    while pos + 8 <= raw.len() {
+        offsets.push(pos as u64);
+        let clen = u32::from_le_bytes(raw[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        pos = pos + 8 + clen;
+    }
+    // Append index trailer: [offsets...][count][magic]
+    let mut out = std::fs::OpenOptions::new().append(true).write(true).open(path)?;
+    for &off in &offsets {
+        out.write_all(&off.to_le_bytes())?;
+    }
+    let count = offsets.len() as u64;
+    out.write_all(&count.to_le_bytes())?;
+    out.write_all(PAYLOAD_STORE_TRAILER_MAGIC)?;
+    out.flush()?;
+    // Update version in header
+    let mut head = std::fs::OpenOptions::new().write(true).open(path)?;
+    head.seek(std::io::SeekFrom::Start(PAYLOAD_STORE_MAGIC.len() as u64))?;
+    head.write_all(&PAYLOAD_STORE_VERSION_V3.to_le_bytes())?;
+    head.flush()?;
+    head.sync_all()?;
+    out.sync_all()?;
+    Ok(())
 }
 
 /// Default CBOR-based payload codec.
@@ -318,7 +408,11 @@ pub struct PayloadStoreV2<V: DeserializeOwned, C: PayloadCodec = CborPayloadCode
     data_start: usize,
     /// LRU cache of recently decompressed blocks, keyed by chunk index.
     /// Offsets of each compressed block header from the file start (after the payload-store header).
+    /// In V2 files, this Vec is populated by scanning headers. In V3 files, this Vec is empty and
+    /// the mmap'ed index trailer is used via `trailer_index`.
     chunk_offsets: Vec<usize>,
+    /// For V3 payload stores, the start position and count of u64 offsets in the mmap trailer.
+    trailer_index: Option<(usize, usize)>,
     /// LRU cache of recently decompressed blocks, keyed by chunk index.
     cache: Arc<Mutex<LruCache<usize, Arc<Vec<u8>>>>>,
     phantom: std::marker::PhantomData<(V, C)>,
@@ -348,27 +442,73 @@ impl<V: DeserializeOwned, C: PayloadCodec> PayloadStoreV2<V, C> {
                 .try_into()
                 .unwrap(),
         );
-        if version != PAYLOAD_STORE_VERSION_V2 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unsupported payload store version",
-            ));
-        }
-        // Build an index of block-header offsets so we can seek directly to chunk N.
-        let mut chunk_offsets = Vec::new();
-        let raw = buf.as_ref();
-        let mut off = PAYLOAD_STORE_HEADER_SIZE;
-        while off + 8 <= raw.len() {
-            chunk_offsets.push(off);
-            // read lengths to skip this block
-            let compressed_len =
-                u32::from_le_bytes(raw[off + 4..off + 8].try_into().unwrap()) as usize;
-            off = off + 8 + compressed_len;
-        }
+        // Support legacy V2 (scan) or V3 (trailer index) formats.
+        let mut trailer_index = None;
+        let chunk_offsets = match version {
+            PAYLOAD_STORE_VERSION_V2 => {
+                let mut idx = Vec::new();
+                let mut pos = PAYLOAD_STORE_HEADER_SIZE;
+                while pos + 8 <= raw.len() {
+                    idx.push(pos);
+                    let compressed_len =
+                        u32::from_le_bytes(raw[pos + 4..pos + 8].try_into().unwrap()) as usize;
+                    pos = pos + 8 + compressed_len;
+                }
+                idx
+            }
+            PAYLOAD_STORE_VERSION_V3 => {
+                // trailer: [u64 count][count*u64 offsets][magic]
+                if raw.len() < PAYLOAD_STORE_HEADER_SIZE + 12 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "payload store too small for index trailer",
+                    ));
+                }
+                let end = raw.len();
+                let magic_pos = end - PAYLOAD_STORE_TRAILER_MAGIC.len();
+                if &raw[magic_pos..] != PAYLOAD_STORE_TRAILER_MAGIC {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "missing index trailer magic",
+                    ));
+                }
+                let count_pos = magic_pos - 8;
+                let count = u64::from_le_bytes(
+                    raw[count_pos..magic_pos].try_into().unwrap()
+                ) as usize;
+                let offs_pos = count_pos
+                    .checked_sub(count.checked_mul(8).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "invalid index trailer length",
+                        )
+                    })?)
+                    .ok_or_else(|| io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid index trailer offset",
+                    ))?;
+                if offs_pos < PAYLOAD_STORE_HEADER_SIZE {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid index trailer offset",
+                    ));
+                }
+                // Record mmap'ed index location; skip Vec copy
+                trailer_index = Some((offs_pos, count));
+                Vec::new()
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unsupported payload store version",
+                ));
+            }
+        };
         Ok(PayloadStoreV2 {
             buf,
             data_start: PAYLOAD_STORE_HEADER_SIZE,
             chunk_offsets,
+            trailer_index,
             cache: Arc::new(Mutex::new(LruCache::new(
                 NonZeroUsize::new(V2_CACHE_CAPACITY).unwrap(),
             ))),
@@ -400,13 +540,26 @@ impl<V: DeserializeOwned, C: PayloadCodec> PayloadStoreV2<V, C> {
             }
         }
 
-        // locate the target chunk via precomputed offsets
-        let off = *self.chunk_offsets.get(chunk_idx).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "missing block header for chunk",
-            )
-        })?;
+        // locate the target chunk via precomputed offsets or mmap'ed trailer index
+        let off = if let Some((offs_pos, count)) = self.trailer_index {
+            if chunk_idx >= count {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "missing block header for chunk",
+                ));
+            }
+            // read u64 offset entries from mmap using unaligned loads
+            let base = unsafe { self.buf.as_ref().as_ptr().add(offs_pos) } as *const u64;
+            let raw_off = unsafe { ptr::read_unaligned(base.add(chunk_idx)) };
+            raw_off as usize
+        } else {
+            *self.chunk_offsets.get(chunk_idx).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "missing block header for chunk",
+                )
+            })?
+        };
 
         let buf = self.buf.as_ref();
         if off + 8 > buf.len() {
@@ -479,6 +632,7 @@ impl<V: DeserializeOwned, C: PayloadCodec> Clone for PayloadStoreV2<V, C> {
             buf: self.buf.clone(),
             data_start: self.data_start,
             chunk_offsets: self.chunk_offsets.clone(),
+            trailer_index: self.trailer_index,
             cache: self.cache.clone(),
             phantom: std::marker::PhantomData,
         }
@@ -510,7 +664,9 @@ impl<V: DeserializeOwned, C: PayloadCodec> PayloadStore<V, C> {
         let version = u16::from_le_bytes(header[PAYLOAD_STORE_MAGIC.len()..].try_into().unwrap());
         match version {
             PAYLOAD_STORE_VERSION => PayloadStoreV1::open(path).map(PayloadStore::V1),
-            PAYLOAD_STORE_VERSION_V2 => PayloadStoreV2::open(path).map(PayloadStore::V2),
+            PAYLOAD_STORE_VERSION_V2 | PAYLOAD_STORE_VERSION_V3 => {
+                PayloadStoreV2::open(path).map(PayloadStore::V2)
+            }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unsupported payload store version",

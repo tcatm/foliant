@@ -1,4 +1,5 @@
 use foliant::{Database, DatabaseBuilder, Entry, Streamer, TagIndexBuilder, TagMode};
+use foliant::payload_store::PAYLOAD_STORE_VERSION_V3;
 use serde_json::{json, Value};
 use std::fs;
 use tempfile::tempdir;
@@ -7,7 +8,7 @@ use tempfile::tempdir;
 fn list_by_tags_basic() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     builder.insert("apple", Some(json!({"tags":["fruit","red"]})));
     builder.insert("banana", Some(json!({"tags":["fruit","yellow"]})));
     builder.insert("cherry", Some(json!({"tags":["fruit","red"]})));
@@ -42,7 +43,7 @@ fn list_by_tags_basic() -> Result<(), Box<dyn std::error::Error>> {
 fn list_by_tags_empty_tags() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db_empty.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     builder.insert("a", Some(json!({"tags":["tag"]})));
     builder.close()?;
     let mut db_builder = Database::<Value>::open(&base)?;
@@ -57,7 +58,7 @@ fn list_by_tags_empty_tags() -> Result<(), Box<dyn std::error::Error>> {
 fn list_by_tags_unknown_tags() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db_unknown.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     builder.insert("a", Some(json!({"tags":["t1"]})));
     builder.insert("b", Some(json!({"tags":["t2"]})));
     builder.close()?;
@@ -73,7 +74,7 @@ fn list_by_tags_unknown_tags() -> Result<(), Box<dyn std::error::Error>> {
 fn list_by_tags_no_overlap_and() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db_no_overlap.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     builder.insert("a", Some(json!({"tags":["x"]})));
     builder.insert("b", Some(json!({"tags":["y"]})));
     builder.close()?;
@@ -88,7 +89,7 @@ fn list_by_tags_no_overlap_and() -> Result<(), Box<dyn std::error::Error>> {
 fn list_by_tags_with_values() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db_values.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     builder.insert("x", Some(json!({"tags":["a"],"value":1})));
     builder.insert("y", Some(json!({"tags":["b"],"value":2})));
     builder.insert("z", Some(json!({"tags":["a","b"],"value":3})));
@@ -119,13 +120,13 @@ fn list_by_tags_multi_shard() -> Result<(), Box<dyn std::error::Error>> {
     let base_dir = dir.path().join("db_multi");
     fs::create_dir(&base_dir)?;
     {
-        let mut b = DatabaseBuilder::<Value>::new(&base_dir.join("s1.idx"))?;
+        let mut b = DatabaseBuilder::<Value>::new(&base_dir.join("s1.idx"), PAYLOAD_STORE_VERSION_V3)?;
         b.insert("foo", Some(json!({"tags":["t1"]})));
         b.insert("bar", Some(json!({"tags":["t1","t2"]})));
         b.close()?;
     }
     {
-        let mut b = DatabaseBuilder::<Value>::new(&base_dir.join("s2.idx"))?;
+        let mut b = DatabaseBuilder::<Value>::new(&base_dir.join("s2.idx"), PAYLOAD_STORE_VERSION_V3)?;
         b.insert("baz", Some(json!({"tags":["t2"]})));
         b.insert("qux", Some(json!({"tags":["t3"]})));
         b.close()?;
@@ -153,7 +154,7 @@ fn list_by_tags_multi_shard() -> Result<(), Box<dyn std::error::Error>> {
 fn list_by_tags_merge_reorder_tags() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db_tags_merge.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     const TOTAL: usize = 10_001;
     for i in 0..TOTAL {
         let key = format!("k{:05}", TOTAL - i);
@@ -187,7 +188,7 @@ fn list_by_tags_merge_reorder_tags() -> Result<(), Box<dyn std::error::Error>> {
 fn list_by_tags_merge_reorder_image_text() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db_tags_merge_image_text.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     // 1. Insert a large number of Image+English-tagged entries, then flush to create segment #1.
     const IMAGE_COUNT: usize = 10_000;
     for i in 1..=IMAGE_COUNT {
@@ -258,7 +259,7 @@ fn list_by_tags_merge_reorder_image_text() -> Result<(), Box<dyn std::error::Err
 fn build_tag_index_single_entry_no_tags() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db_single_no_tags.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     builder.insert("a", Some(json!({"tags":[]})));
     builder.close()?;
     let mut db_builder = Database::<Value>::open(&base)?;

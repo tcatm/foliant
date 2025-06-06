@@ -1,4 +1,5 @@
 use foliant::{Database, DatabaseBuilder, Entry, Streamer, TantivyIndexBuilder};
+use foliant::payload_store::PAYLOAD_STORE_VERSION_V3;
 use serde_json::Value;
 use std::error::Error;
 use tempfile::tempdir;
@@ -8,7 +9,7 @@ use tempfile::tempdir;
 fn search_without_index_returns_empty() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     builder.insert("alpha", None);
     builder.insert("beta", None);
     builder.insert("alphabet", None);
@@ -28,7 +29,7 @@ fn search_without_index_returns_empty() -> Result<(), Box<dyn Error>> {
 fn search_with_index_returns_matches() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     builder.insert("alpha", None);
     builder.insert("beta", None);
     builder.insert("alphabet", None);
@@ -61,7 +62,7 @@ fn search_with_index_returns_matches() -> Result<(), Box<dyn Error>> {
 fn search_with_prefix_filters_results() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     builder.insert("band", None);
     builder.insert("banana", None);
     builder.insert("bandana", None);

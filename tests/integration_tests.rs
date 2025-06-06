@@ -1,5 +1,6 @@
 use foliant::Streamer;
 use foliant::{Database, DatabaseBuilder, Entry};
+use foliant::payload_store::PAYLOAD_STORE_VERSION_V3;
 use serde_cbor::Value;
 use std::error::Error;
 use tempfile::tempdir;
@@ -9,7 +10,7 @@ use tempfile::tempdir;
 fn simple_list() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     let keys = ["alpha", "beta", "gamma"];
     for &k in &keys {
         builder.insert(k, None);
@@ -31,7 +32,7 @@ fn simple_list() -> Result<(), Box<dyn Error>> {
 fn ignore_duplicates_integration() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db_ignore.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     builder.ignore_duplicates();
     builder.insert("key1", None);
     builder.insert("key1", None);
@@ -52,7 +53,7 @@ fn ignore_duplicates_integration() -> Result<(), Box<dyn Error>> {
 fn delimiter_grouping() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     let paths = ["foo/bar", "foo/baz", "foobar"];
     for &p in &paths {
         builder.insert(p, None);
@@ -73,7 +74,7 @@ fn delimiter_grouping() -> Result<(), Box<dyn Error>> {
 fn empty_key() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     builder.insert("", None);
     let db = builder.into_database()?;
     let list: Vec<Entry> = db.list("", None).unwrap().collect();
@@ -86,7 +87,7 @@ fn empty_key() -> Result<(), Box<dyn Error>> {
 fn prefix_split() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     builder.insert("team", None);
     builder.insert("test", None);
     let db = builder.into_database()?;
@@ -106,7 +107,7 @@ fn prefix_split() -> Result<(), Box<dyn Error>> {
 fn mid_edge_prefix() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     builder.insert("abcde", None);
     builder.insert("abcdx", None);
     let db = builder.into_database()?;
@@ -126,7 +127,7 @@ fn mid_edge_prefix() -> Result<(), Box<dyn Error>> {
 fn unicode_keys() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     let words = ["こん", "こんにちは", "こんばんは"];
     for &w in &words {
         builder.insert(w, None);
@@ -148,7 +149,7 @@ fn unicode_keys() -> Result<(), Box<dyn Error>> {
 fn in_memory_payload_roundtrip() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     builder.insert("alpha", Some(Value::Integer(42)));
     builder.insert("beta", Some(Value::Text("hello".into())));
     builder.insert("gamma", None);
@@ -165,7 +166,7 @@ fn in_memory_payload_roundtrip() -> Result<(), Box<dyn Error>> {
 fn mmap_payload_access() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     builder.insert("x", Some(Value::Bool(true)));
     builder.insert(
         "y",
@@ -194,7 +195,7 @@ fn mmap_payload_access() -> Result<(), Box<dyn Error>> {
 fn serialize_vs_mmap_listing() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     let keys = ["alpha", "beta", "gamma/delta", "gamma/epsilon"];
     for &k in &keys {
         builder.insert(k, None);
@@ -214,7 +215,7 @@ fn serialize_vs_mmap_listing() -> Result<(), Box<dyn Error>> {
 fn roundtrip_prefixes() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     let keys = ["", "a", "ab", "abc", "companion", "compression"];
     for &k in &keys {
         builder.insert(k, None);
@@ -236,7 +237,7 @@ fn roundtrip_prefixes() -> Result<(), Box<dyn Error>> {
 fn multi_list_utf8_truncate() {
     let dir = tempdir().unwrap();
     let base = dir.path().join("testdb.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base).unwrap();
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3).unwrap();
     builder.insert("é", None);
     builder.close().unwrap();
     let db: Database<Value> = Database::open(&base).unwrap();
@@ -250,7 +251,7 @@ fn multi_list_utf8_truncate() {
 fn batching_and_sorted() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     builder.insert("d", None);
     builder.insert("a", None);
     builder.insert("c", None);
@@ -266,7 +267,7 @@ fn batching_and_sorted() -> Result<(), Box<dyn Error>> {
 fn batching_and_sorted_with_values() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db_values.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     builder.insert("d", Some(Value::Integer(1)));
     builder.insert("a", Some(Value::Text("alpha".into())));
     builder.insert("c", Some(Value::Bool(true)));
@@ -292,7 +293,7 @@ fn batching_and_sorted_with_values() -> Result<(), Box<dyn Error>> {
 fn get_key_basic() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db_get_key_basic.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     builder.insert("foo", Some(Value::Integer(1)));
     builder.insert("bar", Some(Value::Text("two".into())));
     builder.insert("baz", Some(Value::Bool(true)));
@@ -319,7 +320,7 @@ fn get_key_basic() -> Result<(), Box<dyn Error>> {
 fn get_key_with_new_fst_segment() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db_get_key_new_fst.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     // First segment: foo and bar
     builder.insert("foo", Some(Value::Integer(1)));
     builder.insert("bar", Some(Value::Text("two".into())));
@@ -349,7 +350,7 @@ fn get_key_with_new_fst_segment() -> Result<(), Box<dyn Error>> {
 fn get_key_multiple_fst_segments() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db_get_key_multiple_fst.idx");
-    let mut builder = DatabaseBuilder::<Value>::new(&base)?;
+    let mut builder = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?;
     // Partition many keys into three batches, flushing fst after the first two batches
     // to create multiple fst segments and stress fst's memory caching behavior on insert.
     let num_keys = 1_200;

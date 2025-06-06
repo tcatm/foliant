@@ -3,7 +3,8 @@ use foliant::IndexError;
 use foliant::SegmentInfo;
 use foliant::Streamer;
 use foliant::TagMode;
-use foliant::{Database, DatabaseBuilder, Entry, TagIndexBuilder, TantivyIndexBuilder};
+use foliant::{Database, DatabaseBuilder, Entry, TagIndexBuilder, TantivyIndexBuilder, convert_v2_to_v3_inplace};
+use foliant::payload_store::PayloadStoreVersion;
 use fst::map::Map;
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
@@ -61,6 +62,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Build a new trie index from input lines
+    /// Defaults to writing payload stores in V3 (compressed + mmap index); use --v2 or --v1 for older formats.
     Index {
         /// Path to write the serialized index
         #[arg(short, long, value_name = "FILE")]
@@ -80,6 +82,12 @@ enum Commands {
         /// Ignore duplicate keys during indexing
         #[arg(long)]
         ignore_duplicates: bool,
+        /// Write payload store in V1 (uncompressed) format
+        #[arg(long, conflicts_with = "v2")]
+        v1: bool,
+        /// Write payload store in V2 (compressed) format
+        #[arg(long, conflicts_with = "v1")]
+        v2: bool,
     },
     /// Generate or update the tag index (.tags) for an existing database by scanning JSON payloads
     TagIndex {
@@ -95,6 +103,12 @@ enum Commands {
         /// Path to the serialized index (file or directory)
         #[arg(short, long, value_name = "FILE")]
         index: PathBuf,
+    },
+    /// Convert a V2 payload store (.payload) to V3 by appending an index trailer in-place
+    ConvertPayload {
+        /// Path to the payload store file to convert
+        #[arg(value_name = "PAYLOAD_FILE")]
+        path: PathBuf,
     },
     List {
         /// Path to the serialized index
@@ -230,9 +244,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tag_field,
             prefix,
             ignore_duplicates,
+            v1,
+            v2,
         } => {
+            // Determine payload store version: v1, v2, or default v3
+            let payload_version = if v1 {
+                PayloadStoreVersion::V1
+            } else if v2 {
+                PayloadStoreVersion::V2
+            } else {
+                PayloadStoreVersion::V3
+            };
             // Build the database on-disk via builder, measuring throughput
-            let mut builder = DatabaseBuilder::<Value>::new(&index)?;
+            let mut builder = DatabaseBuilder::<Value>::new(&index, payload_version)?;
             if ignore_duplicates {
                 builder.ignore_duplicates();
             }
@@ -441,6 +465,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "Search index generated in {:.3} ms",
                 dur.as_secs_f64() * 1000.0
             );
+        }
+        Commands::ConvertPayload { path } => {
+            convert_v2_to_v3_inplace(&path)?;
+            println!("Converted payload store to v3: {:?}", path);
         }
         Commands::List {
             index,

@@ -13,7 +13,41 @@ use std::path::{Path, PathBuf};
 use crate::database::Database;
 use crate::error::{IndexError, Result};
 use crate::lookup_table_store::{LookupTableStore, LookupTableStoreBuilder};
-use crate::payload_store::{CborPayloadCodec, PayloadCodec, PayloadStoreBuilderV2};
+use crate::payload_store::{
+    CborPayloadCodec,
+    PayloadCodec,
+    PayloadStoreBuilderV1,
+    PayloadStoreBuilderV2,
+    PayloadStoreVersion,
+    convert_v2_to_v3_inplace,
+};
+use std::io;
+
+/// Generic payload store builder supporting V1 (uncompressed) and V2 (compressed) formats.
+enum GenericPayloadStoreBuilder<V: Serialize, C: PayloadCodec> {
+    V1(PayloadStoreBuilderV1<V, C>),
+    V2(PayloadStoreBuilderV2<V, C>),
+}
+
+impl<V, C> GenericPayloadStoreBuilder<V, C>
+where
+    V: Serialize,
+    C: PayloadCodec,
+{
+    fn append(&mut self, value: Option<V>) -> io::Result<u64> {
+        match self {
+            GenericPayloadStoreBuilder::V1(b) => b.append(value),
+            GenericPayloadStoreBuilder::V2(b) => b.append(value),
+        }
+    }
+
+    fn close(self) -> io::Result<()> {
+        match self {
+            GenericPayloadStoreBuilder::V1(b) => b.close(),
+            GenericPayloadStoreBuilder::V2(b) => b.close(),
+        }
+    }
+}
 
 pub(crate) const CHUNK_SIZE: usize = 128 * 1024;
 const INSERT_BATCH_SIZE: usize = 10_000;
@@ -194,7 +228,8 @@ where
 {
     /// Full path to the `.idx` file.
     idx_path: PathBuf,
-    payload_store: PayloadStoreBuilderV2<V, C>,
+    /// Payload store writer (V1 uncompressed or V2 compressed).
+    payload_store: GenericPayloadStoreBuilder<V, C>,
     buffer: Vec<(Vec<u8>, u64)>,
     idx_builder: Option<IndexedBuilder>,
     /// Optional callback for each key merged during final index write.
@@ -203,6 +238,8 @@ where
     before_merge_cb: Box<dyn FnMut(&[SegmentInfo])>,
     /// If true, duplicate keys will be ignored when building the inline index.
     ignore_duplicates: bool,
+    /// Payload store version to write (V1, V2, or V3).
+    payload_version: PayloadStoreVersion,
 }
 
 impl<V, C> DatabaseBuilder<V, C>
@@ -211,10 +248,22 @@ where
     C: PayloadCodec,
 {
     /// Create a new database builder for the given `.idx` file path; writes payloads to `<idx_path>.payload` and lookup index to `<idx_path>.lookup`, buffering keys for sorted insertion.
-    pub fn new<P: AsRef<Path>>(idx_path: P) -> Result<Self> {
+    /// Create a new database builder for the given `.idx` file path, choosing payload format version.
+    /// Version 1 is uncompressed, version 2 is compressed, version 3 adds an mmap-able index trailer.
+    pub fn new<P: AsRef<Path>>(idx_path: P, version: impl Into<PayloadStoreVersion>) -> Result<Self> {
         let idx_path = idx_path.as_ref().to_path_buf();
         let payload_path = idx_path.with_extension("payload");
-        let payload_store = PayloadStoreBuilderV2::<V, C>::open(&payload_path)?;
+        let version = version.into();
+        let payload_store = match version {
+            PayloadStoreVersion::V1 => {
+                let b = PayloadStoreBuilderV1::<V, C>::open(&payload_path)?;
+                GenericPayloadStoreBuilder::V1(b)
+            }
+            PayloadStoreVersion::V2 | PayloadStoreVersion::V3 => {
+                let b = PayloadStoreBuilderV2::<V, C>::open(&payload_path)?;
+                GenericPayloadStoreBuilder::V2(b)
+            }
+        };
 
         Ok(DatabaseBuilder::<V, C> {
             idx_path,
@@ -224,6 +273,7 @@ where
             write_cb: Box::new(|| {}),
             before_merge_cb: Box::new(|_stats| {}),
             ignore_duplicates: false,
+            payload_version: version,
         })
     }
 
@@ -333,6 +383,11 @@ where
         }
 
         self.payload_store.close()?;
+        // For V3 payload stores, append mmap-able index trailer after writing blocks
+        if self.payload_version == PayloadStoreVersion::V3 {
+            let payload_path = self.idx_path.with_extension("payload");
+            convert_v2_to_v3_inplace(&payload_path)?;
+        }
         Ok(())
     }
 
