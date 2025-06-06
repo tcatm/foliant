@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fs::read_dir;
 use std::io;
 use std::path::Path;
 
@@ -54,29 +53,10 @@ where
         Ok(())
     }
 
-    /// Open a database from either a single shard (file) or a directory of shards.
+    /// Open a database by creating a new instance and adding the given shard.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let base = path.as_ref();
         let mut db = Database::<V, C>::new();
-        if base.is_dir() {
-            for entry in read_dir(base)? {
-                let ent = entry?;
-                let p = ent.path();
-                if p.extension().and_then(|s| s.to_str()) != Some("idx") {
-                    continue;
-                }
-                if !p.with_extension("payload").exists() {
-                    continue;
-                }
-
-                if let Err(e) = db.add_shard(&p) {
-                    eprintln!("warning: failed to add shard {:?}: {}", p, e);
-                    continue;
-                }
-            }
-        } else {
-            db.add_shard(base)?;
-        }
+        db.add_shard(path)?;
         Ok(db)
     }
 

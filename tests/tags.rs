@@ -130,9 +130,13 @@ fn list_by_tags_multi_shard() -> Result<(), Box<dyn std::error::Error>> {
         b.insert("qux", Some(json!({"tags":["t3"]})));
         b.close()?;
     }
-    let mut db_builder = Database::<Value>::open(&base_dir)?;
+    let mut db_builder = Database::<Value>::new();
+    db_builder.add_shard(&base_dir.join("s1.idx"))?;
+    db_builder.add_shard(&base_dir.join("s2.idx"))?;
     TagIndexBuilder::build_index(&mut db_builder, "tags", None)?;
-    let db: Database<Value> = Database::open(&base_dir)?;
+    let mut db = Database::<Value>::new();
+    db.add_shard(&base_dir.join("s1.idx"))?;
+    db.add_shard(&base_dir.join("s2.idx"))?;
     let or_list = db_list_tags(&db, &["t1", "t2"], TagMode::Or, None);
     assert_eq!(
         or_list,

@@ -30,8 +30,10 @@ fn multi_shard_listing_complex() -> Result<(), Box<dyn Error>> {
         b2.close()?;
     }
 
-    // Open directory of shards
-    let db: Database<Value> = Database::open(&db_dir)?;
+    // Load shards into a new database
+    let mut db = Database::<Value>::new();
+    db.add_shard(&db_dir.join("shard1.idx"))?;
+    db.add_shard(&db_dir.join("shard2.idx"))?;
 
     // 1) No delimiter: merge and list all keys with first-shard precedence
     let mut all: Vec<Entry> = db.list("", None)?.collect();
@@ -92,8 +94,10 @@ fn multi_shard_listing_complex_with_values() -> Result<(), Box<dyn Error>> {
         b2.close()?;
     }
 
-    // Open directory of shards
-    let db: Database<Value> = Database::open(&db_dir)?;
+    // Load shards into a new database
+    let mut db = Database::<Value>::new();
+    db.add_shard(&db_dir.join("shard1.idx"))?;
+    db.add_shard(&db_dir.join("shard2.idx"))?;
 
     // 1) No delimiter: merge and list all keys with first-shard precedence
     let mut all: Vec<Entry> = db.list("", None)?.collect();
@@ -156,7 +160,10 @@ fn multi_shard_listing_deep_prefix() -> Result<(), Box<dyn Error>> {
         b.close()?;
     }
 
-    let db: Database<Value> = Database::open(&db_dir)?;
+    // Load shards into a new database
+    let mut db = Database::<Value>::new();
+    db.add_shard(&db_dir.join("s1.idx"))?;
+    db.add_shard(&db_dir.join("s2.idx"))?;
     // List under "foo/" (one-level prefix) with grouping at '/'
     let mut lvl1: Vec<Entry> = db.list("foo/", Some('/'))?.collect();
     lvl1.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -208,8 +215,10 @@ fn multi_shard_listing_none_values() -> Result<(), Box<dyn Error>> {
         b.close()?;
     }
 
-    // Open directory of shards
-    let db: Database<Value> = Database::open(&db_dir)?;
+    // Load shards into a new database
+    let mut db = Database::<Value>::new();
+    db.add_shard(&db_dir.join("A.idx"))?;
+    db.add_shard(&db_dir.join("B.idx"))?;
 
     // No delimiter: list all keys, first-shard wins for duplicates
     let mut all: Vec<Entry> = db.list("", None)?.collect();
@@ -259,7 +268,10 @@ fn multi_shard_listing_with_prefix() -> Result<(), Box<dyn Error>> {
         b.close()?;
     }
 
-    let db: Database<Value> = Database::open(&db_dir)?;
+    // Load shards into a new database
+    let mut db = Database::<Value>::new();
+    db.add_shard(&db_dir.join("sh1.idx"))?;
+    db.add_shard(&db_dir.join("sh2.idx"))?;
     // List only keys under "foo"
     let mut list: Vec<Entry> = db.list("foo", None)?.collect();
     list.sort_by(|a, b| a.as_str().cmp(b.as_str()));

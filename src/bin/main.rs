@@ -158,6 +158,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pb.set_style(style);
             pb.set_message("loading shards");
             for p in paths {
+                // show which shard is currently loading
+                if let Some(fname) = p.file_name() {
+                    pb.set_message(fname.to_string_lossy().into_owned());
+                }
                 match db.add_shard(&p) {
                     Ok(_) => (),
                     Err(e) => eprintln!("warning: failed to add shard {:?}: {}", p, e),
