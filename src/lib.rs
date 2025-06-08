@@ -9,6 +9,7 @@ pub use payload_store::{PayloadStoreBuilderV2, PayloadStoreV2, convert_v2_to_v3_
 mod shard;
 mod streamer;
 mod tag_index;
+mod prefix;
 
 pub use builder::DatabaseBuilder;
 pub use builder::SegmentInfo;

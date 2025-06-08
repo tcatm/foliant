@@ -167,7 +167,9 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
         let delim = state.delim;
         if line.split_whitespace().next() == Some("tags") {
             let mut seen_tags = HashSet::new();
-            match state.db.list_tags() {
+            // Completion should respect current working prefix
+            let prefix_opt = if cwd.is_empty() { None } else { Some(cwd.as_str()) };
+            match state.db.list_tags(prefix_opt) {
                 Ok(mut tag_stream) => {
                     while let Some((tag, _)) = tag_stream.next() {
                         // Support exclusion markers '-' and '!' as prefixes.
@@ -384,10 +386,15 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
             }
             if include_tags.is_empty() && exclude_tags.is_empty() {
                 let state_ref = state.borrow();
-                match state_ref.db.list_tags() {
+                let prefix_opt = if state_ref.cwd.is_empty() {
+                    None
+                } else {
+                    Some(state_ref.cwd.as_str())
+                };
+                match state_ref.db.list_tags(prefix_opt) {
                     Ok(mut tag_stream) => {
                         while let Some((tag, count)) = tag_stream.next() {
-                            println!("{} ({})", tag, count);
+                            println!("🏷️  \x1b[35m{:<32}\x1b[0m \x1b[90m{:>12}\x1b[0m", tag, count);
                         }
                     }
                     Err(e) => {

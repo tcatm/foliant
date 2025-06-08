@@ -16,6 +16,7 @@ use crate::payload_store::{CborPayloadCodec, PayloadCodec};
 use crate::shard::Shard;
 use crate::streamer::{PrefixStream, Streamer as DbStreamer};
 use crate::tag_index::TagIndex;
+use crate::prefix::walk_prefix_shards;
 
 /// Read-only database: union of one or more shards (FST maps + payload stores)
 /// Read-only database: union of one or more shards (FST maps + payload stores)
@@ -117,8 +118,15 @@ where
         prefix: Option<&'a str>,
         query: &str,
     ) -> Result<Box<dyn DbStreamer<Item = Entry<V>> + 'a>> {
+        // Pre-walk prefix across shards to skip those without matching keys
+        let shards_to_query: Vec<&Shard<V, C>> = if let Some(pref) = prefix {
+            let (_fsts, shards_f, _states) = walk_prefix_shards(&self.shards, pref.as_bytes());
+            shards_f
+        } else {
+            self.shards.iter().collect()
+        };
         let mut streams: Vec<Box<dyn DbStreamer<Item = Entry<V>> + 'a>> = Vec::new();
-        for shard in &self.shards {
+        for shard in shards_to_query {
             if shard.search.is_some() {
                 streams.push(shard.stream_by_search(query, prefix)?);
             }
@@ -184,8 +192,15 @@ where
         mode: TagMode,
         prefix: Option<&'a str>,
     ) -> Result<Box<dyn DbStreamer<Item = Entry<V>> + 'a>> {
+        // Pre-walk prefix across shards to skip those without matching keys
+        let shards_to_query: Vec<&Shard<V, C>> = if let Some(pref) = prefix {
+            let (_fsts, shards_f, _states) = walk_prefix_shards(&self.shards, pref.as_bytes());
+            shards_f
+        } else {
+            self.shards.iter().collect()
+        };
         let mut streams: Vec<Box<dyn DbStreamer<Item = Entry<V>> + 'a>> = Vec::new();
-        for shard in &self.shards {
+        for shard in shards_to_query {
             streams.push(shard.stream_by_tags(include_tags, exclude_tags, mode, prefix)?);
         }
         struct ChainStreamer<'a, V>
@@ -213,13 +228,23 @@ where
         Ok(Box::new(ChainStreamer { streams, idx: 0 }))
     }
 
-    /// Stream all tags present in the database, yielding each tag and its
-    /// total count (unioned across all shards' tag indexes).
-    pub fn list_tags<'a>(&'a self) -> Result<Box<dyn DbStreamer<Item = (String, usize)> + 'a>> {
+    /// Stream all tags present in the database, optionally restricted to keys
+    /// under the given prefix, yielding each tag and its total count
+    /// (unioned across all shards' tag indexes).
+    pub fn list_tags<'a>(
+        &'a self,
+        prefix: Option<&'a str>,
+    ) -> Result<Box<dyn DbStreamer<Item = (String, usize)> + 'a>> {
+        // Pre-walk prefix across shards to skip those without matching keys
+        let shards_to_query: Vec<&Shard<V, C>> = if let Some(pref) = prefix {
+            let (_fsts, shards_f, _states) = walk_prefix_shards(&self.shards, pref.as_bytes());
+            shards_f
+        } else {
+            self.shards.iter().collect()
+        };
         // Collect only shards that actually have a TagIndex
-        let tag_indices: Vec<&TagIndex> = self
-            .shards
-            .iter()
+        let tag_indices: Vec<&TagIndex> = shards_to_query
+            .into_iter()
             .filter_map(|sh| sh.tags.as_ref())
             .collect();
         if tag_indices.is_empty() {

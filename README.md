@@ -135,7 +135,7 @@ Below is a summary of the `Database` methods that return a stream, along with th
 | `grep`         | `prefix: Option<&str>`, `re: &str`                                     | `Entry<V>`          | Full-key regex search              |
 | `search`       | `prefix: Option<&str>`, `query: &str`                                  | `Entry<V>`          | Fuzzy full-text (Tantivy) search   |
 | `list_by_tags` | `include_tags: &[&str]`, `exclude_tags: &[&str]`, `mode: TagMode`, `prefix: Option<&str>` | `Entry<V>`          | Tag-filtered listing               |
-| `list_tags`    | *(no extra args beyond `&self`)*                                       | `(String, usize)`   | Tag listing with global counts     |
+| `list_tags`    | `prefix: Option<&str>`                                                 | `(String, usize)`   | Tag listing (counts for keys under prefix) |
 
 ### Design Notes
 - The index uses the `fst` crate's `MapBuilder` to store keys with `u64` lookup identifiers as weights, each pointing into the lookup-FST mapping IDs to payload pointers.

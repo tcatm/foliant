@@ -1,6 +1,7 @@
 use crate::shard::SharedMmap;
 use crate::{Entry, Shard, Streamer};
 use fst::raw::{Fst, Node, Output};
+use crate::prefix::walk_prefix_shards;
 use smallvec::SmallVec;
 /// Maximum expected key length for reserve hints
 const MAX_KEY_LEN: usize = 256;
@@ -90,45 +91,13 @@ where
         Vec<&'a Shard<V, C>>,
         FrameMulti<'a>,
     ) {
-        // Filter shards by prefix and build per-shard state, pre-allocating for efficiency
-        let mut fsts: Vec<&'a Fst<SharedMmap>> = Vec::with_capacity(shards.len());
-        let mut shards_f: Vec<&'a Shard<V, C>> = Vec::with_capacity(shards.len());
-        let mut states: Vec<FrameState<'a>> = Vec::with_capacity(shards.len());
-        for shard in shards {
-            let raw_fst = shard.fst.as_fst();
-            let mut node = raw_fst.root();
-            let mut out = node.final_output();
-            let mut ok = true;
-
-            for &b in prefix {
-                if let Some(idx) = node.find_input(b) {
-                    let tr = node.transition(idx);
-                    out = out.cat(tr.out);
-                    node = raw_fst.node(tr.addr);
-                } else {
-                    ok = false;
-                    break;
-                }
-            }
-
-            if ok {
-                let idx = fsts.len();
-                fsts.push(raw_fst);
-                shards_f.push(shard);
-                states.push(FrameState {
-                    shard_idx: idx,
-                    node,
-                    output: out,
-                });
-            }
-        }
-
-        // Build initial frame with pre-reserved buffers and set its state
+        let (fsts, shards_f, prefix_states) = walk_prefix_shards(shards, prefix);
         let mut initial_frame = FrameMulti::with_capacity(shards.len());
-        // Populate initial per-shard states and prefix length
-        initial_frame.states = states;
+        initial_frame.states = prefix_states
+            .into_iter()
+            .map(|ps| FrameState { shard_idx: ps.shard_idx, node: ps.node, output: ps.output })
+            .collect();
         initial_frame.prefix_len = prefix.len();
-
         (fsts, shards_f, initial_frame)
     }
 

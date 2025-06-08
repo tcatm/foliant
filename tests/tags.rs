@@ -265,7 +265,7 @@ fn build_tag_index_single_entry_no_tags() -> Result<(), Box<dyn std::error::Erro
     let mut db_builder = Database::<Value>::open(&base)?;
     TagIndexBuilder::build_index(&mut db_builder, "tags", None)?;
     let db: Database<Value> = Database::open(&base)?;
-    let tags: Vec<(String, usize)> = db.list_tags()?.collect();
+    let tags: Vec<(String, usize)> = db.list_tags(None)?.collect();
     assert!(tags.is_empty());
     Ok(())
 }
