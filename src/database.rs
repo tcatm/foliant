@@ -16,7 +16,6 @@ use crate::payload_store::{CborPayloadCodec, PayloadCodec};
 use crate::shard::Shard;
 use crate::streamer::{PrefixStream, Streamer as DbStreamer};
 use crate::tag_index::TagIndex;
-use roaring::RoaringBitmap;
 
 /// Read-only database: union of one or more shards (FST maps + payload stores)
 /// Read-only database: union of one or more shards (FST maps + payload stores)

@@ -16,7 +16,7 @@ fn search_without_index_returns_empty() -> Result<(), Box<dyn Error>> {
     builder.close()?;
 
     let db = Database::<Value>::open(&base)?;
-    let mut results: Vec<Entry<Value>> = db.search(None, "alp")?.collect();
+    let results: Vec<Entry<Value>> = db.search(None, "alp")?.collect();
     assert!(
         results.is_empty(),
         "expected no search results before index build"

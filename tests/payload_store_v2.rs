@@ -29,7 +29,7 @@ fn v2_roundtrip_simple() -> Result<(), Box<dyn Error>> {
 fn payload_file_header_v2() -> Result<(), Box<dyn Error>> {
     let tmp = NamedTempFile::new()?;
     let path = tmp.path();
-    let mut builder = PayloadStoreBuilderV2::<Vec<u8>>::open(path)?;
+    let builder = PayloadStoreBuilderV2::<Vec<u8>>::open(path)?;
     // no entries appended; finalize to flush header only
     builder.close()?;
     let data = std::fs::read(path)?;
