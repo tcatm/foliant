@@ -1,10 +1,13 @@
 use clap::{Parser, Subcommand};
+use foliant::payload_store::PayloadStoreVersion;
 use foliant::IndexError;
 use foliant::SegmentInfo;
 use foliant::Streamer;
 use foliant::TagMode;
-use foliant::{Database, DatabaseBuilder, Entry, TagIndexBuilder, TantivyIndexBuilder, convert_v2_to_v3_inplace};
-use foliant::payload_store::PayloadStoreVersion;
+use foliant::{
+    convert_v2_to_v3_inplace, Database, DatabaseBuilder, Entry, TagIndexBuilder,
+    TantivyIndexBuilder,
+};
 use fst::map::Map;
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
@@ -91,8 +94,8 @@ enum Commands {
     },
     /// Generate or update the tag index (.tags) for an existing database by scanning JSON payloads
     TagIndex {
-        /// Path to the serialized index (file or directory)
-        #[arg(short, long, value_name = "FILE")]
+        /// Path to the serialized index (file or directory of shards)
+        #[arg(short, long, value_name = "INDEX")]
         index: PathBuf,
         /// JSON field name containing array-of-strings tags
         #[arg(long, value_name = "TAGFIELD")]
@@ -100,8 +103,8 @@ enum Commands {
     },
     /// Generate or update the search index (.search) for an existing database by scanning keys
     TantivyIndex {
-        /// Path to the serialized index (file or directory)
-        #[arg(short, long, value_name = "FILE")]
+        /// Path to the serialized index (file or directory of shards)
+        #[arg(short, long, value_name = "INDEX")]
         index: PathBuf,
     },
     /// Convert a V2 payload store (.payload) to V3 by appending an index trailer in-place
@@ -111,8 +114,8 @@ enum Commands {
         path: PathBuf,
     },
     List {
-        /// Path to the serialized index
-        #[arg(short, long, value_name = "FILE")]
+        /// Path to the serialized index (file or directory of shards)
+        #[arg(short, long, value_name = "INDEX")]
         index: PathBuf,
         /// Comma-separated tags to include or exclude (prefix with '-' or '!' to exclude)
         #[arg(long, value_name = "TAGS")]
@@ -129,8 +132,8 @@ enum Commands {
     },
     /// Interactive shell for browsing the index (or run commands non-interactively)
     Shell {
-        /// Path to the serialized index
-        #[arg(short, long, value_name = "FILE")]
+        /// Path to the serialized index (file or directory of shards)
+        #[arg(short, long, value_name = "INDEX")]
         index: PathBuf,
         /// Delimiter character for grouping (default: '/')
         #[arg(short, long, value_name = "DELIM", default_value = "/")]

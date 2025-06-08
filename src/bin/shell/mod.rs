@@ -168,8 +168,8 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
         if line.split_whitespace().next() == Some("tags") {
             let mut seen_tags = HashSet::new();
             match state.db.list_tags() {
-                Ok(tag_counts) => {
-                    for (tag, _) in tag_counts {
+                Ok(mut tag_stream) => {
+                    while let Some((tag, _)) = tag_stream.next() {
                         // Support exclusion markers '-' and '!' as prefixes.
                         let (marker, rest) = if word.starts_with('-') || word.starts_with('!') {
                             (Some(word.chars().next().unwrap()), &word[1..])
@@ -385,8 +385,8 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
             if include_tags.is_empty() && exclude_tags.is_empty() {
                 let state_ref = state.borrow();
                 match state_ref.db.list_tags() {
-                    Ok(tag_counts) => {
-                        for (tag, count) in tag_counts {
+                    Ok(mut tag_stream) => {
+                        while let Some((tag, count)) = tag_stream.next() {
                             println!("{} ({})", tag, count);
                         }
                     }

@@ -27,7 +27,7 @@ cargo test
 
 ## CLI Usage Examples
 
-> **Note:** the `-i`/`--index` flag now requires the full `.idx` filepath (no implicit extension).
+> **Note:** the `-i`/`--index` flag now accepts either a single `.idx` filepath (explicit extension required) or a directory containing one or more `.idx` shards (with matching `.payload` files).
 
 ### Build an index from plain text lines
 ```
@@ -64,8 +64,11 @@ foliant index -i data.idx --json path --prefix foo/ --input sample.jsonl
 
 ### Interactive shell
 ```bash
-
+# Single-shard database:
 foliant shell -i data.idx
+
+# Multi-shard database directory:
+foliant shell -i shards_dir
 ```
 
 ### Search entries in interactive shell
@@ -117,10 +120,22 @@ Sample lines in `sample.jsonl`:
 - `Entry`: enum returned by `Database::list`, either `Entry::Key(String)` for full keys or `Entry::CommonPrefix(String)` for grouped prefixes
 - `PayloadStoreBuilder<V, C = CborPayloadCodec>` and `PayloadStore<V, C = CborPayloadCodec>`: internal types for writing and reading the `.payload` file using the provided `PayloadCodec` (defaults to CBOR)
 
-- `TagIndex`: read-only handle for querying a tag index file; supports listing tags (`list_tags`) and retrieving bitmap for a tag (`get`)
+- `TagIndex`: read-only handle for querying a tag index file; supports streaming all tags with their packed blob pointers via `list_tags`, retrieving a tag's bitmap via `get`, or decoding a packed pointer into a bitmap via `get_bitmap`
 - `TagIndexBuilder`: builder for creating a new tag index file; insert lookup IDs with associated tags, then finalize to write the `.tags` file
 - `TantivyIndex`: read-only handle for querying a full-text search index per shard; supports executing raw Tantivy queries against keys.
 - `TantivyIndexBuilder`: builder for creating or updating a full-text search index; insert keys and finalize to write the `.search/` directories.
+
+### Streaming API
+
+Below is a summary of the `Database` methods that return a stream, along with their arguments, stream-item types, and a brief description:
+
+| Method         | Arguments                                                              | Stream Item         | Description                        |
+| -------------- | ---------------------------------------------------------------------- | ------------------- | ---------------------------------- |
+| `list`         | `prefix: &str`, `delimiter: Option<char>`                              | `Entry<V>`          | Prefix/delimiter listing           |
+| `grep`         | `prefix: Option<&str>`, `re: &str`                                     | `Entry<V>`          | Full-key regex search              |
+| `search`       | `prefix: Option<&str>`, `query: &str`                                  | `Entry<V>`          | Fuzzy full-text (Tantivy) search   |
+| `list_by_tags` | `include_tags: &[&str]`, `exclude_tags: &[&str]`, `mode: TagMode`, `prefix: Option<&str>` | `Entry<V>`          | Tag-filtered listing               |
+| `list_tags`    | *(no extra args beyond `&self`)*                                       | `(String, usize)`   | Tag listing with global counts     |
 
 ### Design Notes
 - The index uses the `fst` crate's `MapBuilder` to store keys with `u64` lookup identifiers as weights, each pointing into the lookup-FST mapping IDs to payload pointers.
