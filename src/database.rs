@@ -1,11 +1,11 @@
-use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 
 use fst::automaton::Str;
-use fst::map::OpBuilder;
+use fst::map::{OpBuilder, Union};
 use fst::Automaton;
 use fst::IntoStreamer;
+use fst::Streamer;
 use regex_automata::sparse::SparseDFA;
 use serde::de::DeserializeOwned;
 
@@ -15,6 +15,7 @@ use crate::multi_list::MultiShardListStreamer;
 use crate::payload_store::{CborPayloadCodec, PayloadCodec};
 use crate::shard::Shard;
 use crate::streamer::{PrefixStream, Streamer as DbStreamer};
+use crate::tag_index::TagIndex;
 use roaring::RoaringBitmap;
 
 /// Read-only database: union of one or more shards (FST maps + payload stores)
@@ -213,27 +214,60 @@ where
         Ok(Box::new(ChainStreamer { streams, idx: 0 }))
     }
 
-    /// List all tags present in the database, returning their counts.
-    pub fn list_tags(&self) -> Result<Vec<(String, usize)>> {
-        let mut tag_map: HashMap<String, RoaringBitmap> = HashMap::new();
-        for shard in &self.shards {
-            if let Some(idx) = &shard.tags {
-                for tag in idx.list_tags()? {
-                    if let Ok(Some(bm)) = idx.get(&tag) {
-                        tag_map
-                            .entry(tag)
-                            .and_modify(|acc| *acc |= &bm)
-                            .or_insert(bm);
-                    }
+    /// Stream all tags present in the database, yielding each tag and its
+    /// total count (unioned across all shards' tag indexes).
+    pub fn list_tags<'a>(&'a self) -> Result<Box<dyn DbStreamer<Item = (String, usize)> + 'a>> {
+        // Collect only shards that actually have a TagIndex
+        let tag_indices: Vec<&TagIndex> = self
+            .shards
+            .iter()
+            .filter_map(|sh| sh.tags.as_ref())
+            .collect();
+        if tag_indices.is_empty() {
+            // Empty stream if no tag indexes present
+            struct EmptyTagCount;
+            impl DbStreamer for EmptyTagCount {
+                type Item = (String, usize);
+                fn next(&mut self) -> Option<Self::Item> {
+                    None
                 }
             }
+            return Ok(Box::new(EmptyTagCount));
         }
-        let mut res: Vec<(String, usize)> = tag_map
-            .into_iter()
-            .map(|(tag, bm)| (tag, bm.len() as usize))
-            .collect();
-        res.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(res)
+
+        // Build a union of all tag-FST streams (empty prefix = all tags)
+        let mut op = OpBuilder::new();
+        for idx in &tag_indices {
+            op = op.add(idx.list_tags());
+        }
+        let stream = op.union().into_stream();
+
+        // Streamer that walks the merged FST and unions Roaring bitmaps on the fly
+        struct TagCountStreamer<'a> {
+            stream: Union<'a>,
+            tag_indices: Vec<&'a TagIndex>,
+        }
+        impl<'a> DbStreamer for TagCountStreamer<'a> {
+            type Item = (String, usize);
+            fn next(&mut self) -> Option<Self::Item> {
+                self.stream.next().map(|(tag_bytes, ivs)| {
+                    let tag = String::from_utf8_lossy(tag_bytes).into_owned();
+                    let mut count = 0;
+                    for iv in ivs {
+                        let sub_bm = self.tag_indices[iv.index]
+                            .get_bitmap(iv.value)
+                            .expect("failed to decode roaring bitmap");
+                        count += sub_bm.len() as usize;
+                    }
+                    (tag, count)
+                })
+            }
+        }
+
+        Ok(Box::new(TagCountStreamer {
+            stream,
+            tag_indices,
+        }))
     }
 
     /// Return a slice of shards in the database.

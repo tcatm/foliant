@@ -3,11 +3,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::shard::Shard;
-use fst::automaton::Str;
+use fst::automaton::{StartsWith, Str};
 use fst::map::Map;
+use fst::map::StreamBuilder;
 use fst::Automaton;
-use fst::IntoStreamer;
-use fst::Streamer as FstStreamer;
+use fst::Streamer;
 use memmap2::Mmap;
 use roaring::RoaringBitmap;
 use std::sync::Arc;
@@ -128,14 +128,30 @@ impl TagIndex {
 }
 
 impl TagIndex {
-    /// List all tags present in this index.
-    pub fn list_tags(&self) -> Result<Vec<String>> {
-        let mut tags = Vec::new();
-        let mut stream = self.fst.search(Str::new("").starts_with()).into_stream();
-        while let Some((tag, _)) = stream.next() {
-            tags.push(String::from_utf8_lossy(tag).into_owned());
+    /// Stream all tags present in this index, yielding each tag's raw bytes and its
+    /// packed blob pointer (offset<<32 | length).  Use `get_bitmap` to decode the
+    /// packed pointer into a RoaringBitmap when needed.
+    pub fn list_tags<'a>(&'a self) -> StreamBuilder<'a, StartsWith<Str<'a>>> {
+        self.fst.search(Str::new("").starts_with())
+    }
+
+    /// Retrieve the RoaringBitmap for a packed tag pointer (offset<<32 | length) obtained from `list_tags`.
+    pub fn get_bitmap(&self, packed: u64) -> Result<RoaringBitmap> {
+        let offset_in_blob = (packed >> 32) as usize;
+        let len = (packed & 0xffff_ffff) as usize;
+        let start = self.blob_offset + offset_in_blob;
+        let end = start + len;
+        if end > self.mmap.as_ref().len() {
+            return Err(IndexError::InvalidFormat("tags blob out of bounds"));
         }
-        Ok(tags)
+        let slice = &self.mmap.as_ref()[start..end];
+        let bmp = RoaringBitmap::deserialize_from(slice).map_err(|e| {
+            IndexError::Io(io::Error::new(
+                io::ErrorKind::Other,
+                format!("failed to deserialize roaring bitmap: {}", e),
+            ))
+        })?;
+        Ok(bmp)
     }
 }
 
