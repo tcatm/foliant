@@ -138,6 +138,9 @@ enum Commands {
         /// Delimiter character for grouping (default: '/')
         #[arg(short, long, value_name = "DELIM", default_value = "/")]
         delimiter: char,
+        /// Maximum number of shards to load (for debugging large databases)
+        #[arg(short = 'n', long = "limit", value_name = "N")]
+        limit: Option<usize>,
         /// Shell commands to execute non-interactively (skips REPL)
         #[arg(value_name = "CMD", num_args = 0.., last = true)]
         commands: Vec<String>,
@@ -149,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     /// Load a database from either a single shard (.idx) file or a directory of shards.
     /// When loading a directory, shows a progress bar counting shards loaded.
-    fn load_db<V>(path: &std::path::PathBuf) -> Result<Database<V>, IndexError>
+    fn load_db<V>(path: &std::path::PathBuf, limit: Option<usize>) -> Result<Database<V>, IndexError>
     where
         V: DeserializeOwned + 'static,
     {
@@ -164,7 +167,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     paths.push(p);
                 }
             }
-            let total = paths.len() as u64;
+            let total = match limit {
+                Some(n) => n.min(paths.len()) as u64,
+                None => paths.len() as u64,
+            };
             let pb = ProgressBar::new(total);
             let style = ProgressStyle::with_template(
                 "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] [{eta_precise}] \
@@ -174,7 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .progress_chars("#>-");
             pb.set_style(style);
             pb.set_message("loading shards");
-            for p in paths {
+            for p in paths.into_iter().take(limit.unwrap_or(usize::MAX)) {
                 // show which shard is currently loading
                 if let Some(fname) = p.file_name() {
                     pb.set_message(fname.to_string_lossy().into_owned());
@@ -482,7 +488,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             // Load shards with a progress bar
             let load_start = Instant::now();
-            let db_handle: Database<Value> = load_db(&index)?;
+            let db_handle: Database<Value> = load_db(&index, None)?;
             let load_duration = load_start.elapsed();
             // Choose tag-filtered or plain listing
             let stream_start = Instant::now();
@@ -540,10 +546,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Shell {
             index,
             delimiter,
+            limit,
             commands,
         } => {
             // Open single DB or sharded directory for interactive shell or batch commands
-            let db_handle: Database<Value> = load_db(&index)?;
+            let db_handle: Database<Value> = load_db(&index, limit)?;
             if commands.is_empty() {
                 run_shell(db_handle, delimiter)?;
             } else {

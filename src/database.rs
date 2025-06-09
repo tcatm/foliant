@@ -294,6 +294,59 @@ where
         }))
     }
 
+    /// Stream all tag names present in the database, optionally restricted to keys
+    /// under the given prefix, *without* computing per-tag counts. This is much faster
+    /// for use-cases like shell autocompletion.
+    pub fn list_tag_names<'a>(
+        &'a self,
+        prefix: Option<&'a str>,
+    ) -> Result<Box<dyn DbStreamer<Item = String> + 'a>> {
+        // Pre-walk prefix across shards to skip those without matching keys
+        let shards_to_query: Vec<&Shard<V, C>> = if let Some(pref) = prefix {
+            let (_fsts, shards_f, _states) = walk_prefix_shards(&self.shards, pref.as_bytes());
+            shards_f
+        } else {
+            self.shards.iter().collect()
+        };
+        // Collect only shards that actually have a TagIndex
+        let tag_indices: Vec<&TagIndex> = shards_to_query
+            .into_iter()
+            .filter_map(|sh| sh.tags.as_ref())
+            .collect();
+        if tag_indices.is_empty() {
+            struct EmptyTagNames;
+            impl DbStreamer for EmptyTagNames {
+                type Item = String;
+                fn next(&mut self) -> Option<Self::Item> {
+                    None
+                }
+            }
+            return Ok(Box::new(EmptyTagNames));
+        }
+
+        // Build a union of all tag-FST streams (empty prefix = all tags)
+        let mut op = OpBuilder::new();
+        for idx in &tag_indices {
+            op = op.add(idx.list_tags());
+        }
+        let stream = op.union().into_stream();
+
+        // Streamer that walks the merged FST and yields only the tag string
+        struct TagNameStreamer<'a> {
+            stream: Union<'a>,
+        }
+        impl<'a> DbStreamer for TagNameStreamer<'a> {
+            type Item = String;
+            fn next(&mut self) -> Option<Self::Item> {
+                self.stream.next().map(|(tag_bytes, _ivs)| {
+                    String::from_utf8_lossy(tag_bytes).into_owned()
+                })
+            }
+        }
+
+        Ok(Box::new(TagNameStreamer { stream }))
+    }
+
     /// Return a slice of shards in the database.
     pub fn shards(&self) -> &[Shard<V, C>] {
         &self.shards

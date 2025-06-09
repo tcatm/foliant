@@ -167,11 +167,10 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
         let delim = state.delim;
         if line.split_whitespace().next() == Some("tags") {
             let mut seen_tags = HashSet::new();
-            // Completion should respect current working prefix
             let prefix_opt = if cwd.is_empty() { None } else { Some(cwd.as_str()) };
-            match state.db.list_tags(prefix_opt) {
+            match state.db.list_tag_names(prefix_opt) {
                 Ok(mut tag_stream) => {
-                    while let Some((tag, _)) = tag_stream.next() {
+                    while let Some(tag) = tag_stream.next() {
                         // Support exclusion markers '-' and '!' as prefixes.
                         let (marker, rest) = if word.starts_with('-') || word.starts_with('!') {
                             (Some(word.chars().next().unwrap()), &word[1..])
@@ -371,8 +370,11 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
             let mut tag_mode = TagMode::And;
             let mut include_tags = Vec::new();
             let mut exclude_tags = Vec::new();
+            let mut list_names_only = false;
             for tok in parts {
-                if tok == "-a" {
+                if tok == "-n" {
+                    list_names_only = true;
+                } else if tok == "-a" {
                     tag_mode = TagMode::And;
                 } else if tok == "-o" {
                     tag_mode = TagMode::Or;
@@ -391,14 +393,27 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                 } else {
                     Some(state_ref.cwd.as_str())
                 };
-                match state_ref.db.list_tags(prefix_opt) {
-                    Ok(mut tag_stream) => {
-                        while let Some((tag, count)) = tag_stream.next() {
-                            println!("🏷️  \x1b[35m{:<32}\x1b[0m \x1b[90m{:>12}\x1b[0m", tag, count);
+                if list_names_only {
+                    match state_ref.db.list_tag_names(prefix_opt) {
+                        Ok(mut tag_stream) => {
+                            while let Some(tag) = tag_stream.next() {
+                                println!("🏷️  \x1b[35m{:<32}\x1b[0m", tag);
+                            }
+                        }
+                        Err(e) => {
+                            println!("Error listing tags: {}", e);
                         }
                     }
-                    Err(e) => {
-                        println!("Error listing tags: {}", e);
+                } else {
+                    match state_ref.db.list_tags(prefix_opt) {
+                        Ok(mut tag_stream) => {
+                            while let Some((tag, count)) = tag_stream.next() {
+                                println!("🏷️  \x1b[35m{:<32}\x1b[0m \x1b[90m{:>12}\x1b[0m", tag, count);
+                            }
+                        }
+                        Err(e) => {
+                            println!("Error listing tags: {}", e);
+                        }
                     }
                 }
                 return Ok(false);
