@@ -199,7 +199,7 @@ where
         exclude_tags: &[&str],
         mode: crate::TagMode,
         prefix: Option<&'a str>,
-    ) -> Result<Box<dyn crate::Streamer<Item = crate::Entry<V>> + 'a>> {
+        ) -> Result<Box<dyn crate::Streamer<Item = crate::Entry<V>, Cursor = Vec<u8>> + 'a>> {
         // Build initial bitmap: includes if any, else full set if excluding only, else empty
         let mut filter_bm = if !include_tags.is_empty() {
             // Combine include tags by mode
@@ -261,6 +261,16 @@ where
             C: PayloadCodec,
         {
             type Item = crate::Entry<V>;
+            type Cursor = Vec<u8>;
+
+            fn cursor(&self) -> Self::Cursor {
+                unimplemented!("cursor not implemented");
+            }
+
+            fn seek(&mut self, _cursor: Self::Cursor) {
+                unimplemented!("seek not implemented");
+            }
+
             fn next(&mut self) -> Option<Self::Item> {
                 while let Some(ptr) = self.ptr_iter.next() {
                     if let Ok(Some(entry)) = (|| -> Result<Option<crate::Entry<V>>> {
@@ -306,7 +316,7 @@ where
         &'a self,
         query: &str,
         prefix: Option<&'a str>,
-    ) -> Result<Box<dyn crate::Streamer<Item = crate::Entry<V>> + 'a>> {
+        ) -> Result<Box<dyn crate::Streamer<Item = crate::Entry<V>, Cursor = Vec<u8>> + 'a>> {
         if let Some(idx) = &self.search {
             let ids = idx.search_stream(query, self.len())?;
             struct SearchStreamer<'a, V, C>
@@ -324,6 +334,16 @@ where
                 C: PayloadCodec,
             {
                 type Item = crate::Entry<V>;
+                type Cursor = Vec<u8>;
+
+                fn cursor(&self) -> Self::Cursor {
+                    unimplemented!("cursor not implemented");
+                }
+
+                fn seek(&mut self, _cursor: Self::Cursor) {
+                    unimplemented!("seek not implemented");
+                }
+
                 fn next(&mut self) -> Option<Self::Item> {
                     while let Some(id) = self.ids.next() {
                         if let Ok(Some(entry)) = self.shard.get_entry(id) {
@@ -344,7 +364,7 @@ where
                 shard: self,
                 ids: Box::new(ids),
                 prefix,
-            }));
+            }) as Box<dyn crate::Streamer<Item = crate::Entry<V>, Cursor = Vec<u8>> + 'a>);
         }
         // no search index: empty stream
         struct EmptyStreamer<V, C>(PhantomData<(V, C)>);
@@ -354,10 +374,20 @@ where
             C: PayloadCodec,
         {
             type Item = crate::Entry<V>;
+            type Cursor = Vec<u8>;
+
+            fn cursor(&self) -> Self::Cursor {
+                unimplemented!("cursor not implemented");
+            }
+
+            fn seek(&mut self, _cursor: Self::Cursor) {
+                unimplemented!("seek not implemented");
+            }
+
             fn next(&mut self) -> Option<Self::Item> {
                 None
             }
         }
-        Ok(Box::new(EmptyStreamer::<V, C>(PhantomData)))
+        Ok(Box::new(EmptyStreamer::<V, C>(PhantomData)) as Box<dyn crate::Streamer<Item = crate::Entry<V>, Cursor = Vec<u8>> + 'a>)
     }
 }

@@ -18,6 +18,101 @@ struct FrameState<'a> {
     output: Output,
 }
 
+impl<'a, V, C> MultiShardListStreamer<'a, V, C>
+where
+    V: DeserializeOwned,
+    C: PayloadCodec,
+{
+    /// Build a streamer and immediately fast‑forward so that the first `next()` yields
+    /// the first entry > `cursor`.  Avoids a second prefix walk when resuming.
+    pub fn resume(
+        shards: &'a [Shard<V, C>],
+        prefix: Vec<u8>,
+        delim: Option<u8>,
+        cursor: Vec<u8>,
+    ) -> Self {
+        let start_prefix = prefix.clone();
+        let (fsts, shards_f, initial_frame) = Self::walk_prefix(shards, &start_prefix);
+        // If literal prefix not found, fall back to scanning empty prefix then resume
+        if initial_frame.states.is_empty() && !start_prefix.is_empty() {
+            return Self::resume(shards, Vec::new(), delim, cursor);
+        }
+        let mut streamer = Self {
+            all_shards: shards,
+            fsts,
+            shards: shards_f,
+            delim,
+            prefix_str: String::from_utf8(start_prefix.clone()).expect("invalid utf8 in prefix"),
+            prefix: start_prefix.clone(),
+            start_prefix,
+            last_bytes: Vec::new(),
+            stack: vec![initial_frame],
+            frame_pool: Vec::new(),
+        };
+        streamer.prefix.reserve(MAX_KEY_LEN);
+        streamer.prefix_str.reserve(MAX_KEY_LEN);
+        streamer.stack.reserve(MAX_KEY_LEN);
+        streamer.frame_pool.reserve(MAX_KEY_LEN);
+        streamer.replay_seek_internal(&cursor);
+        streamer.last_bytes = cursor;
+        streamer
+    }
+
+    /// Internal helper: replay raw‐FST descent on each byte of `cursor`, advancing the DFS
+    /// branch indices and marking yielded state so `next()` resumes after the cursor.
+    fn replay_seek_internal(&mut self, cursor: &[u8]) {
+        for &b in cursor {
+            let frame = self.stack.last_mut().unwrap();
+            if frame.trans_idx == 0 {
+                frame.trans.clear();
+                for state in &frame.states {
+                    for ti in 0..state.node.len() {
+                        let tr = state.node.transition(ti);
+                        let out = state.output.cat(tr.out);
+                        if let Some(bucket) = frame.trans.iter_mut().find(|bucket| bucket.0 == tr.inp) {
+                            bucket.1.push((state.shard_idx, tr.addr, out));
+                        } else {
+                            let mut v = Vec::with_capacity(self.shards.len());
+                            v.push((state.shard_idx, tr.addr, out));
+                            frame.trans.push((tr.inp, v));
+                        }
+                    }
+                }
+                frame.trans.sort_unstable_by_key(|b| b.0);
+            }
+            if let Some((i, (_, refs))) = frame.trans.iter().enumerate().find(|(_, bucket)| bucket.0 == b) {
+                frame.trans_idx = i + 1;
+                self.prefix.push(b);
+                let mut new_frame = self
+                    .frame_pool
+                    .pop()
+                    .unwrap_or_else(|| FrameMulti::with_capacity(self.shards.len()));
+                new_frame.reset(self.prefix.len());
+                for (shard_i, addr, out) in refs.iter() {
+                    let node = self.fsts[*shard_i].node(*addr);
+                    new_frame.states.push(FrameState { shard_idx: *shard_i, node, output: *out });
+                }
+                self.stack.push(new_frame);
+            } else {
+                break;
+            }
+        }
+        if self.prefix == cursor {
+            if let Some(frame) = self.stack.last_mut() {
+                frame.yielded = true;
+            }
+        }
+        if let Some(d) = self.delim {
+            if cursor.last() == Some(&d) {
+                let old = self.stack.pop().unwrap();
+                self.frame_pool.push(old);
+                let new_len = self.stack.last().map(|f| f.prefix_len).unwrap_or(0);
+                self.prefix.truncate(new_len);
+            }
+        }
+    }
+}
+
 /// Frame for multi-shard DFS traversal with delimiter grouping
 pub(crate) struct FrameMulti<'a> {
     /// Per-shard state at this depth (shard index, node, and accumulated output)
@@ -60,6 +155,8 @@ where
     V: DeserializeOwned,
     C: PayloadCodec,
 {
+    /// All shards (for resetting on seek)
+    all_shards: &'a [Shard<V, C>],
     /// Raw FSTs for each matching shard
     fsts: Vec<&'a Fst<SharedMmap>>,
     /// References to shards corresponding to each FST
@@ -70,6 +167,10 @@ where
     prefix: Vec<u8>,
     /// Shared UTF-8 prefix string (aligned with `prefix` bytes)
     prefix_str: String,
+    /// Original search prefix bytes for resetting on seek
+    start_prefix: Vec<u8>,
+    /// Raw bytes of the last item returned (for cursor)
+    last_bytes: Vec<u8>,
     /// DFS stack of active frames
     stack: Vec<FrameMulti<'a>>,
     /// Pool of spare frames for reuse to avoid allocations
@@ -102,16 +203,32 @@ where
     }
 
     /// Create a new multi-shard listing streamer for prefix bytes and optional delimiter
-    pub(crate) fn new(shards: &'a [Shard<V, C>], prefix: Vec<u8>, delim: Option<u8>) -> Self {
-        let (fsts, shards_f, initial_frame) = Self::walk_prefix(shards, &prefix);
+    pub fn new(shards: &'a [Shard<V, C>], prefix: Vec<u8>, delim: Option<u8>) -> Self {
+        let start_prefix = prefix.clone();
+        let (fsts, shards_f, initial_frame) = Self::walk_prefix(shards, &start_prefix);
+        // if the literal prefix isn't found, fall back to a full scan then seek
+        if initial_frame.states.is_empty() && !start_prefix.is_empty() {
+            let mut fallback = Self::new(shards, Vec::new(), delim);
+            fallback.seek(start_prefix.clone());
+            // drop any key ≤ start_prefix (including shorter prefix matches)
+            let _ = fallback.next();
+            return fallback;
+        }
 
         let mut streamer = Self {
+            all_shards: shards,
             fsts,
             shards: shards_f,
             delim,
             // Build initial UTF-8 prefix string from bytes
-            prefix_str: String::from_utf8(prefix.clone()).expect("invalid utf8 in prefix"),
-            prefix,
+            prefix_str: String::from_utf8(start_prefix.clone()).expect("invalid utf8 in prefix"),
+            // DFS cursor: starts at the search prefix
+            prefix: start_prefix.clone(),
+            // Original search prefix for resetting
+            start_prefix,
+            // Last-emitted item bytes (empty until first next())
+            last_bytes: Vec::new(),
+            // DFS stack and frame pool
             stack: vec![initial_frame],
             frame_pool: Vec::new(),
         };
@@ -130,24 +247,51 @@ where
     C: PayloadCodec,
 {
     type Item = Entry<V>;
+    type Cursor = Vec<u8>;
+
+    /// Return the raw bytes of the last item returned by `next()`, or empty if none.
+    fn cursor(&self) -> Self::Cursor {
+        self.last_bytes.clone()
+    }
+
+    /// Position this streamer so that the next `next()` yields the first key > `cursor`.
+    fn seek(&mut self, cursor: Self::Cursor) {
+        // reset to initial search prefix, then resume efficiently via DFS replay
+        let start = self.start_prefix.clone();
+        let (fsts, shards_f, initial_frame) = Self::walk_prefix(self.all_shards, &start);
+        self.fsts = fsts;
+        self.shards = shards_f;
+        self.prefix = start.clone();
+        self.prefix_str = String::from_utf8(start.clone()).expect("invalid utf8 in prefix");
+        self.stack.clear();
+        self.stack.push(initial_frame);
+        self.frame_pool.clear();
+        self.replay_seek_internal(&cursor);
+        // record last-emitted bytes for cursor()
+        self.last_bytes = cursor;
+    }
+
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(frame) = self.stack.last_mut() {
             // 1) Yield complete key if this node is final and not yet yielded
             if !frame.yielded {
                 frame.yielded = true;
-                if let Some(state) = frame.states.iter().find(|s| s.node.is_final()) {
-                    let lut_id = state.output.value();
-                    let shard_i = state.shard_idx;
-                    let payload_ptr = self.shards[shard_i]
-                        .lookup
-                        .get(lut_id as u32)
-                        .ok()
-                        .map(|e| e.payload_ptr)
-                        .unwrap_or(0);
-                    let val = self.shards[shard_i].payload.get(payload_ptr).ok().flatten();
-                    let key = String::from_utf8(self.prefix.clone()).expect("invalid utf8 in key");
-                    return Some(Entry::Key(key, lut_id, val));
-                }
+                    if let Some(state) = frame.states.iter().find(|s| s.node.is_final()) {
+                        let lut_id = state.output.value();
+                        let shard_i = state.shard_idx;
+                        let payload_ptr = self.shards[shard_i]
+                            .lookup
+                            .get(lut_id as u32)
+                            .ok()
+                            .map(|e| e.payload_ptr)
+                            .unwrap_or(0);
+                        let val = self.shards[shard_i].payload.get(payload_ptr).ok().flatten();
+                        // record and emit full key
+                        let bytes = self.prefix.clone();
+                        self.last_bytes = bytes.clone();
+                        let key = String::from_utf8(bytes).expect("invalid utf8 in key");
+                        return Some(Entry::Key(key, lut_id, val));
+                    }
             }
             // 2) Build grouped transitions once, reusing inline buckets
             if frame.trans_idx == 0 {
@@ -172,12 +316,14 @@ where
                 let (b, refs) = &frame.trans[frame.trans_idx];
                 frame.trans_idx += 1;
                 // a) Delimiter grouping: yield common prefix
-                if Some(*b) == self.delim {
-                    let mut s =
-                        String::from_utf8(self.prefix.clone()).expect("invalid utf8 in prefix");
-                    s.push(*b as char);
-                    return Some(Entry::CommonPrefix(s));
-                }
+                    if Some(*b) == self.delim {
+                        // record and emit common prefix
+                        let mut bytes = self.prefix.clone();
+                        bytes.push(*b);
+                        self.last_bytes = bytes.clone();
+                        let s = String::from_utf8(bytes).expect("invalid utf8 in prefix");
+                        return Some(Entry::CommonPrefix(s));
+                    }
                 // b) Descend into child nodes across all shards for byte b
                 self.prefix.push(*b);
                 // Recycle or allocate a new frame, then repopulate its states in-place

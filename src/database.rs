@@ -69,11 +69,11 @@ where
         &'a self,
         prefix: &'a str,
         delimiter: Option<char>,
-    ) -> Result<Box<dyn DbStreamer<Item = Entry<V>> + 'a>> {
+    ) -> Result<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>> {
         let delim_u8 = delimiter.map(|c| c as u8);
         let prefix_buf = prefix.as_bytes().to_vec();
         let ms = MultiShardListStreamer::new(&self.shards, prefix_buf, delim_u8);
-        Ok(Box::new(ms))
+        Ok(Box::new(ms) as Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>)
     }
 
     /// Search for keys matching a regular expression, optionally restricted to a prefix.
@@ -117,7 +117,7 @@ where
         &'a self,
         prefix: Option<&'a str>,
         query: &str,
-    ) -> Result<Box<dyn DbStreamer<Item = Entry<V>> + 'a>> {
+    ) -> Result<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>> {
         // Pre-walk prefix across shards to skip those without matching keys
         let shards_to_query: Vec<&Shard<V, C>> = if let Some(pref) = prefix {
             let (_fsts, shards_f, _states) = walk_prefix_shards(&self.shards, pref.as_bytes());
@@ -125,7 +125,7 @@ where
         } else {
             self.shards.iter().collect()
         };
-        let mut streams: Vec<Box<dyn DbStreamer<Item = Entry<V>> + 'a>> = Vec::new();
+        let mut streams: Vec<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>> = Vec::new();
         for shard in shards_to_query {
             if shard.search.is_some() {
                 streams.push(shard.stream_by_search(query, prefix)?);
@@ -135,7 +135,7 @@ where
         where
             V: DeserializeOwned,
         {
-            streams: Vec<Box<dyn DbStreamer<Item = Entry<V>> + 'a>>,
+            streams: Vec<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>>,
             idx: usize,
         }
         impl<'a, V> DbStreamer for ChainStreamer<'a, V>
@@ -143,6 +143,16 @@ where
             V: DeserializeOwned,
         {
             type Item = Entry<V>;
+            type Cursor = Vec<u8>;
+
+            fn cursor(&self) -> Self::Cursor {
+                unimplemented!("cursor not implemented");
+            }
+
+            fn seek(&mut self, _cursor: Self::Cursor) {
+                unimplemented!("seek not implemented");
+            }
+
             fn next(&mut self) -> Option<Self::Item> {
                 while self.idx < self.streams.len() {
                     if let Some(item) = self.streams[self.idx].next() {
@@ -153,7 +163,7 @@ where
                 None
             }
         }
-        Ok(Box::new(ChainStreamer { streams, idx: 0 }))
+        Ok(Box::new(ChainStreamer { streams, idx: 0 }) as Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>)
     }
 
     /// Retrieve the payload for `key`, if any.
@@ -191,7 +201,7 @@ where
         exclude_tags: &[&str],
         mode: TagMode,
         prefix: Option<&'a str>,
-    ) -> Result<Box<dyn DbStreamer<Item = Entry<V>> + 'a>> {
+    ) -> Result<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>> {
         // Pre-walk prefix across shards to skip those without matching keys
         let shards_to_query: Vec<&Shard<V, C>> = if let Some(pref) = prefix {
             let (_fsts, shards_f, _states) = walk_prefix_shards(&self.shards, pref.as_bytes());
@@ -199,7 +209,7 @@ where
         } else {
             self.shards.iter().collect()
         };
-        let mut streams: Vec<Box<dyn DbStreamer<Item = Entry<V>> + 'a>> = Vec::new();
+    let mut streams: Vec<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>> = Vec::new();
         for shard in shards_to_query {
             streams.push(shard.stream_by_tags(include_tags, exclude_tags, mode, prefix)?);
         }
@@ -207,7 +217,7 @@ where
         where
             V: DeserializeOwned,
         {
-            streams: Vec<Box<dyn DbStreamer<Item = Entry<V>> + 'a>>,
+            streams: Vec<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>>,
             idx: usize,
         }
         impl<'a, V> DbStreamer for ChainStreamer<'a, V>
@@ -215,6 +225,16 @@ where
             V: DeserializeOwned,
         {
             type Item = Entry<V>;
+            type Cursor = Vec<u8>;
+
+            fn cursor(&self) -> Self::Cursor {
+                unimplemented!("cursor not implemented");
+            }
+
+            fn seek(&mut self, _cursor: Self::Cursor) {
+                unimplemented!("seek not implemented");
+            }
+
             fn next(&mut self) -> Option<Self::Item> {
                 while self.idx < self.streams.len() {
                     if let Some(item) = self.streams[self.idx].next() {
@@ -225,7 +245,7 @@ where
                 None
             }
         }
-        Ok(Box::new(ChainStreamer { streams, idx: 0 }))
+        Ok(Box::new(ChainStreamer { streams, idx: 0 }) as Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>)
     }
 
     /// Stream all tags present in the database, optionally restricted to keys
@@ -234,7 +254,7 @@ where
     pub fn list_tags<'a>(
         &'a self,
         prefix: Option<&'a str>,
-    ) -> Result<Box<dyn DbStreamer<Item = (String, usize)> + 'a>> {
+    ) -> Result<Box<dyn DbStreamer<Item = (String, usize), Cursor = Vec<u8>> + 'a>> {
         // Pre-walk prefix across shards to skip those without matching keys
         let shards_to_query: Vec<&Shard<V, C>> = if let Some(pref) = prefix {
             let (_fsts, shards_f, _states) = walk_prefix_shards(&self.shards, pref.as_bytes());
@@ -252,11 +272,21 @@ where
             struct EmptyTagCount;
             impl DbStreamer for EmptyTagCount {
                 type Item = (String, usize);
+                type Cursor = Vec<u8>;
+
+                fn cursor(&self) -> Self::Cursor {
+                    unimplemented!("cursor not implemented");
+                }
+
+                fn seek(&mut self, _cursor: Self::Cursor) {
+                    unimplemented!("seek not implemented");
+                }
+
                 fn next(&mut self) -> Option<Self::Item> {
                     None
                 }
             }
-            return Ok(Box::new(EmptyTagCount));
+            return Ok(Box::new(EmptyTagCount) as Box<dyn DbStreamer<Item = (String, usize), Cursor = Vec<u8>> + 'a>);
         }
 
         // Build a union of all tag-FST streams (empty prefix = all tags)
@@ -273,6 +303,16 @@ where
         }
         impl<'a> DbStreamer for TagCountStreamer<'a> {
             type Item = (String, usize);
+            type Cursor = Vec<u8>;
+
+            fn cursor(&self) -> Self::Cursor {
+                unimplemented!("cursor not implemented");
+            }
+
+            fn seek(&mut self, _cursor: Self::Cursor) {
+                unimplemented!("seek not implemented");
+            }
+
             fn next(&mut self) -> Option<Self::Item> {
                 self.stream.next().map(|(tag_bytes, ivs)| {
                     let tag = String::from_utf8_lossy(tag_bytes).into_owned();
@@ -291,7 +331,7 @@ where
         Ok(Box::new(TagCountStreamer {
             stream,
             tag_indices,
-        }))
+        }) as Box<dyn DbStreamer<Item = (String, usize), Cursor = Vec<u8>> + 'a>)
     }
 
     /// Stream all tag names present in the database, optionally restricted to keys
@@ -300,7 +340,7 @@ where
     pub fn list_tag_names<'a>(
         &'a self,
         prefix: Option<&'a str>,
-    ) -> Result<Box<dyn DbStreamer<Item = String> + 'a>> {
+    ) -> Result<Box<dyn DbStreamer<Item = String, Cursor = Vec<u8>> + 'a>> {
         // Pre-walk prefix across shards to skip those without matching keys
         let shards_to_query: Vec<&Shard<V, C>> = if let Some(pref) = prefix {
             let (_fsts, shards_f, _states) = walk_prefix_shards(&self.shards, pref.as_bytes());
@@ -317,11 +357,21 @@ where
             struct EmptyTagNames;
             impl DbStreamer for EmptyTagNames {
                 type Item = String;
+                type Cursor = Vec<u8>;
+
+                fn cursor(&self) -> Self::Cursor {
+                    unimplemented!("cursor not implemented");
+                }
+
+                fn seek(&mut self, _cursor: Self::Cursor) {
+                    unimplemented!("seek not implemented");
+                }
+
                 fn next(&mut self) -> Option<Self::Item> {
                     None
                 }
             }
-            return Ok(Box::new(EmptyTagNames));
+            return Ok(Box::new(EmptyTagNames) as Box<dyn DbStreamer<Item = String, Cursor = Vec<u8>> + 'a>);
         }
 
         // Build a union of all tag-FST streams (empty prefix = all tags)
@@ -337,6 +387,16 @@ where
         }
         impl<'a> DbStreamer for TagNameStreamer<'a> {
             type Item = String;
+            type Cursor = Vec<u8>;
+
+            fn cursor(&self) -> Self::Cursor {
+                unimplemented!("cursor not implemented");
+            }
+
+            fn seek(&mut self, _cursor: Self::Cursor) {
+                unimplemented!("seek not implemented");
+            }
+
             fn next(&mut self) -> Option<Self::Item> {
                 self.stream.next().map(|(tag_bytes, _ivs)| {
                     String::from_utf8_lossy(tag_bytes).into_owned()
@@ -344,7 +404,7 @@ where
             }
         }
 
-        Ok(Box::new(TagNameStreamer { stream }))
+        Ok(Box::new(TagNameStreamer { stream }) as Box<dyn DbStreamer<Item = String, Cursor = Vec<u8>> + 'a>)
     }
 
     /// Return a slice of shards in the database.

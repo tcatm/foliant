@@ -3,7 +3,7 @@ mod database;
 mod entry;
 mod error;
 mod lookup_table_store;
-mod multi_list;
+pub mod multi_list;
 pub mod payload_store;
 pub use payload_store::{PayloadStoreBuilderV2, PayloadStoreV2, convert_v2_to_v3_inplace};
 mod shard;
