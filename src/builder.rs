@@ -14,12 +14,8 @@ use crate::database::Database;
 use crate::error::{IndexError, Result};
 use crate::lookup_table_store::{LookupTableStore, LookupTableStoreBuilder};
 use crate::payload_store::{
-    CborPayloadCodec,
-    PayloadCodec,
-    PayloadStoreBuilderV1,
-    PayloadStoreBuilderV2,
-    PayloadStoreVersion,
-    convert_v2_to_v3_inplace,
+    convert_v2_to_v3_inplace, CborPayloadCodec, PayloadCodec, PayloadStoreBuilderV1,
+    PayloadStoreBuilderV2, PayloadStoreVersion,
 };
 use std::io;
 
@@ -250,7 +246,10 @@ where
     /// Create a new database builder for the given `.idx` file path; writes payloads to `<idx_path>.payload` and lookup index to `<idx_path>.lookup`, buffering keys for sorted insertion.
     /// Create a new database builder for the given `.idx` file path, choosing payload format version.
     /// Version 1 is uncompressed, version 2 is compressed, version 3 adds an mmap-able index trailer.
-    pub fn new<P: AsRef<Path>>(idx_path: P, version: impl Into<PayloadStoreVersion>) -> Result<Self> {
+    pub fn new<P: AsRef<Path>>(
+        idx_path: P,
+        version: impl Into<PayloadStoreVersion>,
+    ) -> Result<Self> {
         let idx_path = idx_path.as_ref().to_path_buf();
         let payload_path = idx_path.with_extension("payload");
         let version = version.into();

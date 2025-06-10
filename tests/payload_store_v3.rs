@@ -35,7 +35,6 @@ fn v3_conversion_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     // Trailer magic must appear at end
     assert!(data2.ends_with(b"FPXI"));
 
-
     // Count of indexed chunks should be 1
     let len = data2.len();
     let count_pos = len - b"FPXI".len() - std::mem::size_of::<u64>();

@@ -90,7 +90,11 @@ pub fn convert_v2_to_v3_inplace<P: AsRef<Path>>(path: P) -> io::Result<()> {
             "invalid payload store magic",
         ));
     }
-    let version = u16::from_le_bytes(raw[PAYLOAD_STORE_MAGIC.len()..PAYLOAD_STORE_HEADER_SIZE].try_into().unwrap());
+    let version = u16::from_le_bytes(
+        raw[PAYLOAD_STORE_MAGIC.len()..PAYLOAD_STORE_HEADER_SIZE]
+            .try_into()
+            .unwrap(),
+    );
     if version != PAYLOAD_STORE_VERSION_V2 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -105,7 +109,10 @@ pub fn convert_v2_to_v3_inplace<P: AsRef<Path>>(path: P) -> io::Result<()> {
         let clen = u32::from_le_bytes(raw[pos + 4..pos + 8].try_into().unwrap()) as usize;
         pos = pos + 8 + clen;
     }
-    let mut out = std::fs::OpenOptions::new().append(true).write(true).open(path)?;
+    let mut out = std::fs::OpenOptions::new()
+        .append(true)
+        .write(true)
+        .open(path)?;
     const PAGE_SIZE: usize = 4096;
     let curr_len = raw.len();
     let pad = (PAGE_SIZE - (curr_len % PAGE_SIZE)) % PAGE_SIZE;
@@ -480,20 +487,15 @@ impl<V: DeserializeOwned, C: PayloadCodec> PayloadStoreV2<V, C> {
                     ));
                 }
                 let count_pos = magic_pos - 8;
-                let count = u64::from_le_bytes(
-                    raw[count_pos..magic_pos].try_into().unwrap()
-                ) as usize;
+                let count =
+                    u64::from_le_bytes(raw[count_pos..magic_pos].try_into().unwrap()) as usize;
                 let offs_pos = count_pos
                     .checked_sub(count.checked_mul(8).ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "invalid index trailer length",
-                        )
+                        io::Error::new(io::ErrorKind::InvalidData, "invalid index trailer length")
                     })?)
-                    .ok_or_else(|| io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "invalid index trailer offset",
-                    ))?;
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "invalid index trailer offset")
+                    })?;
                 if offs_pos < PAYLOAD_STORE_HEADER_SIZE {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,

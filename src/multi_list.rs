@@ -1,7 +1,7 @@
+use crate::prefix::walk_prefix_shards;
 use crate::shard::SharedMmap;
 use crate::{Entry, Shard, Streamer};
 use fst::raw::{Fst, Node, Output};
-use crate::prefix::walk_prefix_shards;
 use smallvec::SmallVec;
 /// Maximum expected key length for reserve hints
 const MAX_KEY_LEN: usize = 256;
@@ -61,7 +61,12 @@ where
     /// Internal helper: replay raw‐FST descent on each byte of `cursor`, advancing the DFS
     /// branch indices and marking yielded state so `next()` resumes after the cursor.
     fn replay_seek_internal(&mut self, cursor: &[u8]) {
-        for &b in cursor {
+        // Only replay the bytes after the original search prefix (start_prefix)
+        let mut slice = cursor;
+        if !self.start_prefix.is_empty() && cursor.starts_with(&self.start_prefix) {
+            slice = &cursor[self.start_prefix.len()..];
+        }
+        for &b in slice {
             let frame = self.stack.last_mut().unwrap();
             if frame.trans_idx == 0 {
                 frame.trans.clear();
@@ -69,7 +74,9 @@ where
                     for ti in 0..state.node.len() {
                         let tr = state.node.transition(ti);
                         let out = state.output.cat(tr.out);
-                        if let Some(bucket) = frame.trans.iter_mut().find(|bucket| bucket.0 == tr.inp) {
+                        if let Some(bucket) =
+                            frame.trans.iter_mut().find(|bucket| bucket.0 == tr.inp)
+                        {
                             bucket.1.push((state.shard_idx, tr.addr, out));
                         } else {
                             let mut v = Vec::with_capacity(self.shards.len());
@@ -80,7 +87,12 @@ where
                 }
                 frame.trans.sort_unstable_by_key(|b| b.0);
             }
-            if let Some((i, (_, refs))) = frame.trans.iter().enumerate().find(|(_, bucket)| bucket.0 == b) {
+            if let Some((i, (_, refs))) = frame
+                .trans
+                .iter()
+                .enumerate()
+                .find(|(_, bucket)| bucket.0 == b)
+            {
                 frame.trans_idx = i + 1;
                 self.prefix.push(b);
                 let mut new_frame = self
@@ -90,7 +102,11 @@ where
                 new_frame.reset(self.prefix.len());
                 for (shard_i, addr, out) in refs.iter() {
                     let node = self.fsts[*shard_i].node(*addr);
-                    new_frame.states.push(FrameState { shard_idx: *shard_i, node, output: *out });
+                    new_frame.states.push(FrameState {
+                        shard_idx: *shard_i,
+                        node,
+                        output: *out,
+                    });
                 }
                 self.stack.push(new_frame);
             } else {
@@ -103,7 +119,8 @@ where
             }
         }
         if let Some(d) = self.delim {
-            if cursor.last() == Some(&d) {
+            // if cursor ends on a grouping delimiter (not just the original prefix), backtrack one frame
+            if cursor.last() == Some(&d) && cursor != self.start_prefix.as_slice() {
                 let old = self.stack.pop().unwrap();
                 self.frame_pool.push(old);
                 let new_len = self.stack.last().map(|f| f.prefix_len).unwrap_or(0);
@@ -196,7 +213,11 @@ where
         let mut initial_frame = FrameMulti::with_capacity(shards.len());
         initial_frame.states = prefix_states
             .into_iter()
-            .map(|ps| FrameState { shard_idx: ps.shard_idx, node: ps.node, output: ps.output })
+            .map(|ps| FrameState {
+                shard_idx: ps.shard_idx,
+                node: ps.node,
+                output: ps.output,
+            })
             .collect();
         initial_frame.prefix_len = prefix.len();
         (fsts, shards_f, initial_frame)
@@ -276,22 +297,22 @@ where
             // 1) Yield complete key if this node is final and not yet yielded
             if !frame.yielded {
                 frame.yielded = true;
-                    if let Some(state) = frame.states.iter().find(|s| s.node.is_final()) {
-                        let lut_id = state.output.value();
-                        let shard_i = state.shard_idx;
-                        let payload_ptr = self.shards[shard_i]
-                            .lookup
-                            .get(lut_id as u32)
-                            .ok()
-                            .map(|e| e.payload_ptr)
-                            .unwrap_or(0);
-                        let val = self.shards[shard_i].payload.get(payload_ptr).ok().flatten();
-                        // record and emit full key
-                        let bytes = self.prefix.clone();
-                        self.last_bytes = bytes.clone();
-                        let key = String::from_utf8(bytes).expect("invalid utf8 in key");
-                        return Some(Entry::Key(key, lut_id, val));
-                    }
+                if let Some(state) = frame.states.iter().find(|s| s.node.is_final()) {
+                    let lut_id = state.output.value();
+                    let shard_i = state.shard_idx;
+                    let payload_ptr = self.shards[shard_i]
+                        .lookup
+                        .get(lut_id as u32)
+                        .ok()
+                        .map(|e| e.payload_ptr)
+                        .unwrap_or(0);
+                    let val = self.shards[shard_i].payload.get(payload_ptr).ok().flatten();
+                    // record and emit full key
+                    let bytes = self.prefix.clone();
+                    self.last_bytes = bytes.clone();
+                    let key = String::from_utf8(bytes).expect("invalid utf8 in key");
+                    return Some(Entry::Key(key, lut_id, val));
+                }
             }
             // 2) Build grouped transitions once, reusing inline buckets
             if frame.trans_idx == 0 {
@@ -316,14 +337,14 @@ where
                 let (b, refs) = &frame.trans[frame.trans_idx];
                 frame.trans_idx += 1;
                 // a) Delimiter grouping: yield common prefix
-                    if Some(*b) == self.delim {
-                        // record and emit common prefix
-                        let mut bytes = self.prefix.clone();
-                        bytes.push(*b);
-                        self.last_bytes = bytes.clone();
-                        let s = String::from_utf8(bytes).expect("invalid utf8 in prefix");
-                        return Some(Entry::CommonPrefix(s));
-                    }
+                if Some(*b) == self.delim {
+                    // record and emit common prefix
+                    let mut bytes = self.prefix.clone();
+                    bytes.push(*b);
+                    self.last_bytes = bytes.clone();
+                    let s = String::from_utf8(bytes).expect("invalid utf8 in prefix");
+                    return Some(Entry::CommonPrefix(s));
+                }
                 // b) Descend into child nodes across all shards for byte b
                 self.prefix.push(*b);
                 // Recycle or allocate a new frame, then repopulate its states in-place

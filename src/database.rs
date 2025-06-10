@@ -13,10 +13,10 @@ use crate::entry::Entry;
 use crate::error::{IndexError, Result};
 use crate::multi_list::MultiShardListStreamer;
 use crate::payload_store::{CborPayloadCodec, PayloadCodec};
+use crate::prefix::walk_prefix_shards;
 use crate::shard::Shard;
 use crate::streamer::{PrefixStream, Streamer as DbStreamer};
 use crate::tag_index::TagIndex;
-use crate::prefix::walk_prefix_shards;
 
 /// Read-only database: union of one or more shards (FST maps + payload stores)
 /// Read-only database: union of one or more shards (FST maps + payload stores)
@@ -73,7 +73,10 @@ where
         let delim_u8 = delimiter.map(|c| c as u8);
         let prefix_buf = prefix.as_bytes().to_vec();
         let ms = MultiShardListStreamer::new(&self.shards, prefix_buf, delim_u8);
-        Ok(Box::new(ms) as Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>)
+        Ok(Box::new(ms)
+            as Box<
+                dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a,
+            >)
     }
 
     /// Search for keys matching a regular expression, optionally restricted to a prefix.
@@ -125,7 +128,8 @@ where
         } else {
             self.shards.iter().collect()
         };
-        let mut streams: Vec<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>> = Vec::new();
+        let mut streams: Vec<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>> =
+            Vec::new();
         for shard in shards_to_query {
             if shard.search.is_some() {
                 streams.push(shard.stream_by_search(query, prefix)?);
@@ -163,7 +167,10 @@ where
                 None
             }
         }
-        Ok(Box::new(ChainStreamer { streams, idx: 0 }) as Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>)
+        Ok(Box::new(ChainStreamer { streams, idx: 0 })
+            as Box<
+                dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a,
+            >)
     }
 
     /// Retrieve the payload for `key`, if any.
@@ -209,7 +216,8 @@ where
         } else {
             self.shards.iter().collect()
         };
-    let mut streams: Vec<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>> = Vec::new();
+        let mut streams: Vec<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>> =
+            Vec::new();
         for shard in shards_to_query {
             streams.push(shard.stream_by_tags(include_tags, exclude_tags, mode, prefix)?);
         }
@@ -245,7 +253,10 @@ where
                 None
             }
         }
-        Ok(Box::new(ChainStreamer { streams, idx: 0 }) as Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>)
+        Ok(Box::new(ChainStreamer { streams, idx: 0 })
+            as Box<
+                dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a,
+            >)
     }
 
     /// Stream all tags present in the database, optionally restricted to keys
@@ -286,7 +297,10 @@ where
                     None
                 }
             }
-            return Ok(Box::new(EmptyTagCount) as Box<dyn DbStreamer<Item = (String, usize), Cursor = Vec<u8>> + 'a>);
+            return Ok(Box::new(EmptyTagCount)
+                as Box<
+                    dyn DbStreamer<Item = (String, usize), Cursor = Vec<u8>> + 'a,
+                >);
         }
 
         // Build a union of all tag-FST streams (empty prefix = all tags)
@@ -331,7 +345,10 @@ where
         Ok(Box::new(TagCountStreamer {
             stream,
             tag_indices,
-        }) as Box<dyn DbStreamer<Item = (String, usize), Cursor = Vec<u8>> + 'a>)
+        })
+            as Box<
+                dyn DbStreamer<Item = (String, usize), Cursor = Vec<u8>> + 'a,
+            >)
     }
 
     /// Stream all tag names present in the database, optionally restricted to keys
@@ -371,7 +388,8 @@ where
                     None
                 }
             }
-            return Ok(Box::new(EmptyTagNames) as Box<dyn DbStreamer<Item = String, Cursor = Vec<u8>> + 'a>);
+            return Ok(Box::new(EmptyTagNames)
+                as Box<dyn DbStreamer<Item = String, Cursor = Vec<u8>> + 'a>);
         }
 
         // Build a union of all tag-FST streams (empty prefix = all tags)
@@ -398,13 +416,16 @@ where
             }
 
             fn next(&mut self) -> Option<Self::Item> {
-                self.stream.next().map(|(tag_bytes, _ivs)| {
-                    String::from_utf8_lossy(tag_bytes).into_owned()
-                })
+                self.stream
+                    .next()
+                    .map(|(tag_bytes, _ivs)| String::from_utf8_lossy(tag_bytes).into_owned())
             }
         }
 
-        Ok(Box::new(TagNameStreamer { stream }) as Box<dyn DbStreamer<Item = String, Cursor = Vec<u8>> + 'a>)
+        Ok(Box::new(TagNameStreamer { stream })
+            as Box<
+                dyn DbStreamer<Item = String, Cursor = Vec<u8>> + 'a,
+            >)
     }
 
     /// Return a slice of shards in the database.
@@ -414,5 +435,16 @@ where
     /// Mutable access to shards for attaching tag indices.
     pub fn shards_mut(&mut self) -> &mut [Shard<V, C>] {
         &mut self.shards
+    }
+
+    /// Load on-disk tag indexes (.tags) for each shard, attaching them if present.
+    /// Shards without a .tags file are silently skipped.
+    pub fn load_tag_index(&mut self) -> Result<()> {
+        for shard in &mut self.shards {
+            if let Ok(ti) = TagIndex::open(shard.idx_path()) {
+                shard.tags = Some(ti);
+            }
+        }
+        Ok(())
     }
 }

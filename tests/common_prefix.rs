@@ -1,5 +1,5 @@
-use foliant::{Database, DatabaseBuilder};
 use foliant::payload_store::PAYLOAD_STORE_VERSION_V3;
+use foliant::{Database, DatabaseBuilder};
 use serde_cbor::Value;
 use std::error::Error;
 use tempfile::tempdir;
@@ -8,7 +8,8 @@ use tempfile::tempdir;
 fn common_prefix_empty_shard() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let base = dir.path().join("db_empty.idx");
-    let db: Database<Value> = DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?.into_database()?;
+    let db: Database<Value> =
+        DatabaseBuilder::<Value>::new(&base, PAYLOAD_STORE_VERSION_V3)?.into_database()?;
     let shards = db.shards();
     assert_eq!(shards.len(), 1);
     let shard = &shards[0];

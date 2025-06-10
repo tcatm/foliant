@@ -1,8 +1,8 @@
 //! Integration tests for MultiShardListStreamer cursor/seek functionality.
-use tempfile::tempdir;
-use foliant::{DatabaseBuilder, Streamer};
-use foliant::payload_store::{CborPayloadCodec, PayloadStoreVersion};
 use foliant::multi_list::MultiShardListStreamer;
+use foliant::payload_store::{CborPayloadCodec, PayloadStoreVersion};
+use foliant::{DatabaseBuilder, Streamer};
+use tempfile::tempdir;
 
 /// Helper: build an on-disk database with the given keys (no payloads) and return its shards.
 fn make_shards(keys: &[&str]) -> Vec<foliant::Shard<serde_cbor::Value, CborPayloadCodec>> {
@@ -21,7 +21,9 @@ fn make_shards(keys: &[&str]) -> Vec<foliant::Shard<serde_cbor::Value, CborPaylo
 }
 
 /// Extract the string keys or common-prefixes from a stream.
-fn collect_strs(stream: &mut MultiShardListStreamer<'_, serde_cbor::Value, CborPayloadCodec>) -> Vec<String> {
+fn collect_strs(
+    stream: &mut MultiShardListStreamer<'_, serde_cbor::Value, CborPayloadCodec>,
+) -> Vec<String> {
     let mut v = Vec::new();
     while let Some(e) = stream.next() {
         v.push(e.as_str().to_string());
@@ -158,4 +160,53 @@ fn resume_initial_seek_equivalence() {
     let rest2: Vec<String> = collect_strs(&mut st2);
 
     assert_eq!(rest1, rest2);
+}
+
+/// Test that resume() correctly pages across delimiter groups (one-shot resume after first group)
+#[test]
+fn resume_delimiter_paging() {
+    let keys = ["a/1", "a/2", "b/1", "b/2"];
+    let shards = make_shards(&keys);
+    // group by '/'
+    let mut st1 = MultiShardListStreamer::new(&shards, Vec::new(), Some(b'/'));
+    // first group
+    let first = st1.next().unwrap().as_str().to_string();
+    assert_eq!(first, "a/");
+    let cursor = st1.cursor();
+    // resume directly after that group via resume()
+    let mut st2 = MultiShardListStreamer::resume(&shards, Vec::new(), Some(b'/'), cursor.clone());
+    let second = st2.next().unwrap().as_str().to_string();
+    assert_eq!(second, "b/");
+    let cursor2 = st2.cursor();
+    // resume past last group: no more entries
+    let mut st3 = MultiShardListStreamer::resume(&shards, Vec::new(), Some(b'/'), cursor2);
+    assert!(st3.next().is_none());
+}
+
+/// Test resume() with a non-empty prefix ending in the delimiter
+/// to ensure grouped prefixes under that prefix page correctly.
+#[test]
+fn resume_delimiter_with_prefix() {
+    let keys = ["pre/a/1", "pre/b/2", "pre/c/3"];
+    let shards = make_shards(&keys);
+    let prefix = b"pre/".to_vec();
+    let delim = Some(b'/');
+    // First group under prefix 'pre/'
+    let mut st1 = MultiShardListStreamer::new(&shards, prefix.clone(), delim);
+    let first = st1.next().unwrap().as_str().to_string();
+    assert_eq!(first, "pre/a/");
+    let cur1 = st1.cursor();
+    // Resume directly after that group
+    let mut st2 = MultiShardListStreamer::resume(&shards, prefix.clone(), delim, cur1.clone());
+    let second = st2.next().unwrap().as_str().to_string();
+    assert_eq!(second, "pre/b/");
+    let cur2 = st2.cursor();
+    // Resume after second group
+    let mut st3 = MultiShardListStreamer::resume(&shards, prefix.clone(), delim, cur2.clone());
+    let third = st3.next().unwrap().as_str().to_string();
+    assert_eq!(third, "pre/c/");
+    let cur3 = st3.cursor();
+    // Resume after last group: no more entries
+    let mut st4 = MultiShardListStreamer::resume(&shards, prefix, delim, cur3);
+    assert!(st4.next().is_none());
 }

@@ -1,5 +1,5 @@
-use foliant::{Database, DatabaseBuilder, Entry, Streamer, TantivyIndexBuilder};
 use foliant::payload_store::PAYLOAD_STORE_VERSION_V3;
+use foliant::{Database, DatabaseBuilder, Entry, Streamer, TantivyIndexBuilder};
 use serde_json::Value;
 use std::error::Error;
 use tempfile::tempdir;

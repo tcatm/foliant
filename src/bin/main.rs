@@ -1,18 +1,13 @@
 use clap::{Parser, Subcommand};
 use foliant::payload_store::PayloadStoreVersion;
-use foliant::IndexError;
-use foliant::SegmentInfo;
-use foliant::Streamer;
-use foliant::TagMode;
 use foliant::{
-    convert_v2_to_v3_inplace, Database, DatabaseBuilder, Entry, TagIndexBuilder,
-    TantivyIndexBuilder,
+    convert_v2_to_v3_inplace, Database, DatabaseBuilder, Entry, SegmentInfo, Streamer,
+    TagIndexBuilder, TagMode, TantivyIndexBuilder,
 };
 use fst::map::Map;
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
 use memmap2::Mmap;
-use serde::de::DeserializeOwned;
 use serde_json::{self, Value};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
@@ -22,6 +17,8 @@ use std::time::{Duration, Instant};
 
 mod shell;
 use shell::{run_shell, run_shell_commands};
+
+use foliant::load_db;
 
 // Cross-platform resident set size (RSS) in KB; uses getrusage on UNIX.
 #[cfg(unix)]
@@ -149,54 +146,6 @@ enum Commands {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-
-    /// Load a database from either a single shard (.idx) file or a directory of shards.
-    /// When loading a directory, shows a progress bar counting shards loaded.
-    fn load_db<V>(path: &std::path::PathBuf, limit: Option<usize>) -> Result<Database<V>, IndexError>
-    where
-        V: DeserializeOwned + 'static,
-    {
-        if path.is_dir() {
-            let mut db = Database::<V>::new();
-            let mut paths = Vec::new();
-            for entry in std::fs::read_dir(path)? {
-                let p = entry?.path();
-                if p.extension().and_then(|s| s.to_str()) == Some("idx")
-                    && p.with_extension("payload").exists()
-                {
-                    paths.push(p);
-                }
-            }
-            let total = match limit {
-                Some(n) => n.min(paths.len()) as u64,
-                None => paths.len() as u64,
-            };
-            let pb = ProgressBar::new(total);
-            let style = ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] [{eta_precise}] \
-                     {pos}/{len} ({percent}%) {msg}",
-            )
-            .unwrap()
-            .progress_chars("#>-");
-            pb.set_style(style);
-            pb.set_message("loading shards");
-            for p in paths.into_iter().take(limit.unwrap_or(usize::MAX)) {
-                // show which shard is currently loading
-                if let Some(fname) = p.file_name() {
-                    pb.set_message(fname.to_string_lossy().into_owned());
-                }
-                match db.add_shard(&p) {
-                    Ok(_) => (),
-                    Err(e) => eprintln!("warning: failed to add shard {:?}: {}", p, e),
-                }
-                pb.inc(1);
-            }
-            pb.finish();
-            Ok(db)
-        } else {
-            Database::<V>::open(path)
-        }
-    }
 
     // Helper to build a tag index with a progress bar; returns elapsed time
     fn run_tag_index(

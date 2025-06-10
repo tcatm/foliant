@@ -11,6 +11,11 @@ panic = "abort"
 overflow-checks = false
 
 [dependencies]
+axum = "0.6"
+base64 = "0.21"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
 smallvec = "1.12"
 indicatif = "0.17"
 fst       = "0.4"

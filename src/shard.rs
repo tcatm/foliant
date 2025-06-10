@@ -199,7 +199,7 @@ where
         exclude_tags: &[&str],
         mode: crate::TagMode,
         prefix: Option<&'a str>,
-        ) -> Result<Box<dyn crate::Streamer<Item = crate::Entry<V>, Cursor = Vec<u8>> + 'a>> {
+    ) -> Result<Box<dyn crate::Streamer<Item = crate::Entry<V>, Cursor = Vec<u8>> + 'a>> {
         // Build initial bitmap: includes if any, else full set if excluding only, else empty
         let mut filter_bm = if !include_tags.is_empty() {
             // Combine include tags by mode
@@ -316,7 +316,7 @@ where
         &'a self,
         query: &str,
         prefix: Option<&'a str>,
-        ) -> Result<Box<dyn crate::Streamer<Item = crate::Entry<V>, Cursor = Vec<u8>> + 'a>> {
+    ) -> Result<Box<dyn crate::Streamer<Item = crate::Entry<V>, Cursor = Vec<u8>> + 'a>> {
         if let Some(idx) = &self.search {
             let ids = idx.search_stream(query, self.len())?;
             struct SearchStreamer<'a, V, C>
@@ -364,7 +364,10 @@ where
                 shard: self,
                 ids: Box::new(ids),
                 prefix,
-            }) as Box<dyn crate::Streamer<Item = crate::Entry<V>, Cursor = Vec<u8>> + 'a>);
+            })
+                as Box<
+                    dyn crate::Streamer<Item = crate::Entry<V>, Cursor = Vec<u8>> + 'a,
+                >);
         }
         // no search index: empty stream
         struct EmptyStreamer<V, C>(PhantomData<(V, C)>);
@@ -388,6 +391,9 @@ where
                 None
             }
         }
-        Ok(Box::new(EmptyStreamer::<V, C>(PhantomData)) as Box<dyn crate::Streamer<Item = crate::Entry<V>, Cursor = Vec<u8>> + 'a>)
+        Ok(Box::new(EmptyStreamer::<V, C>(PhantomData))
+            as Box<
+                dyn crate::Streamer<Item = crate::Entry<V>, Cursor = Vec<u8>> + 'a,
+            >)
     }
 }

@@ -1,5 +1,5 @@
-use foliant::{Database, DatabaseBuilder, Entry, Streamer, TagIndexBuilder, TagMode};
 use foliant::payload_store::PAYLOAD_STORE_VERSION_V3;
+use foliant::{Database, DatabaseBuilder, Entry, Streamer, TagIndexBuilder, TagMode};
 use serde_json::{json, Value};
 use std::fs;
 use tempfile::tempdir;
@@ -120,13 +120,15 @@ fn list_by_tags_multi_shard() -> Result<(), Box<dyn std::error::Error>> {
     let base_dir = dir.path().join("db_multi");
     fs::create_dir(&base_dir)?;
     {
-        let mut b = DatabaseBuilder::<Value>::new(&base_dir.join("s1.idx"), PAYLOAD_STORE_VERSION_V3)?;
+        let mut b =
+            DatabaseBuilder::<Value>::new(&base_dir.join("s1.idx"), PAYLOAD_STORE_VERSION_V3)?;
         b.insert("foo", Some(json!({"tags":["t1"]})));
         b.insert("bar", Some(json!({"tags":["t1","t2"]})));
         b.close()?;
     }
     {
-        let mut b = DatabaseBuilder::<Value>::new(&base_dir.join("s2.idx"), PAYLOAD_STORE_VERSION_V3)?;
+        let mut b =
+            DatabaseBuilder::<Value>::new(&base_dir.join("s2.idx"), PAYLOAD_STORE_VERSION_V3)?;
         b.insert("baz", Some(json!({"tags":["t2"]})));
         b.insert("qux", Some(json!({"tags":["t3"]})));
         b.close()?;

@@ -1,7 +1,7 @@
 //! Common prefix-walk utilities for multi-shard operations.
 
-use crate::shard::SharedMmap;
 use crate::shard::Shard;
+use crate::shard::SharedMmap;
 use fst::raw::{Fst, Node, Output};
 
 /// Per-shard state after walking an FST by a prefix.
@@ -19,7 +19,11 @@ pub(crate) struct PrefixShardState<'a> {
 pub(crate) fn walk_prefix_shards<'a, V, C>(
     shards: &'a [Shard<V, C>],
     prefix: &[u8],
-) -> (Vec<&'a Fst<SharedMmap>>, Vec<&'a Shard<V, C>>, Vec<PrefixShardState<'a>>)
+) -> (
+    Vec<&'a Fst<SharedMmap>>,
+    Vec<&'a Shard<V, C>>,
+    Vec<PrefixShardState<'a>>,
+)
 where
     V: serde::de::DeserializeOwned,
     C: crate::payload_store::PayloadCodec,
