@@ -23,6 +23,75 @@ where
     V: DeserializeOwned,
     C: PayloadCodec,
 {
+    /// Find the minimum output value in a subtree by following the leftmost path.
+    fn find_min_output_for_node(&self, fst: &Fst<SharedMmap>, node: Node, output: Output) -> Option<u64> {
+        // If this node is final, it could be the minimum
+        if node.is_final() {
+            return Some(output.cat(node.final_output()).value());
+        }
+        
+        // Otherwise, follow the first (leftmost) transition
+        if node.len() > 0 {
+            let first_transition = node.transition(0);
+            let child_node = fst.node(first_transition.addr);
+            let child_output = output.cat(first_transition.out);
+            return self.find_min_output_for_node(fst, child_node, child_output);
+        }
+        
+        None
+    }
+    
+    /// Find the maximum output value in a subtree by following the rightmost path.
+    fn find_max_output_for_node(&self, fst: &Fst<SharedMmap>, node: Node, output: Output) -> Option<u64> {
+        // If this node is final, check if it's better than any child
+        let mut max_output = if node.is_final() {
+            Some(output.cat(node.final_output()).value())
+        } else {
+            None
+        };
+        
+        // Follow the last (rightmost) transition to find the maximum in children
+        if node.len() > 0 {
+            let last_transition = node.transition(node.len() - 1);
+            let child_node = fst.node(last_transition.addr);
+            let child_output = output.cat(last_transition.out);
+            if let Some(child_max) = self.find_max_output_for_node(fst, child_node, child_output) {
+                max_output = Some(max_output.map_or(child_max, |current| current.max(child_max)));
+            }
+        }
+        
+        max_output
+    }
+
+    /// Count children under a specific transition by finding output value bounds.
+    fn count_children_for_transition_refs(&self, refs: &[(usize, usize, Output)]) -> Option<usize> {
+        let mut global_min = u64::MAX;
+        let mut global_max = 0u64;
+        let mut found_any = false;
+
+        // Find output bounds across all shards for the given transition references
+        for (shard_idx, addr, output) in refs {
+            let fst = self.fsts[*shard_idx];
+            let node = fst.node(*addr);
+            
+            if let Some(min) = self.find_min_output_for_node(fst, node, *output) {
+                global_min = global_min.min(min);
+                found_any = true;
+            }
+            
+            if let Some(max) = self.find_max_output_for_node(fst, node, *output) {
+                global_max = global_max.max(max);
+                found_any = true;
+            }
+        }
+
+        if found_any && global_max >= global_min {
+            Some((global_max - global_min + 1) as usize)
+        } else {
+            None
+        }
+    }
+
     /// Build a streamer and immediately fast‑forward so that the first `next()` yields
     /// the first entry > `cursor`.  Avoids a second prefix walk when resuming.
     pub fn resume(
@@ -343,7 +412,12 @@ where
                     bytes.push(*b);
                     self.last_bytes = bytes.clone();
                     let s = String::from_utf8(bytes).expect("invalid utf8 in prefix");
-                    return Some(Entry::CommonPrefix(s));
+                    
+                    // Count children under this prefix by looking at the nodes we would descend into
+                    let refs_clone = refs.clone();
+                    let child_count = self.count_children_for_transition_refs(&refs_clone);
+                    
+                    return Some(Entry::CommonPrefix(s, child_count));
                 }
                 // b) Descend into child nodes across all shards for byte b
                 self.prefix.push(*b);

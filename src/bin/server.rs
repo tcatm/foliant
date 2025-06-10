@@ -29,7 +29,7 @@ struct Config {
     #[arg(long, default_value = "127.0.0.1:3000")]
     addr: SocketAddr,
 
-    /// Default maximum number of items to return in one page
+    /// Maximum allowed limit for any single request
     #[arg(short = 'n', long, default_value_t = 1000)]
     limit: usize,
 }
@@ -38,7 +38,7 @@ struct Config {
 #[derive(Clone)]
 struct AppState {
     db: Arc<Database<serde_json::Value>>,
-    default_limit: usize,
+    max_limit: usize,
 }
 
 /// Standard paged response envelope.
@@ -65,6 +65,9 @@ struct KeyEntry {
     /// Optional JSON payload associated with the key (if any)
     #[serde(skip_serializing_if = "Option::is_none")]
     payload: Option<serde_json::Value>,
+    /// Number of children under this common prefix (if applicable)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    count: Option<usize>,
 }
 
 #[tokio::main]
@@ -78,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = AppState {
         db: Arc::new(db),
-        default_limit: cfg.limit,
+        max_limit: cfg.limit,
     };
 
     // Build the router
@@ -109,8 +112,8 @@ async fn list_keys(
     State(state): State<AppState>,
     Query(params): Query<KeysParams>,
 ) -> Result<Json<Paged<KeyEntry>>, (StatusCode, Json<ErrorResponse>)> {
-    // parse limit
-    let limit = params.limit.unwrap_or(state.default_limit);
+    // parse limit with default of max_limit and cap client requests
+    let limit = params.limit.map(|l| l.min(state.max_limit)).unwrap_or(state.max_limit);
     // build prefix bytes
     let prefix_bytes = params.prefix.unwrap_or_default().into_bytes();
     // delimiter
@@ -146,11 +149,11 @@ async fn list_keys(
         if let Some(entry) = stream.next() {
             let key = entry.as_str().to_string();
             let kind = entry.kind().to_string();
-            let payload = match entry {
-                Entry::Key(_, _, payload) => payload,
-                Entry::CommonPrefix(_) => None,
+            let (payload, count) = match &entry {
+                Entry::Key(_, _, payload) => (payload.clone(), None),
+                Entry::CommonPrefix(_, count) => (None, *count),
             };
-            items.push(KeyEntry { key, kind, payload });
+            items.push(KeyEntry { key, kind, payload, count });
         } else {
             break;
         }
@@ -178,7 +181,7 @@ async fn list_tags_names(
     State(state): State<AppState>,
     Query(params): Query<TagsParams>,
 ) -> Result<Json<Paged<String>>, (StatusCode, Json<ErrorResponse>)> {
-    let limit = params.limit.unwrap_or(state.default_limit);
+    let limit = params.limit.map(|l| l.min(state.max_limit)).unwrap_or(state.max_limit);
     let mut stream = match params.cursor {
         Some(cur) => {
             let bytes = general_purpose::STANDARD.decode(cur).map_err(|e| {
@@ -232,7 +235,7 @@ async fn list_tags_counts(
     State(state): State<AppState>,
     Query(params): Query<TagsCountsParams>,
 ) -> Result<Json<Paged<TagCount>>, (StatusCode, Json<ErrorResponse>)> {
-    let limit = params.limit.unwrap_or(state.default_limit);
+    let limit = params.limit.map(|l| l.min(state.max_limit)).unwrap_or(state.max_limit);
     let mut stream = match params.cursor {
         Some(cur) => {
             let bytes = general_purpose::STANDARD.decode(cur).map_err(|e| {
@@ -283,7 +286,7 @@ async fn list_by_tags(
     State(state): State<AppState>,
     Query(params): Query<TagsFilterParams>,
 ) -> Result<Json<Paged<String>>, (StatusCode, Json<ErrorResponse>)> {
-    let limit = params.limit.unwrap_or(state.default_limit);
+    let limit = params.limit.map(|l| l.min(state.max_limit)).unwrap_or(state.max_limit);
     let include_tags: Vec<&str> = params
         .include
         .as_deref()

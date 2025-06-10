@@ -475,7 +475,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("📄 {}", s);
                         }
                     }
-                    Entry::CommonPrefix(s) => println!("📁 {}", s),
+                    Entry::CommonPrefix(s, count) => {
+                        if let Some(count) = count {
+                            println!("📁 {} ({})", s, count);
+                        } else {
+                            println!("📁 {}", s);
+                        }
+                    }
                 }
                 printed += 1;
             }

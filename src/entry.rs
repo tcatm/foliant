@@ -5,27 +5,35 @@ use serde_cbor::Value;
 pub enum Entry<V: DeserializeOwned = Value> {
     /// A complete key (an inserted string) with raw FST pointer and optional payload.
     Key(String, u64, Option<V>),
-    /// A common prefix up through the delimiter.
-    CommonPrefix(String),
+    /// A common prefix up through the delimiter, with optional child count.
+    CommonPrefix(String, Option<usize>),
 }
 
 impl<V: DeserializeOwned> Entry<V> {
     pub fn as_str(&self) -> &str {
         match self {
-            Entry::Key(s, _, _) | Entry::CommonPrefix(s) => s,
+            Entry::Key(s, _, _) | Entry::CommonPrefix(s, _) => s,
         }
     }
     pub fn kind(&self) -> &'static str {
         match self {
             Entry::Key(_, _, _) => "Key",
-            Entry::CommonPrefix(_) => "CommonPrefix",
+            Entry::CommonPrefix(_, _) => "CommonPrefix",
         }
     }
     /// Returns the raw FST pointer associated with this key, if any.
     pub fn ptr(&self) -> Option<u64> {
         match self {
             Entry::Key(_, ptr, _) => Some(*ptr),
-            Entry::CommonPrefix(_) => None,
+            Entry::CommonPrefix(_, _) => None,
+        }
+    }
+
+    /// Returns the child count for CommonPrefix entries, if available.
+    pub fn child_count(&self) -> Option<usize> {
+        match self {
+            Entry::Key(_, _, _) => None,
+            Entry::CommonPrefix(_, count) => *count,
         }
     }
 }

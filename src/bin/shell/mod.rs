@@ -76,10 +76,14 @@ where
         }
         // Fetch next entry
         match stream.next() {
-            Some(Entry::CommonPrefix(s)) if !only_keys => {
+            Some(Entry::CommonPrefix(s, count)) if !only_keys => {
                 let s = s.strip_prefix(prefix).unwrap_or(&s);
-                // Color directory listings in blue
-                println!("\x1b[34m📁 {}\x1b[0m", s);
+                // Color directory listings in blue with count if available
+                if let Some(count) = count {
+                    println!("\x1b[34m📁 {} ({})\x1b[0m", s, count);
+                } else {
+                    println!("\x1b[34m📁 {}\x1b[0m", s);
+                }
                 printed += 1;
             }
             Some(Entry::Key(orig, ptr, val_opt)) if !only_prefix => {
@@ -226,7 +230,7 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
 
         while let Some(entry) = stream.next() {
             match entry {
-                Entry::CommonPrefix(s) => {
+                Entry::CommonPrefix(s, _) => {
                     // Directory candidate
                     let rem = &s[prefix.len()..];
                     if let Some(seg) = rem.trim_end_matches(delim).split(delim).next() {
