@@ -1,0 +1,203 @@
+use foliant::payload_store::PAYLOAD_STORE_VERSION_V3;
+use foliant::{Database, DatabaseBuilder, Entry, TagMode};
+use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, TagFilterBitmap, ShardBitmapFilter};
+use foliant::Streamer;
+use serde_cbor::Value;
+use std::error::Error;
+use tempfile::tempdir;
+
+/// This test is designed to fail initially (reproduce the crash) and then pass after the fix.
+/// It specifically targets the FST bounds error that occurs when shard indices become invalid.
+#[test]
+fn fst_bounds_crash_before_fix() -> Result<(), Box<dyn Error>> {
+    // Create the exact scenario that causes the crash:
+    // 1. Create a multi-shard streamer 
+    // 2. Start iteration to populate transition cache
+    // 3. Apply shard filtering that changes indices
+    // 4. Continue iteration with invalid cached transitions
+    
+    let dir = tempdir()?;
+    let db_dir = dir.path().join("db");
+    std::fs::create_dir(&db_dir)?;
+
+    // Create shards with specific structure to trigger the issue
+    {
+        let base1 = db_dir.join("shard1.idx");
+        let mut b1 = DatabaseBuilder::<Value>::new(&base1, PAYLOAD_STORE_VERSION_V3)?;
+        
+        // Keys that will create complex transition structures when sorted
+        b1.insert("prefix/a/deep/file1", Some(Value::Text("val1".into())));
+        b1.insert("prefix/a/deep/file2", Some(Value::Text("val2".into())));
+        b1.insert("prefix/b/deep/file3", Some(Value::Text("val3".into())));
+        b1.insert("prefix/c/deep/file4", Some(Value::Text("val4".into())));
+        
+        b1.close()?;
+        
+        let mut tag_builder = foliant::TagIndexBuilder::new(&base1);
+        tag_builder.insert_tags(1, vec!["keep"]);   // prefix/a/deep/file1
+        tag_builder.insert_tags(2, vec!["keep"]);   // prefix/a/deep/file2  
+        tag_builder.insert_tags(3, vec!["remove"]); // prefix/b/deep/file3
+        tag_builder.insert_tags(4, vec!["keep"]);   // prefix/c/deep/file4
+        tag_builder.finish()?;
+    }
+
+    {
+        let base2 = db_dir.join("shard2.idx");
+        let mut b2 = DatabaseBuilder::<Value>::new(&base2, PAYLOAD_STORE_VERSION_V3)?;
+        
+        b2.insert("prefix/a/deep/file5", Some(Value::Text("val5".into())));
+        b2.insert("prefix/d/deep/file6", Some(Value::Text("val6".into())));
+        
+        b2.close()?;
+        
+        let mut tag_builder = foliant::TagIndexBuilder::new(&base2);
+        tag_builder.insert_tags(1, vec!["keep"]);   // prefix/a/deep/file5
+        tag_builder.insert_tags(2, vec!["remove"]); // prefix/d/deep/file6
+        tag_builder.finish()?;
+    }
+
+    // Critical: Shard 3 has no "keep" tags - should be completely filtered out
+    {
+        let base3 = db_dir.join("shard3.idx");
+        let mut b3 = DatabaseBuilder::<Value>::new(&base3, PAYLOAD_STORE_VERSION_V3)?;
+        
+        b3.insert("other/file7", Some(Value::Text("val7".into())));
+        b3.insert("other/file8", Some(Value::Text("val8".into())));
+        
+        b3.close()?;
+        
+        let mut tag_builder = foliant::TagIndexBuilder::new(&base3);
+        tag_builder.insert_tags(1, vec!["remove"]); // other/file7
+        tag_builder.insert_tags(2, vec!["remove"]); // other/file8
+        tag_builder.finish()?;
+    }
+
+    let mut db = Database::<Value>::new();
+    db.add_shard(&db_dir.join("shard1.idx"))?;
+    db.add_shard(&db_dir.join("shard2.idx"))?;  
+    db.add_shard(&db_dir.join("shard3.idx"))?;
+    db.load_tag_index()?;
+
+    // Step 1: Create unfiltered streamer to establish initial state
+    let mut streamer = MultiShardListStreamer::new(db.shards(), b"prefix/".to_vec(), None);
+    
+    // Step 2: Start iteration to populate transition cache with 3-shard references
+    let first_entry = streamer.next().expect("Should get first entry");
+    eprintln!("Got first entry: {}", first_entry.as_str());
+    
+    // At this point, frame.trans should contain cached transitions with shard indices 0, 1, 2
+    
+    // Step 3: Apply tag filtering that removes shard 3 (index 2)
+    let tag_config = TagFilterConfig {
+        include_tags: vec!["keep".to_string()],
+        exclude_tags: vec![],
+        mode: TagMode::And,
+    };
+    let filter = TagFilterBitmap::new(db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let bitmaps = filter.build_shard_bitmaps(db.shards())?;
+    
+    // This should remap shards: [0, 1, 2] -> [0, 1] but transitions cache might still reference shard 2
+    streamer.apply_shard_bitmaps(db.shards(), bitmaps);
+    
+    // Step 4: Continue iteration - this should trigger FST bounds error if fix is not applied
+    eprintln!("Continuing iteration after shard bitmap applied...");
+    let mut count = 1; // Already got first entry
+    
+    while let Some(entry) = streamer.next() {
+        eprintln!("Got entry {}: {}", count + 1, entry.as_str());
+        count += 1;
+        
+        if count >= 10 {
+            break; // Prevent infinite loop
+        }
+    }
+    
+    eprintln!("Successfully iterated {} entries without crash", count);
+    
+    Ok(())
+}
+
+/// This test verifies that the new_with_filter flow also works correctly
+#[test] 
+fn fst_bounds_new_with_filter_test() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let db_dir = dir.path().join("db");
+    std::fs::create_dir(&db_dir)?;
+
+    // Create the same data structure
+    {
+        let base1 = db_dir.join("shard1.idx");
+        let mut b1 = DatabaseBuilder::<Value>::new(&base1, PAYLOAD_STORE_VERSION_V3)?;
+        
+        for i in 0..50 {
+            b1.insert(&format!("test/path{}/file.ext", i), Some(Value::Text(format!("val{}", i).into())));
+        }
+        
+        b1.close()?;
+        
+        let mut tag_builder = foliant::TagIndexBuilder::new(&base1);
+        for i in 1..=50 {
+            let tag = if i % 3 == 0 { "target" } else { "other" };
+            tag_builder.insert_tags(i, vec![tag]);
+        }
+        tag_builder.finish()?;
+    }
+
+    {
+        let base2 = db_dir.join("shard2.idx");
+        let mut b2 = DatabaseBuilder::<Value>::new(&base2, PAYLOAD_STORE_VERSION_V3)?;
+        
+        for i in 50..80 {
+            b2.insert(&format!("test/path{}/file.ext", i), Some(Value::Text(format!("val{}", i).into())));
+        }
+        
+        b2.close()?;
+        
+        let mut tag_builder = foliant::TagIndexBuilder::new(&base2);
+        for i in 1..=30 {
+            tag_builder.insert_tags(i, vec!["other"]); // No "target" tags in this shard
+        }
+        tag_builder.finish()?;
+    }
+
+    let mut db = Database::<Value>::new();
+    db.add_shard(&db_dir.join("shard1.idx"))?;
+    db.add_shard(&db_dir.join("shard2.idx"))?;
+    db.load_tag_index()?;
+
+    // Use new_with_filter (this should apply filtering during construction)
+    let tag_config = TagFilterConfig {
+        include_tags: vec!["target".to_string()],
+        exclude_tags: vec![],
+        mode: TagMode::And,
+    };
+    
+    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let mut stream = MultiShardListStreamer::new_with_filter(
+        &db.shards(),
+        b"test/".to_vec(),
+        None,
+        Some(filter),
+    )?;
+    
+    // Iterate through all results
+    let mut count = 0;
+    while let Some(entry) = stream.next() {
+        count += 1;
+        match entry {
+            Entry::Key(key, _, _) => {
+                assert!(key.starts_with("test/"), "Key should start with prefix: {}", key);
+            },
+            _ => {}
+        }
+        
+        if count > 100 {
+            break; // Safety limit
+        }
+    }
+    
+    assert!(count > 0, "Should find some target entries");
+    eprintln!("Successfully processed {} entries with new_with_filter", count);
+    
+    Ok(())
+}

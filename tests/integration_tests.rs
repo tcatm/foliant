@@ -62,7 +62,7 @@ fn delimiter_grouping() -> Result<(), Box<dyn Error>> {
     let mut list: Vec<Entry> = db.list("foo", Some('/')).unwrap().collect();
     list.sort();
     let expected = vec![
-        Entry::CommonPrefix("foo/".to_string()),
+        Entry::CommonPrefix("foo/".to_string(), Some(3)),
         Entry::Key("foobar".to_string(), 0, None),
     ];
     assert_eq!(list, expected);

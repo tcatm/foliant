@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 /// Shared memory map cloneable via reference counting.
 #[derive(Clone)]
-pub(crate) struct SharedMmap(Arc<Mmap>);
+pub struct SharedMmap(Arc<Mmap>);
 
 impl From<Mmap> for SharedMmap {
     fn from(m: Mmap) -> Self {
@@ -32,8 +32,6 @@ use fst::raw::Fst as RawFst;
 use fst::Automaton;
 use fst::IntoStreamer;
 use fst::Streamer as FstStreamer;
-use roaring::bitmap::IntoIter;
-use roaring::RoaringBitmap;
 use std::marker::PhantomData;
 /// One shard of a database: a memory-mapped FST map and its payload store.
 pub struct Shard<V, C: PayloadCodec = CborPayloadCodec>
@@ -188,130 +186,14 @@ where
         }
     }
 
-    /// Stream entries matching the given include/exclude tags under the specified TagMode,
-    /// optionally restricted to those whose key starts with `prefix`.
-    ///
-    /// Includes tags in `include_tags` (combined by `mode`), then removes any entries
-    /// having tags in `exclude_tags`.
-    pub fn stream_by_tags<'a>(
-        &'a self,
-        include_tags: &[&str],
-        exclude_tags: &[&str],
-        mode: crate::TagMode,
-        prefix: Option<&'a str>,
-    ) -> Result<Box<dyn crate::Streamer<Item = crate::Entry<V>, Cursor = Vec<u8>> + 'a>> {
-        // Build initial bitmap: includes if any, else full set if excluding only, else empty
-        let mut filter_bm = if !include_tags.is_empty() {
-            // Combine include tags by mode
-            let mut combined: Option<RoaringBitmap> = None;
-            if let Some(idx) = &self.tags {
-                for &tag in include_tags {
-                    let mut bm = RoaringBitmap::new();
-                    if let Some(sub) = idx.get(tag)? {
-                        bm |= sub;
-                    }
-                    combined = Some(match combined {
-                        Some(mut acc) if mode == crate::TagMode::And => {
-                            acc &= &bm;
-                            acc
-                        }
-                        Some(mut acc) => {
-                            acc |= &bm;
-                            acc
-                        }
-                        None => bm,
-                    });
-                }
-            }
-            combined.unwrap_or_else(RoaringBitmap::new)
-        } else if !exclude_tags.is_empty() {
-            // No includes but excluding: start with full range of keys (1..=N)
-            let mut bm = RoaringBitmap::new();
-            let max_id = self.len() as u32;
-            bm.insert_range(1..=max_id);
-            bm
-        } else {
-            // No filtering tags: empty result
-            RoaringBitmap::new()
-        };
-
-        // Remove exclude tags
-        if !exclude_tags.is_empty() {
-            if let Some(idx) = &self.tags {
-                for &tag in exclude_tags {
-                    if let Some(sub) = idx.get(tag)? {
-                        filter_bm -= &sub;
-                    }
-                }
-            }
-        }
-
-        struct ShardPtrStreamer<'a, V, C>
-        where
-            V: DeserializeOwned,
-            C: PayloadCodec,
-        {
-            shard: &'a Shard<V, C>,
-            ptr_iter: IntoIter,
-            prefix: Option<&'a str>,
-        }
-        impl<'a, V, C> crate::Streamer for ShardPtrStreamer<'a, V, C>
-        where
-            V: DeserializeOwned,
-            C: PayloadCodec,
-        {
-            type Item = crate::Entry<V>;
-            type Cursor = Vec<u8>;
-
-            fn cursor(&self) -> Self::Cursor {
-                unimplemented!("cursor not implemented");
-            }
-
-            fn seek(&mut self, _cursor: Self::Cursor) {
-                unimplemented!("seek not implemented");
-            }
-
-            fn next(&mut self) -> Option<Self::Item> {
-                while let Some(ptr) = self.ptr_iter.next() {
-                    if let Ok(Some(entry)) = (|| -> Result<Option<crate::Entry<V>>> {
-                        let raw_fst = RawFst::new(self.shard.idx_mmap.clone())
-                            .map_err(crate::IndexError::from)?;
-                        if let Some(key_bytes) = raw_fst.get_key(ptr as u64) {
-                            let key = String::from_utf8(key_bytes.to_vec()).map_err(|e| {
-                                crate::IndexError::Io(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    format!("invalid utf8 in key: {}", e),
-                                ))
-                            })?;
-                            let lut_entry = self.shard.lookup.get(ptr as u32)?;
-                            let value = self.shard.payload.get(lut_entry.payload_ptr)?;
-                            return Ok(Some(crate::Entry::Key(key, ptr as u64, value)));
-                        }
-                        Ok(None)
-                    })() {
-                        if let Some(pref) = self.prefix {
-                            if let crate::Entry::Key(ref k, _, _) = entry {
-                                if !k.starts_with(pref) {
-                                    continue;
-                                }
-                            }
-                        }
-                        return Some(entry);
-                    }
-                }
-                None
-            }
-        }
-
-        Ok(Box::new(ShardPtrStreamer {
-            shard: self,
-            ptr_iter: filter_bm.into_iter(),
-            prefix,
-        }))
-    }
 
     /// Stream entries matching the given query via the shard's Tantivy search index,
     /// optionally restricted to those whose key starts with `prefix`.
+    /// Get access to the underlying FST for debugging purposes
+    pub fn get_fst(&self) -> &Map<SharedMmap> {
+        &self.fst
+    }
+
     pub fn stream_by_search<'a>(
         &'a self,
         query: &str,

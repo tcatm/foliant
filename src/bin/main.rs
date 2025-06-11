@@ -4,6 +4,7 @@ use foliant::{
     convert_v2_to_v3_inplace, Database, DatabaseBuilder, Entry, SegmentInfo, Streamer,
     TagIndexBuilder, TagMode, TantivyIndexBuilder,
 };
+use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, TagFilterBitmap};
 use fst::map::Map;
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
@@ -441,22 +442,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let load_duration = load_start.elapsed();
             // Choose tag-filtered or plain listing
             let stream_start = Instant::now();
-            let mut stream = if let Some(tag_strs) = tags.as_deref() {
+            let mut stream: Box<dyn Streamer<Item = Entry<Value>, Cursor = Vec<u8>>> = if let Some(tag_strs) = tags.as_deref() {
                 // Split into include/exclude sets: prefix '-' or '!' to exclude
                 let mut include_tags = Vec::new();
                 let mut exclude_tags = Vec::new();
                 for raw in tag_strs.split(',') {
                     if let Some(t) = raw.strip_prefix('-') {
-                        exclude_tags.push(t);
+                        exclude_tags.push(t.to_string());
                     } else if let Some(t) = raw.strip_prefix('!') {
-                        exclude_tags.push(t);
+                        exclude_tags.push(t.to_string());
                     } else if let Some(t) = raw.strip_prefix('+') {
-                        include_tags.push(t);
+                        include_tags.push(t.to_string());
                     } else if !raw.is_empty() {
-                        include_tags.push(raw);
+                        include_tags.push(raw.to_string());
                     }
                 }
-                db_handle.list_by_tags(&include_tags, &exclude_tags, tag_mode, Some(&prefix))?
+                
+                let tag_config = TagFilterConfig {
+                    include_tags,
+                    exclude_tags,
+                    mode: tag_mode,
+                };
+                
+                let filter = TagFilterBitmap::new(&db_handle.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+                let prefix_bytes = prefix.as_bytes().to_vec();
+                Box::new(MultiShardListStreamer::new_with_filter(
+                    &db_handle.shards(),
+                    prefix_bytes,
+                    delimiter.map(|c| c as u8),
+                    Some(filter),
+                )?)
             } else {
                 db_handle.list(&prefix, delimiter)?
             };

@@ -13,12 +13,34 @@ use crate::entry::Entry;
 use crate::error::{IndexError, Result};
 use crate::multi_list::MultiShardListStreamer;
 use crate::payload_store::{CborPayloadCodec, PayloadCodec};
-use crate::prefix::walk_prefix_shards;
 use crate::shard::Shard;
 use crate::streamer::{PrefixStream, Streamer as DbStreamer};
 use crate::tag_index::TagIndex;
 
-/// Read-only database: union of one or more shards (FST maps + payload stores)
+/// Filter shards to only those that contain the given prefix
+fn shards_with_prefix<'a, V, C>(shards: &'a [Shard<V, C>], prefix: &[u8]) -> Vec<&'a Shard<V, C>>
+where
+    V: DeserializeOwned,
+    C: PayloadCodec,
+{
+    shards
+        .iter()
+        .filter(|shard| {
+            let fst = shard.fst.as_fst();
+            let mut node = fst.root();
+            for &byte in prefix {
+                if let Some(idx) = node.find_input(byte) {
+                    let tr = node.transition(idx);
+                    node = fst.node(tr.addr);
+                } else {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect()
+}
+
 /// Read-only database: union of one or more shards (FST maps + payload stores)
 pub struct Database<V = serde_cbor::Value, C: PayloadCodec = CborPayloadCodec>
 where
@@ -72,7 +94,7 @@ where
     ) -> Result<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>> {
         let delim_u8 = delimiter.map(|c| c as u8);
         let prefix_buf = prefix.as_bytes().to_vec();
-        let ms = MultiShardListStreamer::new(&self.shards, prefix_buf, delim_u8);
+        let ms = MultiShardListStreamer::new(&self.shards, prefix_buf.clone(), delim_u8);
         Ok(Box::new(ms)
             as Box<
                 dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a,
@@ -123,8 +145,7 @@ where
     ) -> Result<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>> {
         // Pre-walk prefix across shards to skip those without matching keys
         let shards_to_query: Vec<&Shard<V, C>> = if let Some(pref) = prefix {
-            let (_fsts, shards_f, _states) = walk_prefix_shards(&self.shards, pref.as_bytes());
-            shards_f
+            shards_with_prefix(&self.shards, pref.as_bytes())
         } else {
             self.shards.iter().collect()
         };
@@ -198,66 +219,6 @@ where
         Ok(None)
     }
 
-    /// List entries filtered by tags (include/exclude) under a given tag-mode, optionally restricted to a key prefix.
-    ///
-    /// `include_tags`: positive tags to match (combined by `mode`), or empty for no includes.
-    /// `exclude_tags`: tags to exclude from the result (entries having any of these tags are dropped).
-    pub fn list_by_tags<'a>(
-        &'a self,
-        include_tags: &[&str],
-        exclude_tags: &[&str],
-        mode: TagMode,
-        prefix: Option<&'a str>,
-    ) -> Result<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>> {
-        // Pre-walk prefix across shards to skip those without matching keys
-        let shards_to_query: Vec<&Shard<V, C>> = if let Some(pref) = prefix {
-            let (_fsts, shards_f, _states) = walk_prefix_shards(&self.shards, pref.as_bytes());
-            shards_f
-        } else {
-            self.shards.iter().collect()
-        };
-        let mut streams: Vec<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>> =
-            Vec::new();
-        for shard in shards_to_query {
-            streams.push(shard.stream_by_tags(include_tags, exclude_tags, mode, prefix)?);
-        }
-        struct ChainStreamer<'a, V>
-        where
-            V: DeserializeOwned,
-        {
-            streams: Vec<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>>,
-            idx: usize,
-        }
-        impl<'a, V> DbStreamer for ChainStreamer<'a, V>
-        where
-            V: DeserializeOwned,
-        {
-            type Item = Entry<V>;
-            type Cursor = Vec<u8>;
-
-            fn cursor(&self) -> Self::Cursor {
-                unimplemented!("cursor not implemented");
-            }
-
-            fn seek(&mut self, _cursor: Self::Cursor) {
-                unimplemented!("seek not implemented");
-            }
-
-            fn next(&mut self) -> Option<Self::Item> {
-                while self.idx < self.streams.len() {
-                    if let Some(item) = self.streams[self.idx].next() {
-                        return Some(item);
-                    }
-                    self.idx += 1;
-                }
-                None
-            }
-        }
-        Ok(Box::new(ChainStreamer { streams, idx: 0 })
-            as Box<
-                dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a,
-            >)
-    }
 
     /// Stream all tags present in the database, optionally restricted to keys
     /// under the given prefix, yielding each tag and its total count
@@ -266,89 +227,117 @@ where
         &'a self,
         prefix: Option<&'a str>,
     ) -> Result<Box<dyn DbStreamer<Item = (String, usize), Cursor = Vec<u8>> + 'a>> {
-        // Pre-walk prefix across shards to skip those without matching keys
-        let shards_to_query: Vec<&Shard<V, C>> = if let Some(pref) = prefix {
-            let (_fsts, shards_f, _states) = walk_prefix_shards(&self.shards, pref.as_bytes());
-            shards_f
-        } else {
-            self.shards.iter().collect()
-        };
-        // Collect only shards that actually have a TagIndex
-        let tag_indices: Vec<&TagIndex> = shards_to_query
-            .into_iter()
-            .filter_map(|sh| sh.tags.as_ref())
-            .collect();
-        if tag_indices.is_empty() {
-            // Empty stream if no tag indexes present
-            struct EmptyTagCount;
-            impl DbStreamer for EmptyTagCount {
+        use std::collections::HashMap;
+        use roaring::RoaringBitmap;
+        
+        if prefix.is_none() {
+            // No prefix filtering - use the original optimized approach
+            let tag_indices: Vec<&TagIndex> = self.shards
+                .iter()
+                .filter_map(|sh| sh.tags.as_ref())
+                .collect();
+            if tag_indices.is_empty() {
+                struct EmptyTagCount;
+                impl DbStreamer for EmptyTagCount {
+                    type Item = (String, usize);
+                    type Cursor = Vec<u8>;
+                    fn cursor(&self) -> Self::Cursor { unimplemented!() }
+                    fn seek(&mut self, _cursor: Self::Cursor) { unimplemented!() }
+                    fn next(&mut self) -> Option<Self::Item> { None }
+                }
+                return Ok(Box::new(EmptyTagCount));
+            }
+
+            let mut op = OpBuilder::new();
+            for idx in &tag_indices {
+                op = op.add(idx.list_tags());
+            }
+            let stream = op.union().into_stream();
+
+            struct TagCountStreamer<'a> {
+                stream: Union<'a>,
+                tag_indices: Vec<&'a TagIndex>,
+            }
+            impl<'a> DbStreamer for TagCountStreamer<'a> {
                 type Item = (String, usize);
                 type Cursor = Vec<u8>;
-
-                fn cursor(&self) -> Self::Cursor {
-                    unimplemented!("cursor not implemented");
-                }
-
-                fn seek(&mut self, _cursor: Self::Cursor) {
-                    unimplemented!("seek not implemented");
-                }
-
+                fn cursor(&self) -> Self::Cursor { unimplemented!() }
+                fn seek(&mut self, _cursor: Self::Cursor) { unimplemented!() }
                 fn next(&mut self) -> Option<Self::Item> {
-                    None
+                    self.stream.next().map(|(tag_bytes, ivs)| {
+                        let tag = String::from_utf8_lossy(tag_bytes).into_owned();
+                        let mut count = 0;
+                        for iv in ivs {
+                            let sub_bm = self.tag_indices[iv.index]
+                                .get_bitmap(iv.value)
+                                .expect("failed to decode roaring bitmap");
+                            count += sub_bm.len() as usize;
+                        }
+                        (tag, count)
+                    })
                 }
             }
-            return Ok(Box::new(EmptyTagCount)
-                as Box<
-                    dyn DbStreamer<Item = (String, usize), Cursor = Vec<u8>> + 'a,
-                >);
-        }
 
-        // Build a union of all tag-FST streams (empty prefix = all tags)
-        let mut op = OpBuilder::new();
-        for idx in &tag_indices {
-            op = op.add(idx.list_tags());
+            return Ok(Box::new(TagCountStreamer { stream, tag_indices }));
         }
-        let stream = op.union().into_stream();
-
-        // Streamer that walks the merged FST and unions Roaring bitmaps on the fly
-        struct TagCountStreamer<'a> {
-            stream: Union<'a>,
-            tag_indices: Vec<&'a TagIndex>,
+        
+        // Prefix filtering required - collect all tags with proper prefix filtering
+        let prefix_str = prefix.unwrap();
+        let mut tag_counts: HashMap<String, usize> = HashMap::new();
+        
+        // For each shard, get the bitmap of entries matching the prefix
+        for shard in &self.shards {
+            if let Some(tag_index) = &shard.tags {
+                // Build bitmap of document IDs that match the prefix
+                let prefix_bitmap = {
+                    let mut bitmap = RoaringBitmap::new();
+                    let prefix_automaton = fst::automaton::Str::new(prefix_str).starts_with();
+                    let mut stream = shard.fst.search(prefix_automaton).into_stream();
+                    while let Some((_, output)) = stream.next() {
+                        bitmap.insert(output as u32);
+                    }
+                    bitmap
+                };
+                
+                // If no entries match the prefix in this shard, skip it
+                if prefix_bitmap.is_empty() {
+                    continue;
+                }
+                
+                // For each tag in this shard, intersect with prefix bitmap
+                let mut tag_stream = tag_index.list_tags().into_stream();
+                while let Some((tag_bytes, packed)) = tag_stream.next() {
+                    let tag = String::from_utf8_lossy(tag_bytes).into_owned();
+                    let tag_bitmap = tag_index.get_bitmap(packed)
+                        .expect("failed to decode tag bitmap");
+                    
+                    // Count only entries that match both the tag and the prefix
+                    let intersection = &tag_bitmap & &prefix_bitmap;
+                    let count = intersection.len() as usize;
+                    
+                    if count > 0 {
+                        *tag_counts.entry(tag).or_insert(0) += count;
+                    }
+                }
+            }
         }
-        impl<'a> DbStreamer for TagCountStreamer<'a> {
+        
+        // Convert to a sorted vector and create a simple streaming iterator
+        let mut sorted_tags: Vec<(String, usize)> = tag_counts.into_iter().collect();
+        sorted_tags.sort_by(|a, b| a.0.cmp(&b.0));
+        
+        struct VecTagStreamer {
+            tags: std::vec::IntoIter<(String, usize)>,
+        }
+        impl DbStreamer for VecTagStreamer {
             type Item = (String, usize);
             type Cursor = Vec<u8>;
-
-            fn cursor(&self) -> Self::Cursor {
-                unimplemented!("cursor not implemented");
-            }
-
-            fn seek(&mut self, _cursor: Self::Cursor) {
-                unimplemented!("seek not implemented");
-            }
-
-            fn next(&mut self) -> Option<Self::Item> {
-                self.stream.next().map(|(tag_bytes, ivs)| {
-                    let tag = String::from_utf8_lossy(tag_bytes).into_owned();
-                    let mut count = 0;
-                    for iv in ivs {
-                        let sub_bm = self.tag_indices[iv.index]
-                            .get_bitmap(iv.value)
-                            .expect("failed to decode roaring bitmap");
-                        count += sub_bm.len() as usize;
-                    }
-                    (tag, count)
-                })
-            }
+            fn cursor(&self) -> Self::Cursor { unimplemented!() }
+            fn seek(&mut self, _cursor: Self::Cursor) { unimplemented!() }
+            fn next(&mut self) -> Option<Self::Item> { self.tags.next() }
         }
 
-        Ok(Box::new(TagCountStreamer {
-            stream,
-            tag_indices,
-        })
-            as Box<
-                dyn DbStreamer<Item = (String, usize), Cursor = Vec<u8>> + 'a,
-            >)
+        Ok(Box::new(VecTagStreamer { tags: sorted_tags.into_iter() }))
     }
 
     /// Stream all tag names present in the database, optionally restricted to keys
@@ -360,8 +349,7 @@ where
     ) -> Result<Box<dyn DbStreamer<Item = String, Cursor = Vec<u8>> + 'a>> {
         // Pre-walk prefix across shards to skip those without matching keys
         let shards_to_query: Vec<&Shard<V, C>> = if let Some(pref) = prefix {
-            let (_fsts, shards_f, _states) = walk_prefix_shards(&self.shards, pref.as_bytes());
-            shards_f
+            shards_with_prefix(&self.shards, pref.as_bytes())
         } else {
             self.shards.iter().collect()
         };

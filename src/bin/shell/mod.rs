@@ -18,6 +18,7 @@ use std::rc::Rc;
 
 use ctrlc;
 use foliant::{Database, Entry, Streamer, TagMode};
+use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, TagFilterBitmap};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     mpsc::{channel, Receiver},
@@ -28,17 +29,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Help text for interactive shell commands and Ctrl-C behavior.
 const HELP_TEXT: &str = "\
 Available commands:
-  ls [-rck] [-d DELIM] [prefix]   list entries
+  ls [-rck] [-d DELIM] [prefix] [#tag1 #tag2 !exclude1 ...]   list entries
     -r       recursive (no delimiter grouping)
     -c       only directories (common prefixes)
     -k       only keys
     -d <c>   one-off custom delimiter character
+    #tag     include entries with tag (AND mode by default)
+    !tag     exclude entries with tag
   cd [dir]                        change directory
   find <regex>                    search entries matching regex
   search <query>                  fuzzy search entries matching substring using search index
-  tags [-a|-o] [<tag1> [tag2...]]   list entries with tags (default: all); prefix tags with '-' or '!' to exclude; no args lists all tags with counts
-    -a       match all tags (AND, default)
-    -o       match any tag (OR)
+  tags [-n]                      list all tags with counts; -n for names only
   val <id>                        lookup key by raw pointer ID
   pwd                             print working directory
   exit, quit                      exit shell
@@ -153,7 +154,7 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
                 if cmd.starts_with(word) {
                     // Commands that take an argument get a trailing space
                     let replacement =
-                        if ["cd", "ls", "find", "search", "val", "tags"].contains(&cmd) {
+                        if ["cd", "ls", "find", "search", "val"].contains(&cmd) {
                             format!("{} ", cmd)
                         } else {
                             cmd.to_string()
@@ -169,7 +170,8 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
         let state = self.state.borrow();
         let cwd = &state.cwd;
         let delim = state.delim;
-        if line.split_whitespace().next() == Some("tags") {
+        let first_cmd = line.split_whitespace().next();
+        if first_cmd == Some("ls") && (word.starts_with('#') || word.starts_with('!')) {
             let mut seen_tags = HashSet::new();
             let prefix_opt = if cwd.is_empty() {
                 None
@@ -179,12 +181,13 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
             match state.db.list_tag_names(prefix_opt) {
                 Ok(mut tag_stream) => {
                     while let Some(tag) = tag_stream.next() {
-                        // Support exclusion markers '-' and '!' as prefixes.
-                        let (marker, rest) = if word.starts_with('-') || word.starts_with('!') {
+                        // For ls command: support '#' and '!' prefixes
+                        let (marker, rest) = if word.starts_with('#') || word.starts_with('!') {
                             (Some(word.chars().next().unwrap()), &word[1..])
                         } else {
                             (None, word)
                         };
+                        
                         if tag.starts_with(rest) && seen_tags.insert(tag.clone()) {
                             let mut display = String::new();
                             let mut replacement = String::new();
@@ -304,6 +307,10 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
             let mut only_keys = false;
             let mut custom_delim: Option<char> = None;
             let mut prefix_str = String::new();
+            let mut include_tags = Vec::new();
+            let mut exclude_tags = Vec::new();
+            let mut prefix_set = false;
+            
             while let Some(tok) = parts.next() {
                 if tok == "-d" {
                     if let Some(dtok) = parts.next() {
@@ -334,15 +341,29 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                         }
                     }
                     continue;
-                } else {
+                } else if tok.starts_with('#') && tok.len() > 1 {
+                    // Include tag
+                    include_tags.push(tok[1..].to_string());
+                    continue;
+                } else if tok.starts_with('!') && tok.len() > 1 {
+                    // Exclude tag
+                    exclude_tags.push(tok[1..].to_string());
+                    continue;
+                } else if !prefix_set {
                     prefix_str = tok.to_string();
-                    break;
+                    prefix_set = true;
+                    continue;
+                } else {
+                    println!("Unexpected argument '{}' - use #tag to include or !tag to exclude", tok);
+                    return Ok(false);
                 }
             }
+            
             if only_prefix && only_keys {
                 println!("Cannot use -c and -k together");
                 return Ok(false);
             }
+            
             let (list_prefix, list_delim) = {
                 let state_ref = state.borrow();
                 let mut p = state_ref.cwd.clone();
@@ -358,14 +379,62 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                 };
                 (p, d)
             };
+            
             let state_ref = state.borrow();
-            let mut stream = match state_ref.db.list(&list_prefix, list_delim) {
-                Ok(s) => s,
-                Err(e) => {
-                    println!("Error listing {}: {}", list_prefix, e);
-                    return Ok(false);
+            
+            // Create tag filter config if tags were specified
+            let tag_config = if !include_tags.is_empty() || !exclude_tags.is_empty() {
+                Some(TagFilterConfig {
+                    include_tags,
+                    exclude_tags,
+                    mode: TagMode::And,
+                })
+            } else {
+                None
+            };
+            
+            // Build a tag-based filter bitmap if a TagFilterConfig was specified
+            let tag_filter: Option<TagFilterBitmap> = if let Some(cfg) = tag_config.clone() {
+                match TagFilterBitmap::new(
+                    &state_ref.db.shards(),
+                    &cfg.include_tags,
+                    &cfg.exclude_tags,
+                    cfg.mode,
+                ) {
+                    Ok(bm) => Some(bm),
+                    Err(e) => {
+                        println!("Error building tag filter: {}", e);
+                        return Ok(false);
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Use MultiShardListStreamer with an optional generic bitmap filter
+            let mut stream: Box<dyn Streamer<Item = Entry<_>, Cursor = Vec<u8>>> = if tag_filter.is_some() {
+                match MultiShardListStreamer::new_with_filter(
+                    &state_ref.db.shards(),
+                    list_prefix.as_bytes().to_vec(),
+                    list_delim.map(|c| c as u8),
+                    tag_filter.clone(),
+                ) {
+                    Ok(s) => Box::new(s),
+                    Err(e) => {
+                        println!("Error creating filtered stream: {}", e);
+                        return Ok(false);
+                    }
+                }
+            } else {
+                match state_ref.db.list(&list_prefix, list_delim) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        println!("Error listing {}: {}", list_prefix, e);
+                        return Ok(false);
+                    }
                 }
             };
+            
             handle_print_result(print_entries(
                 &list_prefix,
                 &mut stream,
@@ -375,87 +444,49 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
             ));
         }
         "tags" => {
-            let mut tag_mode = TagMode::And;
-            let mut include_tags = Vec::new();
-            let mut exclude_tags = Vec::new();
             let mut list_names_only = false;
             for tok in parts {
                 if tok == "-n" {
                     list_names_only = true;
-                } else if tok == "-a" {
-                    tag_mode = TagMode::And;
-                } else if tok == "-o" {
-                    tag_mode = TagMode::Or;
-                } else if let Some(t) = tok.strip_prefix('-') {
-                    exclude_tags.push(t.to_string());
-                } else if let Some(t) = tok.strip_prefix('!') {
-                    exclude_tags.push(t.to_string());
                 } else {
-                    include_tags.push(tok.to_string());
+                    println!("Unknown argument '{}' for tags command", tok);
+                    return Ok(false);
                 }
             }
-            if include_tags.is_empty() && exclude_tags.is_empty() {
-                let state_ref = state.borrow();
-                let prefix_opt = if state_ref.cwd.is_empty() {
-                    None
-                } else {
-                    Some(state_ref.cwd.as_str())
-                };
-                if list_names_only {
-                    match state_ref.db.list_tag_names(prefix_opt) {
-                        Ok(mut tag_stream) => {
-                            while let Some(tag) = tag_stream.next() {
-                                println!("🏷️  \x1b[35m{:<32}\x1b[0m", tag);
-                            }
-                        }
-                        Err(e) => {
-                            println!("Error listing tags: {}", e);
-                        }
-                    }
-                } else {
-                    match state_ref.db.list_tags(prefix_opt) {
-                        Ok(mut tag_stream) => {
-                            while let Some((tag, count)) = tag_stream.next() {
-                                println!(
-                                    "🏷️  \x1b[35m{:<32}\x1b[0m \x1b[90m{:>12}\x1b[0m",
-                                    tag, count
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            println!("Error listing tags: {}", e);
-                        }
-                    }
-                }
-                return Ok(false);
-            }
-            let include_refs: Vec<&str> = include_tags.iter().map(|s| &**s).collect();
-            let exclude_refs: Vec<&str> = exclude_tags.iter().map(|s| &**s).collect();
-            let cwd_owned = state.borrow().cwd.clone();
-            let prefix_opt = if cwd_owned.is_empty() {
+            
+            let state_ref = state.borrow();
+            let prefix_opt = if state_ref.cwd.is_empty() {
                 None
             } else {
-                Some(cwd_owned.as_str())
+                Some(state_ref.cwd.as_str())
             };
-            let state_ref = state.borrow();
-            let mut stream =
-                match state_ref
-                    .db
-                    .list_by_tags(&include_refs, &exclude_refs, tag_mode, prefix_opt)
-                {
-                    Ok(s) => s,
-                    Err(e) => {
-                        println!("Error listing by tags: {}", e);
-                        return Ok(false);
+            
+            if list_names_only {
+                match state_ref.db.list_tag_names(prefix_opt) {
+                    Ok(mut tag_stream) => {
+                        while let Some(tag) = tag_stream.next() {
+                            println!("🏷️  \x1b[35m{:<32}\x1b[0m", tag);
+                        }
                     }
-                };
-            handle_print_result(print_entries(
-                &state_ref.cwd,
-                &mut stream,
-                false,
-                true,
-                abort_rx,
-            ));
+                    Err(e) => {
+                        println!("Error listing tags: {}", e);
+                    }
+                }
+            } else {
+                match state_ref.db.list_tags(prefix_opt) {
+                    Ok(mut tag_stream) => {
+                        while let Some((tag, count)) = tag_stream.next() {
+                            println!(
+                                "🏷️  \x1b[35m{:<32}\x1b[0m \x1b[90m{:>12}\x1b[0m",
+                                tag, count
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        println!("Error listing tags: {}", e);
+                    }
+                }
+            }
         }
         "shards" => {
             let state_ref = state.borrow();

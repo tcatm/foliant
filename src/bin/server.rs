@@ -10,8 +10,8 @@ use foliant::Streamer;
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
-use foliant::multi_list::MultiShardListStreamer;
-use foliant::{load_db, Database, Entry, TagMode};
+use foliant::multi_list::{MultiShardListStreamer, TagFilterBitmap};
+use foliant::{load_db, Database, Entry, TagMode, TagFilterConfig};
 
 /// Command-line options for the HTTP server.
 #[derive(Parser)]
@@ -89,7 +89,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/keys", get(list_keys))
         .route("/tags", get(list_tags_names))
         .route("/tags/counts", get(list_tags_counts))
-        .route("/tags/filter", get(list_by_tags))
         .with_state(state);
 
     tracing::info!("listening on {}", cfg.addr);
@@ -106,6 +105,12 @@ struct KeysParams {
     delim: Option<char>,
     cursor: Option<String>,
     limit: Option<usize>,
+    /// Comma-separated list of tags to include (AND/OR based on mode)
+    include_tags: Option<String>,
+    /// Comma-separated list of tags to exclude
+    exclude_tags: Option<String>,
+    /// Tag combination mode: "and" or "or" (default: "and")
+    mode: Option<String>,
 }
 
 async fn list_keys(
@@ -118,14 +123,68 @@ async fn list_keys(
     let prefix_bytes = params.prefix.unwrap_or_default().into_bytes();
     // delimiter
     let delim = params.delim;
-    // initialize streamer
-    let mut stream = if let Some(cur) = params.cursor {
+    
+    // Parse tag filtering parameters
+    let tag_config = if params.include_tags.is_some() || params.exclude_tags.is_some() {
+        let include_tags: Vec<String> = params
+            .include_tags
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.trim().to_string())
+            .collect();
+        
+        let exclude_tags: Vec<String> = params
+            .exclude_tags
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.trim().to_string())
+            .collect();
+        
+        let mode = match params.mode.as_deref() {
+            Some("or") => TagMode::Or,
+            _ => TagMode::And,
+        };
+        
+        Some(TagFilterConfig {
+            include_tags,
+            exclude_tags,
+            mode,
+        })
+    } else {
+        None
+    };
+    
+    // Build a tag-based bitmap filter from the TagFilterConfig, if any
+    let tag_filter: Option<TagFilterBitmap> = if let Some(cfg) = tag_config.clone() {
+        match TagFilterBitmap::new(
+            &state.db.shards(),
+            &cfg.include_tags,
+            &cfg.exclude_tags,
+            cfg.mode,
+        ) {
+            Ok(bm) => Some(bm),
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse { error: format!("failed to build tag filter: {}", e) }),
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    
+    // Initialize streamer - use MultiShardListStreamer with optional bitmap filter
+    let stream = if let Some(cur) = params.cursor {
         match general_purpose::STANDARD.decode(cur) {
-            Ok(bytes) => MultiShardListStreamer::resume(
+            Ok(bytes) => MultiShardListStreamer::resume_with_filter(
                 &state.db.shards(),
                 prefix_bytes.clone(),
                 delim.map(|c| c as u8),
                 bytes,
+                tag_filter.clone(),
             ),
             Err(e) => {
                 return Err((
@@ -137,11 +196,24 @@ async fn list_keys(
             }
         }
     } else {
-        MultiShardListStreamer::new(
+        MultiShardListStreamer::new_with_filter(
             &state.db.shards(),
             prefix_bytes.clone(),
             delim.map(|c| c as u8),
+            tag_filter.clone(),
         )
+    };
+    
+    let mut stream = match stream {
+        Ok(s) => s,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("failed to create tag-filtered stream: {}", e),
+                }),
+            ))
+        }
     };
 
     let mut items = Vec::new();
@@ -271,78 +343,3 @@ async fn list_tags_counts(
     Ok(Json(Paged { items, next_cursor }))
 }
 
-/// Query parameters for list_by_tags
-#[derive(Deserialize)]
-struct TagsFilterParams {
-    include: Option<String>,
-    exclude: Option<String>,
-    mode: Option<String>,
-    prefix: Option<String>,
-    cursor: Option<String>,
-    limit: Option<usize>,
-}
-
-async fn list_by_tags(
-    State(state): State<AppState>,
-    Query(params): Query<TagsFilterParams>,
-) -> Result<Json<Paged<String>>, (StatusCode, Json<ErrorResponse>)> {
-    let limit = params.limit.map(|l| l.min(state.max_limit)).unwrap_or(state.max_limit);
-    let include_tags: Vec<&str> = params
-        .include
-        .as_deref()
-        .unwrap_or("")
-        .split(',')
-        .filter(|s| !s.is_empty())
-        .collect();
-    let exclude_tags: Vec<&str> = params
-        .exclude
-        .as_deref()
-        .unwrap_or("")
-        .split(',')
-        .filter(|s| !s.is_empty())
-        .collect();
-    let mode = match params.mode.as_deref() {
-        Some("or") => TagMode::Or,
-        _ => TagMode::And,
-    };
-
-    let mut stream = match params.cursor {
-        Some(cur) => {
-            let bytes = general_purpose::STANDARD.decode(cur).map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: format!("invalid cursor: {}", e),
-                    }),
-                )
-            })?;
-            let mut s = state
-                .db
-                .list_by_tags(&include_tags, &exclude_tags, mode, params.prefix.as_deref())
-                .unwrap();
-            s.seek(bytes);
-            s
-        }
-        None => state
-            .db
-            .list_by_tags(&include_tags, &exclude_tags, mode, params.prefix.as_deref())
-            .unwrap(),
-    };
-
-    let mut items = Vec::new();
-    for _ in 0..limit {
-        if let Some(Entry::Key(k, _, _)) = stream.next() {
-            items.push(k);
-        } else {
-            break;
-        }
-    }
-
-    let next_cursor = if items.len() == limit {
-        Some(general_purpose::STANDARD.encode(stream.cursor()))
-    } else {
-        None
-    };
-
-    Ok(Json(Paged { items, next_cursor }))
-}
