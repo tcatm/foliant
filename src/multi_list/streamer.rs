@@ -224,12 +224,18 @@ where
         // Build initial frame states by walking the prefix across all shards
         initial_frame.states = build_frame_states(&shard_infos, &start_prefix);
 
-        // Handle case where literal prefix isn't found
+        // Handle case where literal prefix isn't found - return empty streamer
         if initial_frame.states.is_empty() && !start_prefix.is_empty() {
-            let mut fallback = Self::new_with_bitmaps(shards, Vec::new(), delim, bitmaps.clone())?;
-            fallback.seek(start_prefix.clone());
-            let _ = fallback.next();
-            return Ok(fallback);
+            // Return a streamer with empty shard_infos so next() will always return None
+            return Ok(Self {
+                shard_infos: Vec::new(),
+                delim,
+                prefix: start_prefix.clone(),
+                start_prefix,
+                last_bytes: Vec::new(),
+                stack: Vec::new(),
+                frame_pool: Vec::new(),
+            });
         }
 
         // Build streamer with unified shard_infos

@@ -79,9 +79,9 @@ fn prefix_restricted_cursor_seek() {
     st.seek(c.clone());
     // then foobar, foox
     assert_eq!(collect_strs(&mut st), vec!["foobar", "foox"]);
-    // prefix not present: "fooa"
+    // prefix not present: "fooa" - should return empty results
     let mut st2 = MultiShardListStreamer::new(&shards, b"fooa".to_vec(), None);
-    assert_eq!(collect_strs(&mut st2), vec!["foobar", "foox"]);
+    assert_eq!(collect_strs(&mut st2), Vec::<String>::new());
 }
 
 #[test]
