@@ -265,7 +265,19 @@ where
                 fn seek(&mut self, _cursor: Self::Cursor) { unimplemented!() }
                 fn next(&mut self) -> Option<Self::Item> {
                     self.stream.next().map(|(tag_bytes, ivs)| {
-                        let tag = String::from_utf8_lossy(tag_bytes).into_owned();
+                        let lowercase_tag = String::from_utf8_lossy(tag_bytes).into_owned();
+                        
+                        // Get original case from first tag index (hot path optimization)
+                        let display_tag = if let Some(first_iv) = ivs.first() {
+                            self.tag_indices[first_iv.index]
+                                .get_original_case(&lowercase_tag)
+                                .ok()
+                                .flatten()
+                                .unwrap_or_else(|| lowercase_tag.clone())
+                        } else {
+                            lowercase_tag.clone()
+                        };
+                        
                         let mut count = 0;
                         for iv in ivs {
                             let sub_bm = self.tag_indices[iv.index]
@@ -273,7 +285,7 @@ where
                                 .expect("failed to decode roaring bitmap");
                             count += sub_bm.len() as usize;
                         }
-                        (tag, count)
+                        (display_tag, count)
                     })
                 }
             }
@@ -307,7 +319,13 @@ where
                 // For each tag in this shard, intersect with prefix bitmap
                 let mut tag_stream = tag_index.list_tags().into_stream();
                 while let Some((tag_bytes, packed)) = tag_stream.next() {
-                    let tag = String::from_utf8_lossy(tag_bytes).into_owned();
+                    let lowercase_tag = String::from_utf8_lossy(tag_bytes).into_owned();
+                    
+                    // Get original case, fall back to lowercase if not available
+                    let display_tag = tag_index.get_original_case(&lowercase_tag)
+                        .unwrap_or(None)
+                        .unwrap_or(lowercase_tag.clone());
+                    
                     let tag_bitmap = tag_index.get_bitmap(packed)
                         .expect("failed to decode tag bitmap");
                     
@@ -316,7 +334,7 @@ where
                     let count = intersection.len() as usize;
                     
                     if count > 0 {
-                        *tag_counts.entry(tag).or_insert(0) += count;
+                        *tag_counts.entry(display_tag).or_insert(0) += count;
                     }
                 }
             }
@@ -390,6 +408,7 @@ where
         // Streamer that walks the merged FST and yields only the tag string
         struct TagNameStreamer<'a> {
             stream: Union<'a>,
+            tag_indices: Vec<&'a TagIndex>,
         }
         impl<'a> DbStreamer for TagNameStreamer<'a> {
             type Item = String;
@@ -404,13 +423,24 @@ where
             }
 
             fn next(&mut self) -> Option<Self::Item> {
-                self.stream
-                    .next()
-                    .map(|(tag_bytes, _ivs)| String::from_utf8_lossy(tag_bytes).into_owned())
+                self.stream.next().map(|(tag_bytes, ivs)| {
+                    let lowercase_tag = String::from_utf8_lossy(tag_bytes).into_owned();
+                    
+                    // Get original case from first tag index (hot path optimization)
+                    if let Some(first_iv) = ivs.first() {
+                        self.tag_indices[first_iv.index]
+                            .get_original_case(&lowercase_tag)
+                            .ok()
+                            .flatten()
+                            .unwrap_or(lowercase_tag)
+                    } else {
+                        lowercase_tag
+                    }
+                })
             }
         }
 
-        Ok(Box::new(TagNameStreamer { stream })
+        Ok(Box::new(TagNameStreamer { stream, tag_indices })
             as Box<
                 dyn DbStreamer<Item = String, Cursor = Vec<u8>> + 'a,
             >)

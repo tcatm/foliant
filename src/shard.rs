@@ -278,4 +278,9 @@ where
                 dyn crate::Streamer<Item = crate::Entry<V>, Cursor = Vec<u8>> + 'a,
             >)
     }
+
+    /// Get a reference to the tag index if it exists.
+    pub fn tag_index(&self) -> Option<&TagIndex> {
+        self.tags.as_ref()
+    }
 }

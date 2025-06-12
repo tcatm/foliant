@@ -33,13 +33,17 @@ impl TagFilterBitmap {
         V: DeserializeOwned,
         C: PayloadCodec,
     {
+        // Pre-compute lowercase versions of tags to avoid repeated computation
+        let include_tags_lower: Vec<String> = include_tags.iter().map(|t| t.to_lowercase()).collect();
+        let exclude_tags_lower: Vec<String> = exclude_tags.iter().map(|t| t.to_lowercase()).collect();
+        
         let mut shard_bms = Vec::with_capacity(shards.len());
         for shard in shards {
             // Build the include set, or the full range if empty
-            let mut bm = if !include_tags.is_empty() {
+            let mut bm = if !include_tags_lower.is_empty() {
                 let mut acc: Option<RoaringBitmap> = None;
                 if let Some(idx) = &shard.tags {
-                    for tag in include_tags {
+                    for tag in &include_tags_lower {
                         if let Some(sub) = idx.get(tag)? {
                             acc = Some(match acc {
                                 Some(prev) if mode == TagMode::And => prev & &sub,
@@ -52,7 +56,7 @@ impl TagFilterBitmap {
                         }
                     }
                 }
-                acc.unwrap_or_else(RoaringBitmap::new)
+                acc.unwrap_or_default()
             } else {
                 let mut full = RoaringBitmap::new();
                 let max_id = shard.fst.len() as u32;
@@ -64,7 +68,7 @@ impl TagFilterBitmap {
 
             // Subtract any exclude sets
             if let Some(idx) = &shard.tags {
-                for tag in exclude_tags {
+                for tag in &exclude_tags_lower {
                     if let Some(sub) = idx.get(tag)? {
                         bm -= &sub;
                     }
