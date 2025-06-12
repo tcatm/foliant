@@ -1,10 +1,9 @@
 use clap::{Parser, Subcommand};
 use foliant::payload_store::PayloadStoreVersion;
 use foliant::{
-    convert_v2_to_v3_inplace, Database, DatabaseBuilder, Entry, SegmentInfo, Streamer,
-    TagIndexBuilder, TagMode, TantivyIndexBuilder,
+    convert_v2_to_v3_inplace, Database, DatabaseBuilder, SegmentInfo,
+    TagIndexBuilder, TantivyIndexBuilder,
 };
-use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, TagFilterBitmap};
 use fst::map::Map;
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
@@ -110,23 +109,6 @@ enum Commands {
         /// Path to the payload store file to convert
         #[arg(value_name = "PAYLOAD_FILE")]
         path: PathBuf,
-    },
-    List {
-        /// Path to the serialized index (file or directory of shards)
-        #[arg(short, long, value_name = "INDEX")]
-        index: PathBuf,
-        /// Comma-separated tags to include or exclude (prefix with '-' or '!' to exclude)
-        #[arg(long, value_name = "TAGS")]
-        tags: Option<String>,
-        /// Combine positive tags with AND or OR logic (applied before exclusion)
-        #[arg(long, value_name = "TAG_MODE", default_value = "and")]
-        tag_mode: TagMode,
-        /// Prefix to list (default is empty)
-        #[arg(value_name = "PREFIX", default_value = "")]
-        prefix: String,
-        /// Optional delimiter character for grouping
-        #[arg(short, long, value_name = "DELIM")]
-        delimiter: Option<char>,
     },
     /// Interactive shell for browsing the index (or run commands non-interactively)
     Shell {
@@ -428,90 +410,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::ConvertPayload { path } => {
             convert_v2_to_v3_inplace(&path)?;
             println!("Converted payload store to v3: {:?}", path);
-        }
-        Commands::List {
-            index,
-            tags,
-            tag_mode,
-            prefix,
-            delimiter,
-        } => {
-            // Load shards with a progress bar
-            let load_start = Instant::now();
-            let db_handle: Database<Value> = load_db(&index, None)?;
-            let load_duration = load_start.elapsed();
-            // Choose tag-filtered or plain listing
-            let stream_start = Instant::now();
-            let mut stream: Box<dyn Streamer<Item = Entry<Value>, Cursor = Vec<u8>>> = if let Some(tag_strs) = tags.as_deref() {
-                // Split into include/exclude sets: prefix '-' or '!' to exclude
-                let mut include_tags = Vec::new();
-                let mut exclude_tags = Vec::new();
-                for raw in tag_strs.split(',') {
-                    if let Some(t) = raw.strip_prefix('-') {
-                        exclude_tags.push(t.to_string());
-                    } else if let Some(t) = raw.strip_prefix('!') {
-                        exclude_tags.push(t.to_string());
-                    } else if let Some(t) = raw.strip_prefix('+') {
-                        include_tags.push(t.to_string());
-                    } else if !raw.is_empty() {
-                        include_tags.push(raw.to_string());
-                    }
-                }
-                
-                let tag_config = TagFilterConfig {
-                    include_tags,
-                    exclude_tags,
-                    mode: tag_mode,
-                };
-                
-                let filter = TagFilterBitmap::new(&db_handle.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
-                let prefix_bytes = prefix.as_bytes().to_vec();
-                Box::new(MultiShardListStreamer::new_with_filter(
-                    &db_handle.shards(),
-                    prefix_bytes,
-                    delimiter.map(|c| c as u8),
-                    Some(filter),
-                )?)
-            } else {
-                db_handle.list(&prefix, delimiter)?
-            };
-            let stream_duration = stream_start.elapsed();
-            let mut printed = 0usize;
-            let list_start = Instant::now();
-
-            while let Some(entry) = stream.next() {
-                match entry {
-                    Entry::Key(s, _ptr, val_opt) => {
-                        // print key, followed by optional CBOR-decoded JSON Value in dim color
-                        if let Some(val) = val_opt {
-                            let val_str = serde_json::to_string(&val)?;
-                            println!("📄 {} \x1b[2m{}\x1b[0m", s, val_str);
-                        } else {
-                            println!("📄 {}", s);
-                        }
-                    }
-                    Entry::CommonPrefix(s, count) => {
-                        if let Some(count) = count {
-                            println!("📁 {} ({})", s, count);
-                        } else {
-                            println!("📁 {}", s);
-                        }
-                    }
-                }
-                printed += 1;
-            }
-
-            let list_duration = list_start.elapsed();
-            // Output combined metrics
-            let total_duration = load_start.elapsed();
-            eprintln!(
-                "\nLoad: {:.3} ms, Stream: {:.3} ms, List: {:.3} ms, Total: {:.3} ms, Printed {} entries",
-                load_duration.as_secs_f64() * 1000.0,
-                stream_duration.as_secs_f64() * 1000.0,
-                list_duration.as_secs_f64() * 1000.0,
-                total_duration.as_secs_f64() * 1000.0,
-                printed,
-            );
         }
         Commands::Shell {
             index,
