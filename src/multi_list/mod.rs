@@ -3,6 +3,7 @@
 mod bitmap_filter;
 mod tag_filter;
 mod frame;
+mod frame_ops;
 mod streamer;
 
 pub use bitmap_filter::ShardBitmapFilter;

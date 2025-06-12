@@ -1,5 +1,5 @@
 use foliant::payload_store::PAYLOAD_STORE_VERSION_V3;
-use foliant::{Database, DatabaseBuilder, Entry, Streamer};
+use foliant::{Database, DatabaseBuilder};
 use serde_cbor::Value;
 use std::error::Error;
 use tempfile::tempdir;

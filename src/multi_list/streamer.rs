@@ -1,192 +1,21 @@
-use crate::shard::SharedMmap;
 use crate::{Entry, Shard, Streamer};
-use fst::raw::{Fst, Output};
 /// Maximum expected key length for reserve hints
 const MAX_KEY_LEN: usize = 256;
 
-use super::frame::{FrameState, FrameMulti, TransitionRef};
+use super::frame::FrameMulti;
+use super::frame_ops::{ShardInfo, build_frame_states, build_frame_transitions_and_bounds, 
+                        create_frame_with_transitions, count_children_for_transition_refs};
 
 use crate::payload_store::PayloadCodec;
 use serde::de::DeserializeOwned;
 use super::bitmap_filter::ShardBitmapFilter;
 use roaring::RoaringBitmap;
-/// Combined per-shard context for streamlined iteration
-struct ShardInfo<'a, V, C>
-where
-    V: DeserializeOwned,
-    C: PayloadCodec,
-{
-    fst: &'a Fst<SharedMmap>,
-    shard: &'a Shard<V, C>,
-    bitmap: Option<RoaringBitmap>,
-}
+
 impl<'a, V, C> MultiShardListStreamer<'a, V, C>
 where
     V: DeserializeOwned,
     C: PayloadCodec,
 {
-    /// Build frame states for the current shard_infos and byte sequence.
-    /// Uses the same vectorized traversal logic as `next()` to descend all shards in parallel.
-    fn build_frame_states(
-        infos: &[ShardInfo<'a, V, C>],
-        bytes: &[u8],
-    ) -> Vec<FrameState<'a>> {
-        let shards = infos.len();
-        let mut frame = FrameMulti::with_capacity(shards);
-        frame.prefix_len = 0;
-        frame.states = infos.iter().enumerate().map(|(i, info)| {
-            let node = info.fst.root();
-            let output = node.final_output();
-            let lb = output.cat(node.final_output()).value();
-            let ub = info.fst.len() as u64;
-            FrameState { shard_idx: i, node, output, lb, ub }
-        }).collect();
-        for &b in bytes {
-            frame.trans_idx = 0;
-            Self::build_frame_transitions_fast(&mut frame, infos);
-            if let Some((_, refs)) = frame.trans.iter().find(|bucket| bucket.0 == b) {
-                frame = Self::create_frame_with_transitions(
-                    infos,
-                    None,
-                    shards,
-                    frame.prefix_len + 1,
-                    &frame,
-                    &refs,
-                );
-            } else {
-                return Vec::new();
-            }
-        }
-        frame.states
-    }
-
-    /// Build all grouped transitions and compute sibling bounds in O(T + T log T) time
-    /// (where T is the total number of outgoing transitions for this frame).
-    fn build_frame_transitions_fast(
-        frame: &mut FrameMulti<'a>,
-        infos: &[ShardInfo<'a, V, C>],
-    ) {
-        
-        // 1. Clear any existing state
-        for bucket in frame.trans_table.iter_mut().flatten() {
-            bucket.clear();
-        }
-        
-        // 2. Collect states first to avoid borrowing issues
-        let state_info: Vec<(usize, Vec<(u8, usize, Output)>)> = frame.states.iter().map(|state| {
-            let transitions: Vec<(u8, usize, Output)> = (0..state.node.len())
-                .map(|ti| {
-                    let tr = state.node.transition(ti);
-                    let out_cat = state.output.cat(tr.out);
-                    (tr.inp, tr.addr, out_cat)
-                })
-                .collect();
-            (state.shard_idx, transitions)
-        }).collect();
-        
-        // 3. Emit transitions into fixed 256-slot table (O(1) insertion)
-        for (shard_idx, transitions) in state_info {
-            for (inp, addr, out_cat) in transitions {
-                let bucket = frame.trans_by_byte(inp);
-                bucket.push((shard_idx, addr, out_cat, 0)); // ub computed later
-            }
-        }
-        
-        // 4. Convert the fixed table into compact sorted Vec
-        frame.flush_trans_table();
-        
-        // 5. Compute bounds efficiently in O(T·log T) using sorted order
-        Self::compute_transition_bounds_efficiently(frame, infos);
-    }
-    
-    /// Efficiently compute upper bounds for all transitions in O(S·B log(S·B)) time.
-    /// This processes transitions in sorted order to set sibling bounds correctly using a single pass.
-    fn compute_transition_bounds_efficiently(
-        frame: &mut FrameMulti<'a>,
-        infos: &[ShardInfo<'a, V, C>],
-    ) {
-        // Helper to get shard's final upper bound
-        let shard_end = |shard_idx: usize| -> u64 {
-            let ub = frame.states
-                .iter()
-                .find(|s| s.shard_idx == shard_idx)
-                .map(|s| s.ub)
-                .unwrap_or(infos[shard_idx].fst.len() as u64);
-            
-            
-            ub
-        };
-        
-        // Collect ALL transitions across all buckets and sort them globally
-        let mut all_transitions: Vec<(u8, usize, usize, usize, Output, u64)> = Vec::new(); // (byte, bucket_idx, trans_idx, shard_idx, output, full_lb)
-        
-        for (bucket_idx, (_byte, refs)) in frame.trans.iter_mut().enumerate() {
-            for (trans_idx, (shard_idx, addr, output, _)) in refs.iter().enumerate() {
-                let child_node = infos[*shard_idx].fst.node(*addr);
-                let full_lb = output.cat(child_node.final_output()).value();
-                all_transitions.push((*_byte, bucket_idx, trans_idx, *shard_idx, *output, full_lb));
-            }
-        }
-        
-        // Sort all transitions by (shard_idx, full_lb) to find true siblings
-        all_transitions.sort_by_key(|(_, _, _, shard_idx, _, full_lb)| (*shard_idx, *full_lb));
-        
-        // Single forward pass to set upper bounds - O(T) where T = total transitions
-        let mut prev_by_shard: Vec<Option<(usize, usize)>> = vec![None; infos.len()];
-        
-        
-        for (_byte, bucket_idx, trans_idx, shard_idx, _output, full_lb) in all_transitions {
-            // Close previous sibling of this shard, if any
-            if let Some((prev_bucket, prev_trans)) = prev_by_shard[shard_idx].replace((bucket_idx, trans_idx)) {
-                let new_ub = full_lb.saturating_sub(1);
-                frame.trans[prev_bucket].1[prev_trans].3 = new_ub;
-                
-            }
-        }
-        
-        // Finish shards whose last transition had no younger sibling
-        for (shard_idx, opt) in prev_by_shard.into_iter().enumerate() {
-            if let Some((bucket_idx, trans_idx)) = opt {
-                let final_ub = shard_end(shard_idx);
-                frame.trans[bucket_idx].1[trans_idx].3 = final_ub;
-            }
-        }
-    }
-
-    /// Create a new frame and populate it with states for the given transition references.
-    /// Uses precomputed bounds from transition refs for O(1) operation.
-    fn create_frame_with_transitions(
-        infos: &[ShardInfo<'a, V, C>],
-        frame_pool: Option<&mut Vec<FrameMulti<'a>>>,
-        shards_len: usize,
-        prefix_len: usize,
-        _frame: &FrameMulti<'a>,
-        refs: &[TransitionRef]
-    ) -> FrameMulti<'a> {
-        let mut new_frame = if let Some(pool) = frame_pool {
-            pool.pop().unwrap_or_else(|| FrameMulti::with_capacity(shards_len))
-        } else {
-            FrameMulti::with_capacity(shards_len)
-        };
-        new_frame.reset(prefix_len);
-        
-        for &(shard_idx, addr, out, ub) in refs {
-            let node = infos[shard_idx].fst.node(addr);
-            let new_out = out.cat(node.final_output());
-            let lb = new_out.value();
-            
-            new_frame.states.push(FrameState {
-                shard_idx,
-                node,
-                output: new_out,
-                lb,
-                ub, // Use precomputed upper bound
-            });
-        }
-        
-        new_frame
-    }
-
     /// Common byte-by-byte traversal logic used by both walk_prefix and replay_seek_internal.
     /// Traverses the given bytes starting from the current frame stack, building frames with proper bounds.
     fn traverse_bytes_with_frames(
@@ -197,7 +26,7 @@ where
         for &byte in bytes {
             let frame = self.stack.last_mut().unwrap();
             if frame.trans_idx == 0 {
-                Self::build_frame_transitions_fast(frame, &self.shard_infos);
+                build_frame_transitions_and_bounds(frame, &self.shard_infos);
             }
             
             if let Some((i, (_, refs))) = frame
@@ -211,7 +40,7 @@ where
                     self.prefix.push(byte);
                 }
                 
-                let new_frame = Self::create_frame_with_transitions(
+                let new_frame = create_frame_with_transitions(
                     &self.shard_infos,
                     Some(&mut self.frame_pool),
                     self.shard_infos.len(),
@@ -227,39 +56,6 @@ where
         true // Successfully traversed all bytes
     }
 
-    /// Count descendant keys under transition references with precomputed bounds (O(1) per call).
-    fn count_children_for_transition_refs(&self, refs: &[TransitionRef]) -> Option<usize> {
-        let mut total = 0usize;
-        let use_bitmaps = self.shard_infos.iter().any(|info| info.bitmap.is_some());
-        
-        
-        for &(shard_idx, _addr, output, ub) in refs {
-            let should_count = if use_bitmaps {
-                self.shard_infos[shard_idx].bitmap.is_some()
-            } else {
-                true
-            };
-            
-            if should_count {
-                let lb = output.value();
-                
-                if ub >= lb {
-                    let count = if use_bitmaps {
-                        if let Some(ref bm) = self.shard_infos[shard_idx].bitmap {
-                            bm.range(lb as u32..=ub as u32).count() as usize
-                        } else {
-                            0
-                        }
-                    } else {
-                        (ub - lb + 1) as usize
-                    };
-                    total = total.saturating_add(count);
-                }
-            }
-        }
-        
-        if total > 0 { Some(total) } else { None }
-    }
 
     /// Build a streamer and immediately fast‑forward so that the first `next()` yields
     /// the first entry > `cursor`.  Avoids a second prefix walk when resuming.
@@ -347,14 +143,13 @@ where
         }
         self.shard_infos = new_infos;
         
-        
         // Rebuild frame states from scratch with the new FST array
         // This ensures all Node references point to the correct FSTs
         let current_prefix = self.prefix.clone();
         
         let mut initial_frame = FrameMulti::with_capacity(self.shard_infos.len());
         initial_frame.prefix_len = current_prefix.len();
-        initial_frame.states = Self::build_frame_states(&self.shard_infos, &current_prefix);
+        initial_frame.states = build_frame_states(&self.shard_infos, &current_prefix);
         
         // Replace the stack with the rebuilt initial frame
         self.stack.clear();
@@ -427,7 +222,7 @@ where
             shard_infos.push(ShardInfo { fst, shard, bitmap });
         }
         // Build initial frame states by walking the prefix across all shards
-        initial_frame.states = Self::build_frame_states(&shard_infos, &start_prefix);
+        initial_frame.states = build_frame_states(&shard_infos, &start_prefix);
 
         // Handle case where literal prefix isn't found
         if initial_frame.states.is_empty() && !start_prefix.is_empty() {
@@ -511,7 +306,7 @@ where
         // Rebuild initial frame using current filtered shards and bitmaps
         let mut initial_frame = FrameMulti::with_capacity(self.shard_infos.len());
         initial_frame.prefix_len = start.len();
-        initial_frame.states = Self::build_frame_states(&self.shard_infos, &start);
+        initial_frame.states = build_frame_states(&self.shard_infos, &start);
         
         self.prefix = start.clone();
         self.stack.clear();
@@ -560,7 +355,7 @@ where
             }
             // 2) Build grouped transitions once, using optimized algorithm
                 if frame.trans_idx == 0 {
-                Self::build_frame_transitions_fast(frame, &self.shard_infos);
+                build_frame_transitions_and_bounds(frame, &self.shard_infos);
             }
             // 3) Process next transition if available
             if frame.trans_idx < frame.trans.len() {
@@ -599,7 +394,7 @@ where
                     self.last_bytes = bytes.clone();
                     let s = String::from_utf8(bytes).expect("invalid utf8 in prefix");
 
-                    let child_count = self.count_children_for_transition_refs(&refs);
+                    let child_count = count_children_for_transition_refs(&refs, &self.shard_infos);
 
                     // skip empty prefixes with no matching children
                     if child_count.unwrap_or(0) == 0 {
@@ -611,7 +406,7 @@ where
 
                 // b) Descend into child nodes for byte inp_byte
                 self.prefix.push(inp_byte);
-                let new_frame = Self::create_frame_with_transitions(
+                let new_frame = create_frame_with_transitions(
                     &self.shard_infos,
                     Some(&mut self.frame_pool),
                     self.shard_infos.len(),
