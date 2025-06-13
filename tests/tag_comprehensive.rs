@@ -115,7 +115,12 @@ fn test_legacy_v1_compatibility() -> Result<(), Box<dyn std::error::Error>> {
         let tags: Vec<(String, usize)> = db.list_tags(None)?.collect();
         assert_eq!(tags.len(), 4);
         
-        let tag_names: Vec<String> = db.list_tag_names(None)?.collect();
+        // Verify we can also just extract tag names
+        let mut tag_stream = db.list_tags(None)?;
+        let mut tag_names: Vec<String> = Vec::new();
+        while let Some((tag, _count)) = tag_stream.next() {
+            tag_names.push(tag);
+        }
         assert_eq!(tag_names.len(), 4);
     }
     

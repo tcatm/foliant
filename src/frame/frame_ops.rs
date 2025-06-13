@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use smallvec::SmallVec;
 
 /// Combined per-shard context for streamlined iteration
-pub(super) struct ShardInfo<'a, V, C>
+pub struct ShardInfo<'a, V, C>
 where
     V: DeserializeOwned,
     C: PayloadCodec,
@@ -20,7 +20,7 @@ where
 
 /// Build frame states for the given shard_infos and byte sequence.
 /// Uses the same vectorized traversal logic as streamer's `next()` to descend all shards in parallel.
-pub(super) fn build_frame_states<'a, V, C>(
+pub fn build_frame_states<'a, V, C>(
     infos: &[ShardInfo<'a, V, C>],
     bytes: &[u8],
 ) -> Vec<FrameState<'a>>
@@ -61,7 +61,7 @@ where
 /// Fused function that builds frame transitions and computes bounds in a single pass.
 /// For each shard: collect transitions, sort by lower bound to compute upper bounds,
 /// then merge into frame.trans buckets sorted by input byte.
-pub(super) fn build_frame_transitions_and_bounds<'a, V, C>(
+pub fn build_frame_transitions_and_bounds<'a, V, C>(
     frame: &mut FrameMulti<'a>,
     infos: &[ShardInfo<'a, V, C>],
 )
@@ -131,7 +131,7 @@ where
 
 /// Create a new frame and populate it with states for the given transition references.
 /// Uses precomputed bounds from transition refs for O(1) operation.
-pub(super) fn create_frame_with_transitions<'a, V, C>(
+pub fn create_frame_with_transitions<'a, V, C>(
     infos: &[ShardInfo<'a, V, C>],
     frame_pool: Option<&mut Vec<FrameMulti<'a>>>,
     shards_len: usize,
@@ -168,7 +168,7 @@ where
 }
 
 /// Count descendant keys under transition references with precomputed bounds (O(1) per call).
-pub(super) fn count_children_for_transition_refs<V, C>(
+pub fn count_children_for_transition_refs<V, C>(
     refs: &[TransitionRef],
     shard_infos: &[ShardInfo<V, C>],
 ) -> Option<usize>

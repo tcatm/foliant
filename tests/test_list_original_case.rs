@@ -38,8 +38,12 @@ fn test_list_tags_returns_original_case() -> Result<(), Box<dyn std::error::Erro
         ];
         assert_eq!(tags_with_counts, expected);
         
-        // Test list_tag_names also returns original case
-        let mut tag_names: Vec<String> = db.list_tag_names(None)?.collect();
+        // Verify tags can be extracted without counts too
+        let mut tag_stream = db.list_tags(None)?;
+        let mut tag_names: Vec<String> = Vec::new();
+        while let Some((tag, _count)) = tag_stream.next() {
+            tag_names.push(tag);
+        }
         tag_names.sort();
         
         let expected_names = vec![

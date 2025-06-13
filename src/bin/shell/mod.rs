@@ -39,13 +39,15 @@ Available commands:
   cd [dir]                        change directory
   find <regex>                    search entries matching regex
   search <query>                  fuzzy search entries matching substring using search index
-  tags [-n]                      list all tags with counts; -n for names only
+  tags                            list all tags with counts
   val <id>                        lookup key by raw pointer ID
   pwd                             print working directory
   exit, quit                      exit shell
   help                            show this help
 
 Ctrl-C once aborts a running ls; twice within 2s exits the shell
+
+Debug mode: Start shell with --debug to show command execution times
 ";
 
 /// Result of printing a stream: either completed or aborted via Ctrl-C.
@@ -125,6 +127,7 @@ struct ShellState<V: DeserializeOwned> {
     db: Database<V>,
     delim: char,
     cwd: String,
+    debug: bool,
 }
 
 struct ShellHelper<V: DeserializeOwned> {
@@ -178,9 +181,9 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
             } else {
                 Some(cwd.as_str())
             };
-            match state.db.list_tag_names(prefix_opt) {
+            match state.db.list_tags(prefix_opt) {
                 Ok(mut tag_stream) => {
-                    while let Some(tag) = tag_stream.next() {
+                    while let Some((tag, _count)) = tag_stream.next() {
                         // For ls command: support '#' and '!' prefixes
                         let (marker, rest) = if word.starts_with('#') || word.starts_with('!') {
                             (Some(word.chars().next().unwrap()), &word[1..])
@@ -298,9 +301,18 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
     if line.is_empty() {
         return Ok(false);
     }
+    
+    // Start timing if debug mode is enabled
+    let debug_mode = state.borrow().debug;
+    let start_time = if debug_mode {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
+    
     let mut parts = line.split_whitespace();
     let cmd = parts.next().unwrap();
-    match cmd {
+    let result = match cmd {
         "ls" => {
             let mut recursive = false;
             let mut only_prefix = false;
@@ -431,16 +443,13 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                 only_keys,
                 abort_rx,
             ));
+            Ok(false)
         }
         "tags" => {
-            let mut list_names_only = false;
-            for tok in parts {
-                if tok == "-n" {
-                    list_names_only = true;
-                } else {
-                    println!("Unknown argument '{}' for tags command", tok);
-                    return Ok(false);
-                }
+            // No arguments expected for tags command
+            if parts.next().is_some() {
+                println!("tags command doesn't take any arguments");
+                return Ok(false);
             }
             
             let state_ref = state.borrow();
@@ -450,32 +459,20 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                 Some(state_ref.cwd.as_str())
             };
             
-            if list_names_only {
-                match state_ref.db.list_tag_names(prefix_opt) {
-                    Ok(mut tag_stream) => {
-                        while let Some(tag) = tag_stream.next() {
-                            println!("🏷️  \x1b[35m{:<32}\x1b[0m", tag);
-                        }
-                    }
-                    Err(e) => {
-                        println!("Error listing tags: {}", e);
+            match state_ref.db.list_tags(prefix_opt) {
+                Ok(mut tag_stream) => {
+                    while let Some((tag, count)) = tag_stream.next() {
+                        println!(
+                            "🏷️  \x1b[35m{:<32}\x1b[0m \x1b[90m{:>12}\x1b[0m",
+                            tag, count
+                        );
                     }
                 }
-            } else {
-                match state_ref.db.list_tags(prefix_opt) {
-                    Ok(mut tag_stream) => {
-                        while let Some((tag, count)) = tag_stream.next() {
-                            println!(
-                                "🏷️  \x1b[35m{:<32}\x1b[0m \x1b[90m{:>12}\x1b[0m",
-                                tag, count
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        println!("Error listing tags: {}", e);
-                    }
+                Err(e) => {
+                    println!("Error listing tags: {}", e);
                 }
             }
+            Ok(false)
         }
         "shards" => {
             let state_ref = state.borrow();
@@ -490,7 +487,7 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                     shard.common_prefix(),
                 );
             }
-            return Ok(false);
+            Ok(false)
         }
         "find" => {
             let pattern = match parts.next() {
@@ -521,6 +518,7 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                 true,
                 abort_rx,
             ));
+            Ok(false)
         }
         "search" => {
             let query = match parts.next() {
@@ -551,6 +549,7 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                 true,
                 abort_rx,
             ));
+            Ok(false)
         }
         "val" => {
             let id_str = match parts.next() {
@@ -577,6 +576,7 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                 },
                 Err(_) => println!("Usage: val <numeric_id>"),
             }
+            Ok(false)
         }
         "cd" => {
             let arg = parts.next().unwrap_or("");
@@ -601,27 +601,42 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                     state_mut.cwd.push_str(arg);
                 }
             }
+            Ok(false)
         }
         "pwd" => {
             println!("{}", state.borrow().cwd);
+            Ok(false)
         }
         "help" => {
             println!("{}", help_text);
+            Ok(false)
         }
-        "exit" | "quit" => return Ok(true),
-        _ => println!("Unknown command: {}", cmd),
+        "exit" | "quit" => Ok(true),
+        _ => {
+            println!("Unknown command: {}", cmd);
+            Ok(false)
+        }
+    };
+    
+    // Print execution time if debug mode is enabled
+    if let Some(start) = start_time {
+        let elapsed = start.elapsed();
+        println!("\x1b[90mCommand execution time: {:.3} ms\x1b[0m", elapsed.as_secs_f64() * 1000.0);
     }
-    Ok(false)
+    
+    result
 }
 
 pub fn run_shell<V: DeserializeOwned + Serialize>(
     db: Database<V>,
     delim: char,
+    debug: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let state = Rc::new(RefCell::new(ShellState {
         db,
         delim,
         cwd: String::new(),
+        debug,
     }));
     let helper = ShellHelper {
         state: Rc::clone(&state),
@@ -699,12 +714,14 @@ pub fn run_shell<V: DeserializeOwned + Serialize>(
 pub fn run_shell_commands<V: DeserializeOwned + Serialize>(
     db: Database<V>,
     delim: char,
+    debug: bool,
     commands: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let state = Rc::new(RefCell::new(ShellState {
         db,
         delim,
         cwd: String::new(),
+        debug,
     }));
     // Join remaining args into one command
     let line = commands.join(" ");

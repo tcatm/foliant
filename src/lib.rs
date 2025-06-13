@@ -2,6 +2,7 @@ mod builder;
 mod database;
 mod entry;
 mod error;
+mod frame;
 mod lookup_table_store;
 pub mod multi_list;
 pub mod payload_store;

@@ -135,9 +135,7 @@ impl TagIndex {
         let bitmap_len = u32::from_le_bytes(
             buf[start..start + 4].try_into().unwrap()
         ) as usize;
-        
-        // Skip string_len (we don't need it for bitmap reading)
-        
+                
         // Bitmap starts immediately after 8-byte header (which is 64-bit aligned)
         let bitmap_start = start + 8;
         let bitmap_end = bitmap_start + bitmap_len;
@@ -236,6 +234,68 @@ impl TagIndex {
         self.get_bitmap_at_offset(offset as usize)
     }
 
+    /// Retrieve the RoaringBitmap for a memory offset obtained from `list_tags`.
+    pub fn get_original_case_by_value(&self, offset: u64) -> Result<Option<String>> {
+        self.get_original_case_at_offset(offset as usize)
+    }
+    
+    /// Get both bitmap and original case in one call to avoid duplicate mmap access.
+    /// Returns (bitmap, original_case_opt).
+    pub fn get_bitmap_and_original_case(&self, offset: u64) -> Result<(RoaringBitmap, Option<String>)> {
+        let buf = self.mmap.as_ref();
+        let start = self.data_offset + offset as usize;
+        
+        if start + 8 > buf.len() {
+            return Err(IndexError::InvalidFormat("header out of bounds"));
+        }
+        
+        // Read bitmap_len (u32) and string_len (u32)
+        let bitmap_len = u32::from_le_bytes(
+            buf[start..start + 4].try_into().unwrap()
+        ) as usize;
+        let string_len = u32::from_le_bytes(
+            buf[start + 4..start + 8].try_into().unwrap()
+        ) as usize;
+        
+        // Bitmap starts immediately after 8-byte header (which is 64-bit aligned)
+        let bitmap_start = start + 8;
+        let bitmap_end = bitmap_start + bitmap_len;
+        
+        if bitmap_end > buf.len() {
+            return Err(IndexError::InvalidFormat("bitmap data out of bounds"));
+        }
+        
+        // Deserialize bitmap
+        let bitmap_slice = &buf[bitmap_start..bitmap_end];
+        let bitmap = RoaringBitmap::deserialize_from(bitmap_slice).map_err(|e| {
+            IndexError::Io(io::Error::new(
+                io::ErrorKind::Other,
+                format!("failed to deserialize roaring bitmap: {}", e),
+            ))
+        })?;
+        
+        // Get original case if present
+        let original_case = if string_len > 0 {
+            let string_start = bitmap_end;
+            let string_end = string_start + string_len;
+            
+            if string_end > buf.len() {
+                return Err(IndexError::InvalidFormat("string data out of bounds"));
+            }
+            
+            let string_slice = &buf[string_start..string_end];
+            Some(String::from_utf8(string_slice.to_vec()).map_err(|e| {
+                IndexError::Io(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("failed to decode UTF-8 string: {}", e),
+                ))
+            })?)
+        } else {
+            None
+        };
+        
+        Ok((bitmap, original_case))
+    }
 
     /// Get only the count (length) of a bitmap.
     /// Currently uses full deserialization but isolates this operation for future optimization.

@@ -35,10 +35,16 @@ fn build_tag_index_and_list_tags() -> Result<(), Box<dyn std::error::Error>> {
     ];
     assert_eq!(tags_with_counts, expected);
 
-    // Test list_tag_names without counts
-    let mut tag_names: Vec<String> = db.list_tag_names(None)?.collect();
-    tag_names.sort();
+    // Test that tags are returned in the expected order
+    let mut tag_stream = db.list_tags(None)?;
+    let mut tag_names: Vec<String> = Vec::new();
+    while let Some((tag, _count)) = tag_stream.next() {
+        tag_names.push(tag);
+    }
     
+    // Verify all expected tags are present (order might vary)
+    let mut sorted_names = tag_names.clone();
+    sorted_names.sort();
     let expected_names = vec![
         "brown".to_string(),
         "fruit".to_string(),
@@ -47,7 +53,7 @@ fn build_tag_index_and_list_tags() -> Result<(), Box<dyn std::error::Error>> {
         "vegetable".to_string(),
         "yellow".to_string(),
     ];
-    assert_eq!(tag_names, expected_names);
+    assert_eq!(sorted_names, expected_names);
 
     Ok(())
 }
@@ -109,8 +115,6 @@ fn build_tag_index_empty_tags() -> Result<(), Box<dyn std::error::Error>> {
     let tags: Vec<(String, usize)> = db.list_tags(None)?.collect();
     assert!(tags.is_empty());
     
-    let tag_names: Vec<String> = db.list_tag_names(None)?.collect();
-    assert!(tag_names.is_empty());
     
     Ok(())
 }

@@ -48,6 +48,13 @@ struct Paged<T> {
     next_cursor: Option<String>,
 }
 
+/// Tag with its count
+#[derive(Serialize)]
+struct TagWithCount {
+    tag: String,
+    count: usize,
+}
+
 /// Error response.
 #[derive(Serialize)]
 struct ErrorResponse {
@@ -240,7 +247,7 @@ struct TagsParams {
 async fn list_tags_names(
     State(state): State<AppState>,
     Query(params): Query<TagsParams>,
-) -> Result<Json<Paged<String>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Paged<TagWithCount>>, (StatusCode, Json<ErrorResponse>)> {
     let limit = params.limit.map(|l| l.min(state.max_limit)).unwrap_or(state.max_limit);
     let mut stream = match params.cursor {
         Some(cur) => {
@@ -252,17 +259,17 @@ async fn list_tags_names(
                     }),
                 )
             })?;
-            let mut s = state.db.list_tag_names(params.prefix.as_deref()).unwrap();
+            let mut s = state.db.list_tags(params.prefix.as_deref()).unwrap();
             s.seek(bytes);
             s
         }
-        None => state.db.list_tag_names(params.prefix.as_deref()).unwrap(),
+        None => state.db.list_tags(params.prefix.as_deref()).unwrap(),
     };
 
     let mut items = Vec::new();
     for _ in 0..limit {
-        if let Some(tag) = stream.next() {
-            items.push(tag);
+        if let Some((tag, count)) = stream.next() {
+            items.push(TagWithCount { tag, count });
         } else {
             break;
         }

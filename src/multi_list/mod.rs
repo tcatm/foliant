@@ -1,8 +1,6 @@
 //! Modular multi-shard listing with lazy bitmap-based filtering.
 
 mod bitmap_filter;
-mod frame;
-mod frame_ops;
 mod streamer;
 mod lazy_filter;
 mod lazy_tag_filter;

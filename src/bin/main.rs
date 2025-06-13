@@ -121,6 +121,9 @@ enum Commands {
         /// Maximum number of shards to load (for debugging large databases)
         #[arg(short = 'n', long = "limit", value_name = "N")]
         limit: Option<usize>,
+        /// Enable debug mode to show command execution times
+        #[arg(long)]
+        debug: bool,
         /// Shell commands to execute non-interactively (skips REPL)
         #[arg(value_name = "CMD", num_args = 0.., last = true)]
         commands: Vec<String>,
@@ -415,14 +418,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             index,
             delimiter,
             limit,
+            debug,
             commands,
         } => {
             // Open single DB or sharded directory for interactive shell or batch commands
             let db_handle: Database<Value> = load_db(&index, limit)?;
             if commands.is_empty() {
-                run_shell(db_handle, delimiter)?;
+                run_shell(db_handle, delimiter, debug)?;
             } else {
-                run_shell_commands(db_handle, delimiter, &commands)?;
+                run_shell_commands(db_handle, delimiter, debug, &commands)?;
             }
         }
     }

@@ -2,9 +2,9 @@ use crate::{Entry, Shard, Streamer};
 /// Maximum expected key length for reserve hints
 const MAX_KEY_LEN: usize = 256;
 
-use super::frame::{FrameMulti, FrameState};
-use super::frame_ops::{ShardInfo, build_frame_states, build_frame_transitions_and_bounds, 
-                        create_frame_with_transitions, count_children_for_transition_refs};
+use crate::frame::{FrameMulti, FrameState};
+use crate::frame::{ShardInfo, build_frame_states, build_frame_transitions_and_bounds, 
+                   create_frame_with_transitions, count_children_for_transition_refs};
 
 use crate::payload_store::PayloadCodec;
 use serde::de::DeserializeOwned;
