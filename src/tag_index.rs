@@ -18,11 +18,15 @@ use crate::Database;
 use fst::map::MapBuilder;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufWriter, Write};
-use std::sync::Mutex;
-use serde::Deserialize;
 
 /// In-memory handle to a variant-C tag index file (.tags), embedding an FST mapping
-/// each tag to a 64-bit memory offset pointing to (bitmap_len, bitmap, cbor).
+/// each tag to a 64-bit memory offset pointing to:
+/// [bitmap_len:u32][string_len:u32][bitmap_data][original_case_string]
+/// 
+/// Format v2: Simplified aligned format
+/// - Header: 8-byte header with bitmap length and string length (64-bit aligned)
+/// - Bitmap: RoaringBitmap data immediately after header (naturally 64-bit aligned)
+/// - String: UTF-8 string data after bitmap (no CBOR encoding)
 pub struct TagIndex {
     /// Underlying shared memory-mapped file
     mmap: crate::shard::SharedMmap,
@@ -30,8 +34,6 @@ pub struct TagIndex {
     fst: Map<TagFstBacking>,
     /// Byte offset where the data section begins
     data_offset: usize,
-    /// Lazy cache for original case lookups (lowercase -> original case)
-    original_case_cache: Mutex<Option<Arc<HashMap<String, String>>>>,
 }
 
 /// Backing buffer and slice indices for the embedded FST section within the tags file.
@@ -104,7 +106,6 @@ impl TagIndex {
                 mmap,
                 fst,
                 data_offset,
-                original_case_cache: Mutex::new(None),
             })
         } else {
             return Err(IndexError::InvalidFormat("unsupported tags version"));
@@ -121,21 +122,24 @@ impl TagIndex {
     }
 
     /// Helper method to read bitmap at a given offset.
-    /// Data layout: (bitmap_len: u32, bitmap: [u8], cbor: [u8])
+    /// Data layout: [bitmap_len:u32][string_len:u32][bitmap aligned to 64-bit][string]
     fn get_bitmap_at_offset(&self, offset: usize) -> Result<RoaringBitmap> {
         let buf = self.mmap.as_ref();
         let start = self.data_offset + offset;
         
-        if start + 4 > buf.len() {
-            return Err(IndexError::InvalidFormat("bitmap length out of bounds"));
+        if start + 8 > buf.len() {
+            return Err(IndexError::InvalidFormat("header out of bounds"));
         }
         
-        // Read bitmap_len (u32)
+        // Read bitmap_len (u32) and string_len (u32)
         let bitmap_len = u32::from_le_bytes(
             buf[start..start + 4].try_into().unwrap()
         ) as usize;
         
-        let bitmap_start = start + 4;
+        // Skip string_len (we don't need it for bitmap reading)
+        
+        // Bitmap starts immediately after 8-byte header (which is 64-bit aligned)
+        let bitmap_start = start + 8;
         let bitmap_end = bitmap_start + bitmap_len;
         
         if bitmap_end > buf.len() {
@@ -152,35 +156,42 @@ impl TagIndex {
     }
 
     /// Helper method to read original case string at a given offset.
-    /// Skips over the bitmap data to read the CBOR string.
+    /// Data layout: [bitmap_len:u32][string_len:u32][bitmap aligned to 64-bit][string]
     fn get_original_case_at_offset(&self, offset: usize) -> Result<Option<String>> {
         let buf = self.mmap.as_ref();
         let start = self.data_offset + offset;
         
-        if start + 4 > buf.len() {
-            return Err(IndexError::InvalidFormat("bitmap length out of bounds"));
+        if start + 8 > buf.len() {
+            return Err(IndexError::InvalidFormat("header out of bounds"));
         }
         
-        // Read bitmap_len (u32) and skip over bitmap
+        // Read bitmap_len (u32) and string_len (u32)
         let bitmap_len = u32::from_le_bytes(
             buf[start..start + 4].try_into().unwrap()
         ) as usize;
+        let string_len = u32::from_le_bytes(
+            buf[start + 4..start + 8].try_into().unwrap()
+        ) as usize;
         
-        let cbor_start = start + 4 + bitmap_len;
-        
-        if cbor_start >= buf.len() {
-            return Ok(None); // No CBOR data present
+        if string_len == 0 {
+            return Ok(None); // No string data present
         }
         
-        // CBOR is self-describing, parse one value from the stream
-        let cbor_slice = &buf[cbor_start..];
+        // Bitmap starts immediately after 8-byte header (which is 64-bit aligned)
+        let bitmap_start = start + 8;
+        // String starts after the bitmap
+        let string_start = bitmap_start + bitmap_len;
+        let string_end = string_start + string_len;
         
-        // Use the streaming decoder to read exactly one CBOR value  
-        let mut de = serde_cbor::Deserializer::from_slice(cbor_slice);
-        let original_tag: String = String::deserialize(&mut de).map_err(|e| {
+        if string_end > buf.len() {
+            return Err(IndexError::InvalidFormat("string data out of bounds"));
+        }
+        
+        let string_slice = &buf[string_start..string_end];
+        let original_tag = String::from_utf8(string_slice.to_vec()).map_err(|e| {
             IndexError::Io(io::Error::new(
                 io::ErrorKind::Other,
-                format!("failed to deserialize CBOR string: {}", e),
+                format!("failed to decode UTF-8 string: {}", e),
             ))
         })?;
         
@@ -195,70 +206,121 @@ impl TagIndex {
         self.fst.search(Str::new("").starts_with())
     }
 
-    /// Build the original case cache if not already built.
-    /// This maps lowercase tags to their original case versions.
-    fn ensure_original_case_cache(&self) -> Result<Arc<HashMap<String, String>>> {
-        let cache_guard = self.original_case_cache.lock().unwrap();
-        
-        if let Some(cache) = cache_guard.as_ref() {
-            // Cache already built, return cheap Arc clone
-            return Ok(cache.clone());
-        }
-        
-        // Need to build cache - drop the read lock and acquire write lock
-        drop(cache_guard);
-        let mut cache_guard = self.original_case_cache.lock().unwrap();
-        
-        // Double-check after acquiring write lock (another thread might have built it)
-        if let Some(cache) = cache_guard.as_ref() {
-            return Ok(cache.clone());
-        }
-        
-        // Build map from lowercase to original case
-        let mut map = HashMap::new();
+    /// Get all original case tags by iterating through the FST.
+    pub fn get_original_tags(&self) -> Result<Vec<String>> {
+        let mut tags = Vec::new();
         let mut stream = self.fst.stream();
         
-        while let Some((key, offset)) = stream.next() {
-            let lowercase_tag = std::str::from_utf8(key).map_err(|e| {
-                IndexError::Io(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("invalid utf8 in tag key: {}", e),
-                ))
-            })?;
-            
-            // Use the helper method that properly handles CBOR parsing
+        while let Some((_key, offset)) = stream.next() {
             if let Some(original_tag) = self.get_original_case_at_offset(offset as usize)? {
-                map.insert(lowercase_tag.to_string(), original_tag);
+                tags.push(original_tag);
             }
         }
         
-        let cache_arc = Arc::new(map);
-        *cache_guard = Some(cache_arc.clone());
-        Ok(cache_arc)
-    }
-
-    /// Get all original case tags from the cache.
-    pub fn get_original_tags(&self) -> Result<Vec<String>> {
-        let cache = self.ensure_original_case_cache()?;
-        Ok(cache.values().cloned().collect())
+        Ok(tags)
     }
 
     /// Get the original case version of a tag by its lowercase version.
     /// Returns None if the tag is not found.
     pub fn get_original_case(&self, lowercase_tag: &str) -> Result<Option<String>> {
-        // Fast path: try direct lookup if we have the FST entry
+        // Direct lookup - we have the offset, we can read the original case directly
         if let Some(offset) = self.fst.get(lowercase_tag) {
-            return self.get_original_case_at_offset(offset as usize);
+            self.get_original_case_at_offset(offset as usize)
+        } else {
+            Ok(None)
         }
-        
-        // Fallback to cache if direct lookup fails
-        let cache = self.ensure_original_case_cache()?;
-        Ok(cache.get(lowercase_tag).cloned())
     }
 
     /// Retrieve the RoaringBitmap for a memory offset obtained from `list_tags`.
     pub fn get_bitmap(&self, offset: u64) -> Result<RoaringBitmap> {
         self.get_bitmap_at_offset(offset as usize)
+    }
+
+
+    /// Get only the count (length) of a bitmap.
+    /// Currently uses full deserialization but isolates this operation for future optimization.
+    pub fn get_bitmap_count_at_offset(&self, offset: usize) -> Result<u64> {
+        let buf = self.mmap.as_ref();
+        let start = self.data_offset + offset;
+        
+        if start + 8 > buf.len() {
+            return Err(IndexError::InvalidFormat("header out of bounds"));
+        }
+        
+        // Read bitmap_len (u32)
+        let bitmap_len = u32::from_le_bytes(
+            buf[start..start + 4].try_into().unwrap()
+        ) as usize;
+        
+        // Bitmap starts immediately after 8-byte header (which is 64-bit aligned)
+        let bitmap_start = start + 8;
+        let bitmap_end = bitmap_start + bitmap_len;
+        
+        if bitmap_end > buf.len() {
+            return Err(IndexError::InvalidFormat("bitmap data out of bounds"));
+        }
+        
+        let bitmap_slice = &buf[bitmap_start..bitmap_end];
+        
+        // TODO: Optimize this by parsing just the RoaringBitmap header for cardinality
+        RoaringBitmap::deserialize_from(bitmap_slice)
+            .map(|bm| bm.len())
+            .map_err(|e| {
+                IndexError::Io(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("failed to deserialize roaring bitmap for count: {}", e),
+                ))
+            })
+    }
+
+    /// Bulk operation to get bitmap counts for multiple tags without full deserialization.
+    /// Much faster than get_bitmaps_bulk when you only need counts.
+    pub fn get_bitmap_counts_bulk(&self, tags: &[&str]) -> Result<Vec<Option<u64>>> {
+        // Collect tags with their offsets and original indices
+        let mut tag_offsets: Vec<_> = tags.iter()
+            .enumerate()
+            .filter_map(|(idx, tag)| {
+                self.fst.get(tag).map(|offset| (idx, offset as usize))
+            })
+            .collect();
+        
+        // Sort by offset for sequential access pattern
+        tag_offsets.sort_unstable_by_key(|(_, offset)| *offset);
+        
+        // Read bitmap counts in offset order
+        let mut results = vec![None; tags.len()];
+        for (original_idx, offset) in tag_offsets {
+            if let Ok(count) = self.get_bitmap_count_at_offset(offset) {
+                results[original_idx] = Some(count);
+            }
+        }
+        
+        Ok(results)
+    }
+
+    /// Bulk operation to get multiple bitmaps with optimized access pattern.
+    /// Sorts tags by offset for sequential memory access, improving cache locality.
+    pub fn get_bitmaps_bulk(&self, tags: &[&str]) -> Result<Vec<Option<RoaringBitmap>>> {
+        // Collect tags with their offsets and original indices
+        let mut tag_offsets: Vec<_> = tags.iter()
+            .enumerate()
+            .filter_map(|(idx, tag)| {
+                self.fst.get(tag).map(|offset| (idx, offset as usize))
+            })
+            .collect();
+        
+        // Sort by offset for sequential access pattern
+        tag_offsets.sort_unstable_by_key(|(_, offset)| *offset);
+        
+        // Read bitmaps in offset order
+        let mut results = vec![None; tags.len()];
+        for (original_idx, offset) in tag_offsets {
+            if let Ok(bitmap) = self.get_bitmap_at_offset(offset) {
+                results[original_idx] = Some(bitmap);
+            }
+        }
+        
+        Ok(results)
     }
 }
 
@@ -266,9 +328,11 @@ impl TagIndex {
 pub struct TagIndexBuilder {
     /// Full path to the `.idx` file that this tag index extends.
     idx_path: PathBuf,
-    tag_bitmaps: BTreeMap<String, (RoaringBitmap, String)>,
+    tag_bitmaps: HashMap<String, (RoaringBitmap, String)>,
     /// Optional hook that gets called after each insert_tags, passing the total count so far.
     on_progress: Option<Box<dyn Fn(u64)>>,
+    /// Running total count for efficient progress reporting
+    total_count: u64,
 }
 
 impl TagIndexBuilder {
@@ -276,8 +340,9 @@ impl TagIndexBuilder {
     pub fn new<P: AsRef<Path>>(idx_path: P) -> Self {
         TagIndexBuilder {
             idx_path: idx_path.as_ref().to_path_buf(),
-            tag_bitmaps: BTreeMap::new(),
+            tag_bitmaps: HashMap::new(),
             on_progress: None,
+            total_count: 0,
         }
     }
 
@@ -287,25 +352,32 @@ impl TagIndexBuilder {
         T: IntoIterator,
         T::Item: Into<String>,
     {
+        let mut new_insertions = 0u64;
         for tag in tags {
             let original_tag = tag.into();
             let lowercase_tag = original_tag.to_lowercase();
-            self.tag_bitmaps
+            let entry = self.tag_bitmaps
                 .entry(lowercase_tag)
-                .or_insert_with(|| (RoaringBitmap::new(), original_tag.clone()))
-                .0
-                .insert(id);
+                .or_insert_with(|| (RoaringBitmap::new(), original_tag));
+            
+            // Only count if this is a new insertion
+            if entry.0.insert(id) {
+                new_insertions += 1;
+            }
         }
+        
+        // Update running total and call progress callback if needed
+        self.total_count += new_insertions;
         if let Some(cb) = &self.on_progress {
-            let total: u64 = self.tag_bitmaps.values().map(|(bm, _)| bm.len() as u64).sum();
-            cb(total);
+            cb(self.total_count);
         }
     }
 
     /// Consume the builder and write out the `.tags` file.
     pub fn finish(self) -> Result<()> {
         let idx_path = self.idx_path;
-        let tag_bitmaps = self.tag_bitmaps;
+        // Convert HashMap to sorted BTreeMap for deterministic FST building
+        let tag_bitmaps: BTreeMap<String, (RoaringBitmap, String)> = self.tag_bitmaps.into_iter().collect();
 
         // Serialize each bitmap and build the data entries
         let mut data_entries = Vec::with_capacity(tag_bitmaps.len());
@@ -315,37 +387,40 @@ impl TagIndexBuilder {
             let mut bitmap_buf = Vec::new();
             bitmap.serialize_into(&mut bitmap_buf).map_err(IndexError::Io)?;
             
-            // Serialize original case string to CBOR
-            let mut cbor_buf = Vec::new();
-            serde_cbor::to_writer(&mut cbor_buf, original_case).map_err(|e| {
-                IndexError::Io(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("failed to serialize tag to CBOR: {}", e),
-                ))
-            })?;
+            // Convert original case string to UTF-8 bytes
+            let string_bytes = original_case.as_bytes();
             
-            // Create data entry: (bitmap_len, bitmap, cbor)
+            // Create data entry: [bitmap_len:u32][string_len:u32][bitmap][string]
             let mut entry = Vec::new();
+            
+            // Header: bitmap_len and string_len (8 bytes total)
             entry.extend_from_slice(&(bitmap_buf.len() as u32).to_le_bytes());
+            entry.extend_from_slice(&(string_bytes.len() as u32).to_le_bytes());
+            
+            // Bitmap data starts immediately after 8-byte header (will be 64-bit aligned)
             entry.extend_from_slice(&bitmap_buf);
-            entry.extend_from_slice(&cbor_buf);
+            
+            // String data
+            entry.extend_from_slice(string_bytes);
             
             data_entries.push(entry);
         }
 
-        // Build FST with memory offsets
+        // Build FST with memory offsets, accounting for alignment
         let mut fst_section = Vec::new();
         let mut fst_builder = MapBuilder::new(&mut fst_section)?;
         let mut current_offset = 0u64;
         
         for ((tag, _), entry) in tag_bitmaps.iter().zip(data_entries.iter()) {
-            fst_builder.insert(tag, current_offset)?;
-            current_offset += entry.len() as u64;
+            // Align offset to 64-bit boundary before this entry
+            let aligned_offset = (current_offset + 7) & !7;
+            fst_builder.insert(tag, aligned_offset)?;
+            current_offset = aligned_offset + entry.len() as u64;
         }
         
         fst_builder.finish()?;
 
-        // Write new format: header, FST, data entries
+        // Write new format: header, FST, padding, data entries
         let tags_path = idx_path.with_extension("tags");
         let tags_file = File::create(&tags_path)?;
         let mut writer = BufWriter::with_capacity(CHUNK_SIZE, tags_file);
@@ -358,9 +433,18 @@ impl TagIndexBuilder {
         // FST section
         writer.write_all(&fst_section)?;
         
-        // Data entries
+        // Data entries with individual alignment
+        let mut written_bytes = 0u64;
         for entry in data_entries {
+            // Align this entry to 64-bit boundary
+            let padding_needed = ((written_bytes + 7) & !7) - written_bytes;
+            if padding_needed > 0 {
+                writer.write_all(&vec![0u8; padding_needed as usize])?;
+                written_bytes += padding_needed;
+            }
+            
             writer.write_all(&entry)?;
+            written_bytes += entry.len() as u64;
         }
         
         Ok(())

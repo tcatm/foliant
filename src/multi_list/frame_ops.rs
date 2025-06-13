@@ -192,7 +192,7 @@ where
             if ub >= lb {
                 let count = if use_bitmaps {
                     if let Some(ref bm) = shard_infos[shard_idx].bitmap {
-                        bm.range(lb as u32..=ub as u32).count() as usize
+                        bm.range(lb as u32..=ub as u32).count()
                     } else {
                         0
                     }

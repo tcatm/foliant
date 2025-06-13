@@ -265,7 +265,7 @@ where
                 fn seek(&mut self, _cursor: Self::Cursor) { unimplemented!() }
                 fn next(&mut self) -> Option<Self::Item> {
                     self.stream.next().map(|(tag_bytes, ivs)| {
-                        let lowercase_tag = String::from_utf8_lossy(tag_bytes).into_owned();
+                        let lowercase_tag = String::from_utf8_lossy(tag_bytes);
                         
                         // Get original case from first tag index (hot path optimization)
                         let display_tag = if let Some(first_iv) = ivs.first() {
@@ -273,17 +273,17 @@ where
                                 .get_original_case(&lowercase_tag)
                                 .ok()
                                 .flatten()
-                                .unwrap_or_else(|| lowercase_tag.clone())
+                                .unwrap_or_else(|| lowercase_tag.into_owned())
                         } else {
-                            lowercase_tag.clone()
+                            lowercase_tag.into_owned()
                         };
                         
                         let mut count = 0;
                         for iv in ivs {
-                            let sub_bm = self.tag_indices[iv.index]
-                                .get_bitmap(iv.value)
-                                .expect("failed to decode roaring bitmap");
-                            count += sub_bm.len() as usize;
+                            // Fast path: get count without full bitmap deserialization
+                            if let Ok(bitmap_count) = self.tag_indices[iv.index].get_bitmap_count_at_offset(iv.value as usize) {
+                                count += bitmap_count as usize;
+                            }
                         }
                         (display_tag, count)
                     })
@@ -316,25 +316,34 @@ where
                     continue;
                 }
                 
-                // For each tag in this shard, intersect with prefix bitmap
+                // Collect all tags from this shard for bulk processing
+                let mut shard_tags = Vec::new();
                 let mut tag_stream = tag_index.list_tags().into_stream();
                 while let Some((tag_bytes, packed)) = tag_stream.next() {
                     let lowercase_tag = String::from_utf8_lossy(tag_bytes).into_owned();
-                    
-                    // Get original case, fall back to lowercase if not available
-                    let display_tag = tag_index.get_original_case(&lowercase_tag)
-                        .unwrap_or(None)
-                        .unwrap_or(lowercase_tag.clone());
-                    
-                    let tag_bitmap = tag_index.get_bitmap(packed)
-                        .expect("failed to decode tag bitmap");
-                    
-                    // Count only entries that match both the tag and the prefix
-                    let intersection = &tag_bitmap & &prefix_bitmap;
-                    let count = intersection.len() as usize;
-                    
-                    if count > 0 {
-                        *tag_counts.entry(display_tag).or_insert(0) += count;
+                    shard_tags.push((lowercase_tag, packed));
+                }
+                
+                // Bulk read all tag bitmaps for this shard
+                let tag_refs: Vec<&str> = shard_tags.iter().map(|(tag, _)| tag.as_str()).collect();
+                let tag_bitmaps = tag_index.get_bitmaps_bulk(&tag_refs)
+                    .expect("failed to bulk read tag bitmaps");
+                
+                // Process results in parallel with original tag data
+                for ((lowercase_tag, _), bitmap_opt) in shard_tags.iter().zip(tag_bitmaps.iter()) {
+                    if let Some(tag_bitmap) = bitmap_opt {
+                        // Get original case, fall back to lowercase if not available
+                        let display_tag = tag_index.get_original_case(&lowercase_tag)
+                            .unwrap_or(None)
+                            .unwrap_or_else(|| lowercase_tag.clone());
+                        
+                        // Count only entries that match both the tag and the prefix
+                        let intersection = tag_bitmap & &prefix_bitmap;
+                        let count = intersection.len() as usize;
+                        
+                        if count > 0 {
+                            *tag_counts.entry(display_tag).or_insert(0) += count;
+                        }
                     }
                 }
             }

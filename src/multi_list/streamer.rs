@@ -2,7 +2,7 @@ use crate::{Entry, Shard, Streamer};
 /// Maximum expected key length for reserve hints
 const MAX_KEY_LEN: usize = 256;
 
-use super::frame::FrameMulti;
+use super::frame::{FrameMulti, FrameState};
 use super::frame_ops::{ShardInfo, build_frame_states, build_frame_transitions_and_bounds, 
                         create_frame_with_transitions, count_children_for_transition_refs};
 
@@ -165,15 +165,14 @@ where
         
         // Apply lazy filtering if provided
         if let Some(flt) = filter {
+            // Build a mapping from old shard index to new shard index (or None if filtered out)
+            let mut shard_index_map: Vec<Option<usize>> = vec![None; shard_infos.len()];
             let mut filtered_shard_infos = Vec::new();
+            let mut new_shard_idx = 0;
             
-            for info in &shard_infos {
+            for (old_idx, info) in shard_infos.iter().enumerate() {
                 // Only compute bitmap for shards that had states after prefix walk
-                let has_state = initial_frame.states.iter().any(|state| {
-                    shard_infos.iter().position(|si| std::ptr::eq(si.shard, info.shard))
-                        .map(|idx| state.shard_idx == idx)
-                        .unwrap_or(false)
-                });
+                let has_state = initial_frame.states.iter().any(|state| state.shard_idx == old_idx);
                 
                 if has_state {
                     match flt.compute_bitmap(info.shard)? {
@@ -183,6 +182,8 @@ where
                                 shard: info.shard,
                                 bitmap: Some(bm),
                             });
+                            shard_index_map[old_idx] = Some(new_shard_idx);
+                            new_shard_idx += 1;
                         }
                         _ => {
                             // Skip this shard (no matches or empty bitmap)
@@ -204,11 +205,23 @@ where
                 });
             }
             
-            // Update shard_infos and rebuild frame states
+            // Filter and remap frame states instead of rebuilding
+            let mut filtered_states = Vec::new();
+            for state in initial_frame.states {
+                if let Some(new_idx) = shard_index_map[state.shard_idx] {
+                    filtered_states.push(FrameState {
+                        shard_idx: new_idx,
+                        node: state.node,
+                        output: state.output,
+                        lb: state.lb,
+                        ub: state.ub,
+                    });
+                }
+            }
+            
+            // Update shard_infos and frame states
             shard_infos = filtered_shard_infos;
-            initial_frame = FrameMulti::with_capacity(shard_infos.len());
-            initial_frame.prefix_len = start_prefix.len();
-            initial_frame.states = build_frame_states(&shard_infos, &start_prefix);
+            initial_frame.states = filtered_states;
         }
 
         // Build streamer

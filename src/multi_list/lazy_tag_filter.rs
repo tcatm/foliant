@@ -20,17 +20,22 @@ pub struct TagFilterConfig {
 /// Unlike the eager TagFilterBitmap, this filter doesn't compute any bitmaps
 /// until explicitly asked for a specific shard's bitmap.
 pub struct LazyTagFilter {
-    include_tags: Vec<String>,
-    exclude_tags: Vec<String>,
+    // Pre-computed lowercase versions to avoid repeated allocations
+    include_tags_lower: Vec<String>,
+    exclude_tags_lower: Vec<String>,
     mode: TagMode,
 }
 
 impl LazyTagFilter {
     /// Create a new lazy tag filter with the given configuration.
     pub fn new(include_tags: Vec<String>, exclude_tags: Vec<String>, mode: TagMode) -> Self {
+        // Pre-compute lowercase versions once
+        let include_tags_lower = include_tags.iter().map(|t| t.to_lowercase()).collect();
+        let exclude_tags_lower = exclude_tags.iter().map(|t| t.to_lowercase()).collect();
+        
         Self {
-            include_tags,
-            exclude_tags,
+            include_tags_lower,
+            exclude_tags_lower,
             mode,
         }
     }
@@ -52,23 +57,15 @@ where
 {
     fn compute_bitmap(&self, shard: &Shard<V, C>) -> Result<Option<RoaringBitmap>, Box<dyn Error>> {
         // Early return if no tag index exists and we have include filters
-        if !self.include_tags.is_empty() && shard.tags.is_none() {
+        if !self.include_tags_lower.is_empty() && shard.tags.is_none() {
             return Ok(None);
         }
         
-        // Pre-compute lowercase versions
-        let include_tags_lower: Vec<String> = self.include_tags.iter()
-            .map(|t| t.to_lowercase())
-            .collect();
-        let exclude_tags_lower: Vec<String> = self.exclude_tags.iter()
-            .map(|t| t.to_lowercase())
-            .collect();
-        
         // Build the include set, or the full range if empty
-        let mut bm = if !include_tags_lower.is_empty() {
+        let mut bm = if !self.include_tags_lower.is_empty() {
             let mut acc: Option<RoaringBitmap> = None;
             if let Some(idx) = &shard.tags {
-                for tag in &include_tags_lower {
+                for tag in &self.include_tags_lower {
                     if let Some(sub) = idx.get(tag)? {
                         // Check if sub bitmap is empty - avoid cloning if so
                         if sub.is_empty() && self.mode == TagMode::And {
@@ -116,7 +113,7 @@ where
 
         // Subtract any exclude sets
         if let Some(idx) = &shard.tags {
-            for tag in &exclude_tags_lower {
+            for tag in &self.exclude_tags_lower {
                 if let Some(sub) = idx.get(tag)? {
                     bm -= &sub;
                     // Early return if bitmap becomes empty after exclusion
@@ -148,24 +145,25 @@ mod tests {
     #[test]
     fn test_lazy_tag_filter_creation() {
         let filter = LazyTagFilter::new(
-            vec!["tag1".to_string()],
-            vec!["tag2".to_string()],
+            vec!["Tag1".to_string()],
+            vec!["Tag2".to_string()],
             TagMode::Or,
         );
-        assert_eq!(filter.include_tags, vec!["tag1"]);
-        assert_eq!(filter.exclude_tags, vec!["tag2"]);
+        assert_eq!(filter.include_tags_lower, vec!["tag1"]);
+        assert_eq!(filter.exclude_tags_lower, vec!["tag2"]);
+        assert_eq!(filter.mode, TagMode::Or);
     }
     
     #[test]
     fn test_from_config() {
         let config = TagFilterConfig {
-            include_tags: vec!["foo".to_string()],
-            exclude_tags: vec!["bar".to_string()],
+            include_tags: vec!["Foo".to_string()],
+            exclude_tags: vec!["Bar".to_string()],
             mode: TagMode::And,
         };
         let filter = LazyTagFilter::from_config(&config);
-        assert_eq!(filter.include_tags, config.include_tags);
-        assert_eq!(filter.exclude_tags, config.exclude_tags);
+        assert_eq!(filter.include_tags_lower, vec!["foo"]);
+        assert_eq!(filter.exclude_tags_lower, vec!["bar"]);
         assert_eq!(filter.mode, config.mode);
     }
 }
