@@ -120,7 +120,7 @@ Sample lines in `sample.jsonl`:
 - `Entry`: enum returned by `Database::list`, either `Entry::Key(String)` for full keys or `Entry::CommonPrefix(String)` for grouped prefixes
 - `PayloadStoreBuilder<V, C = CborPayloadCodec>` and `PayloadStore<V, C = CborPayloadCodec>`: internal types for writing and reading the `.payload` file using the provided `PayloadCodec` (defaults to CBOR)
 
-- `TagIndex`: read-only handle for querying a tag index file; supports streaming all tags with their packed blob pointers via `list_tags`, retrieving a tag's bitmap via `get`, or decoding a packed pointer into a bitmap via `get_bitmap`
+- `TagIndex`: read-only handle for querying a tag index file; supports streaming all tags with their memory offsets via `list_tags`, retrieving a tag's bitmap via `get`, or decoding a memory offset into a bitmap via `get_bitmap`
 - `TagIndexBuilder`: builder for creating a new tag index file; insert lookup IDs with associated tags, then finalize to write the `.tags` file
 - `TantivyIndex`: read-only handle for querying a full-text search index per shard; supports executing raw Tantivy queries against keys.
 - `TantivyIndexBuilder`: builder for creating or updating a full-text search index; insert keys and finalize to write the `.search/` directories.
@@ -165,6 +165,12 @@ foliant produces up to four files per database (the tag index is optional):
     2. A 4-byte little-endian compressed length (`u32`)
     3. The zstd-compressed block data
 
-- `<idx_path>.tags`: (variant C) a monolithic tag index file embedding an FST mapping each tag string to a packed `(offset_in_blob<<32)|length` weight, followed by concatenated Roaring bitmap blobs.
+- `<idx_path>.tags`: a tag index file with simplified v2 format comprising:
+  1. Header: `FTGT` magic + version(2) + FST size
+  2. FST section mapping each lowercase tag to a 64-bit memory offset  
+  3. Data entries at each offset: `(bitmap_len: u32, bitmap: [u8], cbor: [u8])`
+     - The bitmap contains Roaring bitmap data for document IDs with this tag
+     - The CBOR contains the original case version of the tag string
+     - Readers can efficiently skip CBOR data if only bitmap access is needed
 
 The `.idx` file begins with the magic header and structure defined by the `fst` crate. This format enables fast, memory-mapped prefix queries and efficient payload retrieval with minimal allocations.
