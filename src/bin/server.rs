@@ -10,7 +10,7 @@ use foliant::Streamer;
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
-use foliant::multi_list::{MultiShardListStreamer, TagFilterBitmap};
+use foliant::multi_list::{MultiShardListStreamer, LazyTagFilter};
 use foliant::{load_db, Database, Entry, TagMode, TagFilterConfig};
 
 /// Command-line options for the HTTP server.
@@ -156,36 +156,21 @@ async fn list_keys(
         None
     };
     
-    // Build a tag-based bitmap filter from the TagFilterConfig, if any
-    let tag_filter: Option<TagFilterBitmap> = if let Some(cfg) = tag_config.clone() {
-        match TagFilterBitmap::new(
-            &state.db.shards(),
-            &cfg.include_tags,
-            &cfg.exclude_tags,
-            cfg.mode,
-        ) {
-            Ok(bm) => Some(bm),
-            Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse { error: format!("failed to build tag filter: {}", e) }),
-                ));
-            }
-        }
-    } else {
-        None
-    };
-    
     // Initialize streamer - use MultiShardListStreamer with optional bitmap filter
     let stream = if let Some(cur) = params.cursor {
         match general_purpose::STANDARD.decode(cur) {
-            Ok(bytes) => MultiShardListStreamer::resume_with_filter(
-                &state.db.shards(),
-                prefix_bytes.clone(),
-                delim.map(|c| c as u8),
-                bytes,
-                tag_filter.clone(),
-            ),
+            Ok(bytes) => {
+                let tag_filter = tag_config.clone().map(|cfg| -> Box<dyn foliant::multi_list::LazyShardFilter<_, _>> {
+                    Box::new(LazyTagFilter::from_config(&cfg))
+                });
+                MultiShardListStreamer::resume_with_filter(
+                    &state.db.shards(),
+                    prefix_bytes.clone(),
+                    delim.map(|c| c as u8),
+                    bytes,
+                    tag_filter,
+                )
+            },
             Err(e) => {
                 return Err((
                     StatusCode::BAD_REQUEST,
@@ -196,11 +181,14 @@ async fn list_keys(
             }
         }
     } else {
+        let tag_filter = tag_config.clone().map(|cfg| -> Box<dyn foliant::multi_list::LazyShardFilter<_, _>> {
+            Box::new(LazyTagFilter::from_config(&cfg))
+        });
         MultiShardListStreamer::new_with_filter(
             &state.db.shards(),
             prefix_bytes.clone(),
             delim.map(|c| c as u8),
-            tag_filter.clone(),
+            tag_filter,
         )
     };
     

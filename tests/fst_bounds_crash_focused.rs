@@ -1,6 +1,6 @@
 use foliant::payload_store::PAYLOAD_STORE_VERSION_V3;
 use foliant::{Database, DatabaseBuilder, Entry, TagMode};
-use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, TagFilterBitmap, ShardBitmapFilter};
+use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, LazyTagFilter};
 use foliant::Streamer;
 use serde_cbor::Value;
 use std::error::Error;
@@ -87,24 +87,38 @@ fn fst_bounds_crash_before_fix() -> Result<(), Box<dyn Error>> {
     
     // At this point, frame.trans should contain cached transitions with shard indices 0, 1, 2
     
-    // Step 3: Apply tag filtering that removes shard 3 (index 2)
+    // Step 3: Create a new filtered streamer (old bitmap methods don't exist anymore)
     let tag_config = TagFilterConfig {
         include_tags: vec!["keep".to_string()],
         exclude_tags: vec![],
         mode: TagMode::And,
     };
-    let filter = TagFilterBitmap::new(db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
-    let bitmaps = filter.build_shard_bitmaps(db.shards())?;
+    let filter = LazyTagFilter::from_config(&tag_config);
     
-    // This should remap shards: [0, 1, 2] -> [0, 1] but transitions cache might still reference shard 2
-    streamer.apply_shard_bitmaps(db.shards(), bitmaps);
+    // Create new filtered streamer to test the lazy filtering approach
+    let mut filtered_streamer = MultiShardListStreamer::new_with_filter(
+        db.shards(),
+        b"prefix/".to_vec(),
+        None,
+        Some(Box::new(filter)),
+    )?;
     
-    // Step 4: Continue iteration - this should trigger FST bounds error if fix is not applied
-    eprintln!("Continuing iteration after shard bitmap applied...");
-    let mut count = 1; // Already got first entry
+    // Step 4: Iterate through the filtered results - this tests the new lazy filtering
+    eprintln!("Iterating through filtered results...");
+    let mut count = 0;
     
-    while let Some(entry) = streamer.next() {
+    while let Some(entry) = filtered_streamer.next() {
         eprintln!("Got entry {}: {}", count + 1, entry.as_str());
+        count += 1;
+        
+        if count >= 10 {
+            break; // Prevent infinite loop
+        }
+    }
+    
+    // Also continue with the original streamer to test mixed usage
+    while let Some(entry) = streamer.next() {
+        eprintln!("Original streamer entry {}: {}", count + 1, entry.as_str());
         count += 1;
         
         if count >= 10 {
@@ -172,12 +186,12 @@ fn fst_bounds_new_with_filter_test() -> Result<(), Box<dyn Error>> {
         mode: TagMode::And,
     };
     
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let filter = LazyTagFilter::from_config(&tag_config);
     let mut stream = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         b"test/".to_vec(),
         None,
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     
     // Iterate through all results

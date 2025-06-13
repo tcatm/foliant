@@ -8,8 +8,7 @@ use super::frame_ops::{ShardInfo, build_frame_states, build_frame_transitions_an
 
 use crate::payload_store::PayloadCodec;
 use serde::de::DeserializeOwned;
-use super::bitmap_filter::ShardBitmapFilter;
-use roaring::RoaringBitmap;
+use super::lazy_filter::LazyShardFilter;
 
 impl<'a, V, C> MultiShardListStreamer<'a, V, C>
 where
@@ -65,7 +64,7 @@ where
         delim: Option<u8>,
         cursor: Vec<u8>,
     ) -> Self {
-        Self::resume_with_bitmaps(shards, prefix, delim, cursor, None).unwrap()
+        Self::resume_with_lazy_filter(shards, prefix, delim, cursor, None).unwrap()
     }
 
     /// Internal helper: replay raw‐FST descent on each byte of `cursor`, advancing the DFS
@@ -126,101 +125,27 @@ where
     V: DeserializeOwned,
     C: PayloadCodec,
 {
-    /// Replace shards and FSTs by only those with a matching bitmap, storing the bitmaps.
-    /// Also remaps any existing frame shard indices to the new indices.
-    pub fn apply_shard_bitmaps(
-        &mut self,
-        shards: &'a [Shard<V, C>],
-        bitmaps: Vec<Option<RoaringBitmap>>,
-    ) {
-        // Build new shard_infos from provided bitmaps filter
-        let mut new_infos = Vec::new();
-        for (i, bm_opt) in bitmaps.into_iter().enumerate() {
-            if let Some(bm) = bm_opt {
-                let shard_ref = &shards[i];
-                new_infos.push(ShardInfo { fst: shard_ref.fst.as_fst(), shard: shard_ref, bitmap: Some(bm) });
-            }
-        }
-        self.shard_infos = new_infos;
-        
-        // Rebuild frame states from scratch with the new FST array
-        // This ensures all Node references point to the correct FSTs
-        let current_prefix = self.prefix.clone();
-        
-        let mut initial_frame = FrameMulti::with_capacity(self.shard_infos.len());
-        initial_frame.prefix_len = current_prefix.len();
-        initial_frame.states = build_frame_states(&self.shard_infos, &current_prefix);
-        
-        // Replace the stack with the rebuilt initial frame
-        self.stack.clear();
-        self.stack.push(initial_frame);
-        self.frame_pool.clear();
-    }
-
-    /// Create a new multi-shard listing streamer without filtering.
-    pub fn new(
+    /// Create a new multi-shard listing streamer with lazy filtering.
+    /// 
+    /// This method performs the prefix walk first, then applies the lazy filter
+    /// only to shards that match the prefix, significantly reducing bitmap computations.
+    pub fn new_with_lazy_filter(
         shards: &'a [Shard<V, C>],
         prefix: Vec<u8>,
         delim: Option<u8>,
-    ) -> Self {
-        Self::new_with_bitmaps(shards, prefix, delim, None).unwrap()
-    }
-
-    /// Create a new multi-shard listing streamer with an optional generic bitmap filter.
-    pub fn new_with_filter<BF>(
-        shards: &'a [Shard<V, C>],
-        prefix: Vec<u8>,
-        delim: Option<u8>,
-        filter: Option<BF>,
-    ) -> Result<Self, Box<dyn std::error::Error>>
-    where
-        BF: ShardBitmapFilter<V, C> + 'a,
-    {
-        if let Some(flt) = filter {
-            // Apply filtering before the prefix walk to avoid double walking
-            let bitmaps = flt.build_shard_bitmaps(shards)?;
-            Self::new_with_bitmaps(shards, prefix, delim, Some(bitmaps))
-        } else {
-            Self::new_with_bitmaps(shards, prefix, delim, None)
-        }
-    }
-
-    /// Create a new multi-shard listing streamer with optional pre-computed shard bitmaps.
-    /// This is the unified implementation that handles both filtered and unfiltered cases.
-    fn new_with_bitmaps(
-        shards: &'a [Shard<V, C>],
-        prefix: Vec<u8>,
-        delim: Option<u8>,
-        bitmaps: Option<Vec<Option<RoaringBitmap>>>,
+        filter: Option<Box<dyn LazyShardFilter<V, C>>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let (selected_shards, selected_bitmaps): (Vec<&Shard<V, C>>, Vec<Option<RoaringBitmap>>) = 
-            if let Some(ref bm_vec) = bitmaps {
-                // Filter shards based on bitmaps
-                let mut filtered_shards = Vec::new();
-                let mut filtered_bitmaps = Vec::new();
-                for (i, bm_opt) in bm_vec.iter().enumerate() {
-                    if let Some(bm) = bm_opt {
-                        filtered_shards.push(&shards[i]);
-                        filtered_bitmaps.push(Some(bm.clone()));
-                    }
-                }
-                (filtered_shards, filtered_bitmaps)
-            } else {
-                // Use all shards with no filtering
-                let all_shards: Vec<&Shard<V, C>> = shards.iter().collect();
-                let no_bitmaps = vec![None; shards.len()];
-                (all_shards, no_bitmaps)
-            };
-
-        // Single prefix walk on selected shards and collect per-shard info
         let start_prefix = prefix.clone();
-        let mut initial_frame = FrameMulti::with_capacity(selected_shards.len());
+        let mut initial_frame = FrameMulti::with_capacity(shards.len());
         initial_frame.prefix_len = start_prefix.len();
-        let mut shard_infos = Vec::with_capacity(selected_shards.len());
-        for (shard, bitmap) in selected_shards.into_iter().zip(selected_bitmaps.into_iter()) {
+        
+        // Build initial shard_infos without any filtering
+        let mut shard_infos = Vec::with_capacity(shards.len());
+        for shard in shards {
             let fst = shard.fst.as_fst();
-            shard_infos.push(ShardInfo { fst, shard, bitmap });
+            shard_infos.push(ShardInfo { fst, shard, bitmap: None });
         }
+        
         // Build initial frame states by walking the prefix across all shards
         initial_frame.states = build_frame_states(&shard_infos, &start_prefix);
 
@@ -237,8 +162,56 @@ where
                 frame_pool: Vec::new(),
             });
         }
+        
+        // Apply lazy filtering if provided
+        if let Some(flt) = filter {
+            let mut filtered_shard_infos = Vec::new();
+            
+            for info in &shard_infos {
+                // Only compute bitmap for shards that had states after prefix walk
+                let has_state = initial_frame.states.iter().any(|state| {
+                    shard_infos.iter().position(|si| std::ptr::eq(si.shard, info.shard))
+                        .map(|idx| state.shard_idx == idx)
+                        .unwrap_or(false)
+                });
+                
+                if has_state {
+                    match flt.compute_bitmap(info.shard)? {
+                        Some(bm) if !bm.is_empty() => {
+                            filtered_shard_infos.push(ShardInfo {
+                                fst: info.fst,
+                                shard: info.shard,
+                                bitmap: Some(bm),
+                            });
+                        }
+                        _ => {
+                            // Skip this shard (no matches or empty bitmap)
+                        }
+                    }
+                }
+            }
+            
+            // If no shards pass the filter, return empty streamer
+            if filtered_shard_infos.is_empty() {
+                return Ok(Self {
+                    shard_infos: Vec::new(),
+                    delim,
+                    prefix: start_prefix.clone(),
+                    start_prefix,
+                    last_bytes: Vec::new(),
+                    stack: Vec::new(),
+                    frame_pool: Vec::new(),
+                });
+            }
+            
+            // Update shard_infos and rebuild frame states
+            shard_infos = filtered_shard_infos;
+            initial_frame = FrameMulti::with_capacity(shard_infos.len());
+            initial_frame.prefix_len = start_prefix.len();
+            initial_frame.states = build_frame_states(&shard_infos, &start_prefix);
+        }
 
-        // Build streamer with unified shard_infos
+        // Build streamer
         let mut streamer = Self {
             shard_infos,
             delim,
@@ -248,45 +221,59 @@ where
             stack: vec![initial_frame],
             frame_pool: Vec::new(),
         };
+        
         // Pre-reserve buffers
         streamer.prefix.reserve(MAX_KEY_LEN);
         streamer.stack.reserve(MAX_KEY_LEN);
         streamer.frame_pool.reserve(MAX_KEY_LEN);
+        
         Ok(streamer)
     }
-
-    /// Resume from cursor with optional pre-computed shard bitmaps.
-    /// This is the unified implementation that handles both filtered and unfiltered resume cases.
-    fn resume_with_bitmaps(
+    
+    /// Resume from cursor with lazy filtering.
+    pub fn resume_with_lazy_filter(
         shards: &'a [Shard<V, C>],
         prefix: Vec<u8>,
         delim: Option<u8>,
         cursor: Vec<u8>,
-        bitmaps: Option<Vec<Option<RoaringBitmap>>>,
+        filter: Option<Box<dyn LazyShardFilter<V, C>>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut streamer = Self::new_with_bitmaps(shards, prefix, delim, bitmaps)?;
+        let mut streamer = Self::new_with_lazy_filter(shards, prefix, delim, filter)?;
         streamer.replay_seek_internal(&cursor);
         streamer.last_bytes = cursor;
         Ok(streamer)
     }
 
-    /// Resume from cursor with an optional generic bitmap filter.
-    pub fn resume_with_filter<BF>(
+
+    /// Create a new multi-shard listing streamer without filtering.
+    pub fn new(
+        shards: &'a [Shard<V, C>],
+        prefix: Vec<u8>,
+        delim: Option<u8>,
+    ) -> Self {
+        Self::new_with_lazy_filter(shards, prefix, delim, None).unwrap()
+    }
+
+    /// Create a new multi-shard listing streamer with an optional lazy filter.
+    pub fn new_with_filter(
+        shards: &'a [Shard<V, C>],
+        prefix: Vec<u8>,
+        delim: Option<u8>,
+        filter: Option<Box<dyn LazyShardFilter<V, C>>>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_lazy_filter(shards, prefix, delim, filter)
+    }
+
+
+    /// Resume from cursor with an optional lazy filter.
+    pub fn resume_with_filter(
         shards: &'a [Shard<V, C>],
         prefix: Vec<u8>,
         delim: Option<u8>,
         cursor: Vec<u8>,
-        filter: Option<BF>,
-    ) -> Result<Self, Box<dyn std::error::Error>>
-    where
-        BF: ShardBitmapFilter<V, C> + 'a,
-    {
-        if let Some(flt) = filter {
-            let bitmaps = flt.build_shard_bitmaps(shards)?;
-            Self::resume_with_bitmaps(shards, prefix, delim, cursor, Some(bitmaps))
-        } else {
-            Self::resume_with_bitmaps(shards, prefix, delim, cursor, None)
-        }
+        filter: Option<Box<dyn LazyShardFilter<V, C>>>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::resume_with_lazy_filter(shards, prefix, delim, cursor, filter)
     }
 
 }

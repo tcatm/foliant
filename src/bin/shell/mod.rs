@@ -18,7 +18,7 @@ use std::rc::Rc;
 
 use ctrlc;
 use foliant::{Database, Entry, Streamer, TagMode};
-use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, TagFilterBitmap};
+use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, LazyTagFilter};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     mpsc::{channel, Receiver},
@@ -393,20 +393,9 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                 None
             };
             
-            // Build a tag-based filter bitmap if a TagFilterConfig was specified
-            let tag_filter: Option<TagFilterBitmap> = if let Some(cfg) = tag_config.clone() {
-                match TagFilterBitmap::new(
-                    &state_ref.db.shards(),
-                    &cfg.include_tags,
-                    &cfg.exclude_tags,
-                    cfg.mode,
-                ) {
-                    Ok(bm) => Some(bm),
-                    Err(e) => {
-                        println!("Error building tag filter: {}", e);
-                        return Ok(false);
-                    }
-                }
+            // Build a lazy tag filter if a TagFilterConfig was specified
+            let tag_filter: Option<Box<dyn foliant::multi_list::LazyShardFilter<_, _>>> = if let Some(cfg) = tag_config.clone() {
+                Some(Box::new(LazyTagFilter::from_config(&cfg)))
             } else {
                 None
             };
@@ -417,7 +406,7 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                     &state_ref.db.shards(),
                     list_prefix.as_bytes().to_vec(),
                     list_delim.map(|c| c as u8),
-                    tag_filter.clone(),
+                    tag_filter,
                 ) {
                     Ok(s) => Box::new(s),
                     Err(e) => {

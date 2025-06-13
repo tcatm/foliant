@@ -1,6 +1,6 @@
 use foliant::payload_store::PAYLOAD_STORE_VERSION_V3;
 use foliant::{Database, DatabaseBuilder, TagMode};
-use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, TagFilterBitmap, ShardBitmapFilter};
+use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, LazyTagFilter};
 use foliant::Streamer;
 use serde_cbor::Value;
 use std::error::Error;
@@ -103,7 +103,7 @@ fn fst_bounds_crash_realistic_new_with_filter() -> Result<(), Box<dyn Error>> {
         mode: TagMode::And,
     };
     
-    let filter = TagFilterBitmap::new(db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let filter = LazyTagFilter::from_config(&tag_config);
     
     eprintln!("Creating filtered streamer with new_with_filter (like shell command)...");
     
@@ -114,7 +114,7 @@ fn fst_bounds_crash_realistic_new_with_filter() -> Result<(), Box<dyn Error>> {
         db.shards(),
         "s3://rafagalante/".as_bytes().to_vec(),
         None, // No delimiter like shell default
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     
     eprintln!("Starting iteration (this should crash with FST bounds error)...");
@@ -185,21 +185,30 @@ fn fst_bounds_crash_walk_prefix_then_filter() -> Result<(), Box<dyn Error>> {
         exclude_tags: vec![],
         mode: TagMode::And,
     };
-    let filter = TagFilterBitmap::new(db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
-    let bitmaps = filter.build_shard_bitmaps(db.shards())?;
+    // Create new filtered streamer instead of using old bitmap methods
+    let filter = LazyTagFilter::from_config(&tag_config);
+    let mut filtered_streamer = MultiShardListStreamer::new_with_filter(
+        db.shards(),
+        b"target/".to_vec(),
+        None,
+        Some(Box::new(filter)),
+    )?;
     
-    let remaining_shards = bitmaps.iter().filter(|bm| bm.is_some()).count();
-    eprintln!("Filtering keeps {} out of {} shards", remaining_shards, NUM_SHARDS);
-    
-    streamer.apply_shard_bitmaps(db.shards(), bitmaps);
-    
-    eprintln!("Step 3: Start iteration (frame states have Node refs from old FSTs, shard indices for new FST array)");
+    eprintln!("Step 3: Testing new lazy filtering approach");
     
     let mut results = Vec::new();
-    while let Some(entry) = streamer.next() {
-        eprintln!("Got: {}", entry.as_str());
+    while let Some(entry) = filtered_streamer.next() {
+        eprintln!("Filtered result: {}", entry.as_str());
         results.push(entry);
         if results.len() > 10 {
+            break;
+        }
+    }
+    
+    // Also test the original streamer
+    while let Some(entry) = streamer.next() {
+        eprintln!("Original result: {}", entry.as_str());
+        if results.len() > 15 {
             break;
         }
     }

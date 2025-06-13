@@ -1,6 +1,6 @@
 use foliant::payload_store::PAYLOAD_STORE_VERSION_V3;
 use foliant::{Database, DatabaseBuilder, Entry, TagMode};
-use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, TagFilterBitmap};
+use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, LazyTagFilter};
 use foliant::Streamer;
 use serde_cbor::Value;
 use std::error::Error;
@@ -103,13 +103,13 @@ fn multi_shard_tag_filter_basic() -> Result<(), Box<dyn Error>> {
     };
     
 
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let filter = LazyTagFilter::from_config(&tag_config);
     
     let stream = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         Vec::new(),
         None,
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     
     let mut results: Vec<Entry<Value>> = stream.collect();
@@ -127,12 +127,12 @@ fn multi_shard_tag_filter_basic() -> Result<(), Box<dyn Error>> {
         mode: TagMode::And,
     };
     
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let filter = LazyTagFilter::from_config(&tag_config);
     let stream = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         Vec::new(),
         None,
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     
     let results: Vec<Entry<Value>> = stream.collect();
@@ -183,12 +183,12 @@ fn multi_shard_tag_filter_synthetic_generic_document_filter() -> Result<(), Box<
         exclude_tags: vec![],
         mode: TagMode::Or,
     };
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let filter = LazyTagFilter::from_config(&tag_config);
     let stream = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         Vec::new(),
         None,
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     let results: Vec<Entry<Value>> = stream.collect();
     let mut keys: Vec<String> = results.iter().map(|e| e.as_str().to_string()).collect();
@@ -274,12 +274,12 @@ fn multi_shard_tag_filter_with_delimiter() -> Result<(), Box<dyn Error>> {
         exclude_tags: vec![],
         mode: TagMode::And,
     };
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let filter = LazyTagFilter::from_config(&tag_config);
     let stream = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         Vec::new(),
         Some(b'/'),
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     
     let mut results: Vec<Entry<Value>> = stream.collect();
@@ -359,12 +359,12 @@ fn multi_shard_tag_filter_complex_hierarchy() -> Result<(), Box<dyn Error>> {
         exclude_tags: vec![],
         mode: TagMode::And,
     };
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let filter = LazyTagFilter::from_config(&tag_config);
     let stream = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         Vec::new(),
         None,
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     let entries: Vec<_> = stream.collect();
     let mut keys: Vec<String> = entries.iter().map(|e| e.as_str().to_string()).collect();
@@ -385,12 +385,12 @@ fn multi_shard_tag_filter_complex_hierarchy() -> Result<(), Box<dyn Error>> {
     );
 
     // Scenario 2: first-level grouping only (show_empty_prefixes=false)
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let filter = LazyTagFilter::from_config(&tag_config);
     let stream = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         Vec::new(),
         Some(b'/'),
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     let entries: Vec<_> = stream.collect();
     let mut prefixes: Vec<(String, Option<usize>)> = entries
@@ -408,12 +408,12 @@ fn multi_shard_tag_filter_complex_hierarchy() -> Result<(), Box<dyn Error>> {
 
 
     // Scenario 4: prefix-restricted key-only query under "root/beta/"
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let filter = LazyTagFilter::from_config(&tag_config);
     let stream = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         "root/beta/".as_bytes().to_vec(),
         None,
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     let entries: Vec<_> = stream.collect();
     let mut beta_keys: Vec<String> = entries.iter().map(|e| e.as_str().to_string()).collect();
@@ -469,12 +469,12 @@ fn multi_shard_tag_filter_or_mode() -> Result<(), Box<dyn Error>> {
         exclude_tags: vec![],
         mode: TagMode::Or,
     };
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let filter = LazyTagFilter::from_config(&tag_config);
     let stream = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         Vec::new(),
         None,
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     
     let mut results: Vec<Entry<Value>> = stream.collect();
@@ -523,12 +523,12 @@ fn multi_shard_tag_filter_with_prefix() -> Result<(), Box<dyn Error>> {
         mode: TagMode::And,
     };
     
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let filter = LazyTagFilter::from_config(&tag_config);
     let stream = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         "docs".as_bytes().to_vec(),
         None,
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     
     let results: Vec<Entry<Value>> = stream.collect();
@@ -577,12 +577,12 @@ fn multi_shard_tag_filter_cursor_resume() -> Result<(), Box<dyn Error>> {
     };
 
     // Get first 2 items
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let filter1 = LazyTagFilter::from_config(&tag_config);
     let mut stream1 = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         Vec::new(),
         None,
-        Some(filter.clone()),
+        Some(Box::new(filter1)),
     )?;
     
     let item1 = stream1.next().unwrap();
@@ -598,7 +598,7 @@ fn multi_shard_tag_filter_cursor_resume() -> Result<(), Box<dyn Error>> {
         Vec::new(),
         None,
         cursor,
-        Some(filter),
+        Some(Box::new(LazyTagFilter::from_config(&tag_config))),
     )?;
     
     let item3 = stream2.next().unwrap();
@@ -651,12 +651,12 @@ fn multi_shard_tag_filter_complex_exclusion() -> Result<(), Box<dyn Error>> {
         exclude_tags: vec!["deprecated".to_string()],
         mode: TagMode::And,
     };
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let filter = LazyTagFilter::from_config(&tag_config);
     let stream = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         Vec::new(),
         None,
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     
     let mut results: Vec<Entry<Value>> = stream.collect();

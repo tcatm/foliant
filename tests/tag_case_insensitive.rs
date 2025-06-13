@@ -1,6 +1,6 @@
 use foliant::payload_store::PAYLOAD_STORE_VERSION_V3;
 use foliant::{Database, DatabaseBuilder, TagIndexBuilder, Entry, TagMode};
-use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, TagFilterBitmap};
+use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, LazyTagFilter};
 use foliant::Streamer;
 use serde_json::{json, Value};
 use tempfile::tempdir;
@@ -35,12 +35,12 @@ fn test_case_insensitive_tag_operations() -> Result<(), Box<dyn std::error::Erro
                 exclude_tags: exclude_tags.iter().map(|s| s.to_string()).collect(),
                 mode,
             };
-            let filter = TagFilterBitmap::new(&db.shards(), &config.include_tags, &config.exclude_tags, config.mode)?;
+            let filter = LazyTagFilter::from_config(&config);
             let stream = MultiShardListStreamer::new_with_filter(
                 &db.shards(),
                 Vec::new(),
                 None,
-                Some(filter),
+                Some(Box::new(filter)),
             )?;
             Ok(stream.collect())
         };
@@ -163,12 +163,12 @@ fn test_tag_filtering_with_mixed_case() -> Result<(), Box<dyn std::error::Error>
                 exclude_tags: exclude_tags.iter().map(|s| s.to_string()).collect(),
                 mode,
             };
-            let filter = TagFilterBitmap::new(&db.shards(), &config.include_tags, &config.exclude_tags, config.mode)?;
+            let filter = LazyTagFilter::from_config(&config);
             let stream = MultiShardListStreamer::new_with_filter(
                 &db.shards(),
                 Vec::new(),
                 None,
-                Some(filter),
+                Some(Box::new(filter)),
             )?;
             Ok(stream.collect())
         };
@@ -234,12 +234,12 @@ fn test_duplicate_tags_different_cases() -> Result<(), Box<dyn std::error::Error
             exclude_tags: vec![],
             mode: TagMode::And,
         };
-        let filter = TagFilterBitmap::new(&db.shards(), &config.include_tags, &config.exclude_tags, config.mode)?;
+        let filter = LazyTagFilter::from_config(&config);
         let stream = MultiShardListStreamer::new_with_filter(
             &db.shards(),
             Vec::new(),
             None,
-            Some(filter),
+            Some(Box::new(filter)),
         )?;
         let results: Vec<Entry<Value>> = stream.collect();
         assert_eq!(results.len(), 1, "Should find the entry with any case variation");

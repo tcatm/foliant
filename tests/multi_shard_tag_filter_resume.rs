@@ -1,6 +1,6 @@
 use foliant::payload_store::PAYLOAD_STORE_VERSION_V3;
 use foliant::{Database, DatabaseBuilder, Entry, TagMode};
-use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, TagFilterBitmap};
+use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, LazyTagFilter};
 use foliant::Streamer;
 use serde_cbor::Value;
 use std::error::Error;
@@ -65,12 +65,11 @@ fn multi_shard_tag_filter_resume_with_filtering() -> Result<(), Box<dyn Error>> 
     };
 
     // Get first 2 filtered items
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
     let mut stream1 = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         Vec::new(),
         None,
-        Some(filter.clone()),
+        Some(Box::new(LazyTagFilter::from_config(&tag_config))),
     )?;
     
     let item1 = stream1.next().unwrap();
@@ -81,13 +80,13 @@ fn multi_shard_tag_filter_resume_with_filtering() -> Result<(), Box<dyn Error>> 
     assert_eq!(item1.as_str(), "alpha/item1");
     assert_eq!(item2.as_str(), "beta/item3");
 
-    // Resume from cursor with the same filter
+    // Resume from cursor with the same filter (create a new instance)
     let mut stream2 = MultiShardListStreamer::resume_with_filter(
         &db.shards(),
         Vec::new(),
         None,
         cursor,
-        Some(filter),
+        Some(Box::new(LazyTagFilter::from_config(&tag_config))),
     )?;
     
     let item3 = stream2.next().unwrap();
@@ -158,12 +157,11 @@ fn multi_shard_tag_filter_resume_with_prefix() -> Result<(), Box<dyn Error>> {
     };
 
     // Get first item from docs/ with important tag
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
     let mut stream1 = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         "docs/".as_bytes().to_vec(),
         None,
-        Some(filter.clone()),
+        Some(Box::new(LazyTagFilter::from_config(&tag_config))),
     )?;
     
     let item1 = stream1.next().unwrap();
@@ -172,13 +170,13 @@ fn multi_shard_tag_filter_resume_with_prefix() -> Result<(), Box<dyn Error>> {
     // Should get docs/alpha/file1 (important)
     assert_eq!(item1.as_str(), "docs/alpha/file1");
 
-    // Resume from cursor with same filter and prefix
+    // Resume from cursor with same filter and prefix (create new instance)
     let mut stream2 = MultiShardListStreamer::resume_with_filter(
         &db.shards(),
         "docs/".as_bytes().to_vec(),
         None,
         cursor,
-        Some(filter),
+        Some(Box::new(LazyTagFilter::from_config(&tag_config))),
     )?;
     
     let item2 = stream2.next().unwrap();
@@ -247,12 +245,11 @@ fn multi_shard_tag_filter_resume_with_delimiter() -> Result<(), Box<dyn Error>> 
     };
 
     // Get first prefix group with important items
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
     let mut stream1 = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         Vec::new(),
         Some(b'/'),
-        Some(filter.clone()),
+        Some(Box::new(LazyTagFilter::from_config(&tag_config))),
     )?;
     
     let entry1 = stream1.next().unwrap();
@@ -267,13 +264,13 @@ fn multi_shard_tag_filter_resume_with_delimiter() -> Result<(), Box<dyn Error>> 
         _ => panic!("Expected CommonPrefix for alpha/"),
     }
 
-    // Resume from cursor with same filter
+    // Resume from cursor with same filter (create new instance)
     let mut stream2 = MultiShardListStreamer::resume_with_filter(
         &db.shards(),
         Vec::new(),
         Some(b'/'),
         cursor,
-        Some(filter),
+        Some(Box::new(LazyTagFilter::from_config(&tag_config))),
     )?;
     
     let entry2 = stream2.next().unwrap();
@@ -352,12 +349,11 @@ fn multi_shard_tag_filter_resume_with_exclusion() -> Result<(), Box<dyn Error>> 
     };
 
     // Get first 2 non-deprecated published items
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
     let mut stream1 = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         Vec::new(),
         None,
-        Some(filter.clone()),
+        Some(Box::new(LazyTagFilter::from_config(&tag_config))),
     )?;
     
     let item1 = stream1.next().unwrap();
@@ -368,13 +364,13 @@ fn multi_shard_tag_filter_resume_with_exclusion() -> Result<(), Box<dyn Error>> 
     assert_eq!(item1.as_str(), "doc1");
     assert_eq!(item2.as_str(), "doc3");
 
-    // Resume from cursor with same exclusion filter
+    // Resume from cursor with same exclusion filter (create new instance)
     let mut stream2 = MultiShardListStreamer::resume_with_filter(
         &db.shards(),
         Vec::new(),
         None,
         cursor,
-        Some(filter),
+        Some(Box::new(LazyTagFilter::from_config(&tag_config))),
     )?;
     
     let item3 = stream2.next().unwrap();

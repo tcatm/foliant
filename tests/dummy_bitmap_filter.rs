@@ -1,6 +1,6 @@
 use foliant::payload_store::PAYLOAD_STORE_VERSION_V3;
 use foliant::{Database, DatabaseBuilder, Entry, Streamer, Shard};
-use foliant::multi_list::{MultiShardListStreamer, ShardBitmapFilter};
+use foliant::multi_list::{MultiShardListStreamer, LazyShardFilter};
 use roaring::RoaringBitmap;
 use serde_cbor::Value;
 use std::error::Error;
@@ -34,21 +34,17 @@ fn dummy_bitmap_filter_prunes_unmatched_keys() -> Result<(), Box<dyn Error>> {
 
     // Build a dummy filter that only allows the 'bb' ID
     struct DummyFilter(RoaringBitmap);
-    impl<V, C> ShardBitmapFilter<V, C> for DummyFilter
+    impl<V, C> LazyShardFilter<V, C> for DummyFilter
     where
         V: serde::de::DeserializeOwned,
         C: foliant::payload_store::PayloadCodec,
     {
-        fn build_shard_bitmaps(
-            &self,
-            shards: &[Shard<V, C>],
-        ) -> Result<Vec<Option<RoaringBitmap>>, Box<dyn Error>> {
-            // One bitmap per shard: only include bb_id
-            let mut v = Vec::with_capacity(shards.len());
-            for _ in shards {
-                v.push(Some(self.0.clone()));
-            }
-            Ok(v)
+        fn compute_bitmap(&self, _shard: &Shard<V, C>) -> Result<Option<RoaringBitmap>, Box<dyn Error>> {
+            Ok(Some(self.0.clone()))
+        }
+        
+        fn debug_name(&self) -> &str {
+            "DummyFilter"
         }
     }
 
@@ -61,7 +57,7 @@ fn dummy_bitmap_filter_prunes_unmatched_keys() -> Result<(), Box<dyn Error>> {
         &db.shards(),
         Vec::new(),
         None,
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     let results: Vec<Entry<Value>> = stream.collect();
     assert_eq!(results.len(), 1);
@@ -119,16 +115,17 @@ fn complex_bitmap_filter_irregular_depths() -> Result<(), Box<dyn Error>> {
 
     // Dummy filter that returns the same bitmap for each shard
     struct DummyFilter(RoaringBitmap);
-    impl<V, C> ShardBitmapFilter<V, C> for DummyFilter
+    impl<V, C> LazyShardFilter<V, C> for DummyFilter
     where
         V: serde::de::DeserializeOwned,
         C: foliant::payload_store::PayloadCodec,
     {
-        fn build_shard_bitmaps(
-            &self,
-            shards: &[Shard<V, C>],
-        ) -> Result<Vec<Option<RoaringBitmap>>, Box<dyn Error>> {
-            Ok(vec![Some(self.0.clone()); shards.len()])
+        fn compute_bitmap(&self, _shard: &Shard<V, C>) -> Result<Option<RoaringBitmap>, Box<dyn Error>> {
+            Ok(Some(self.0.clone()))
+        }
+        
+        fn debug_name(&self) -> &str {
+            "DummyFilter"
         }
     }
 
@@ -139,7 +136,7 @@ fn complex_bitmap_filter_irregular_depths() -> Result<(), Box<dyn Error>> {
         &db.shards(),
         Vec::new(),
         None,
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     let results: Vec<Entry<Value>> = stream.collect();
 
@@ -204,16 +201,17 @@ fn complex_bitmap_filter_with_delimiter() -> Result<(), Box<dyn Error>> {
 
     // Dummy filter that returns the same bitmap for each shard
     struct DummyFilter(RoaringBitmap);
-    impl<V, C> ShardBitmapFilter<V, C> for DummyFilter
+    impl<V, C> LazyShardFilter<V, C> for DummyFilter
     where
         V: serde::de::DeserializeOwned,
         C: foliant::payload_store::PayloadCodec,
     {
-        fn build_shard_bitmaps(
-            &self,
-            shards: &[Shard<V, C>],
-        ) -> Result<Vec<Option<RoaringBitmap>>, Box<dyn Error>> {
-            Ok(vec![Some(self.0.clone()); shards.len()])
+        fn compute_bitmap(&self, _shard: &Shard<V, C>) -> Result<Option<RoaringBitmap>, Box<dyn Error>> {
+            Ok(Some(self.0.clone()))
+        }
+        
+        fn debug_name(&self) -> &str {
+            "DummyFilter"
         }
     }
 
@@ -224,7 +222,7 @@ fn complex_bitmap_filter_with_delimiter() -> Result<(), Box<dyn Error>> {
         &db.shards(),
         Vec::new(),
         Some(b'/'),
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     let mut results: Vec<Entry<Value>> = stream.collect();
     // Sort by string for deterministic order

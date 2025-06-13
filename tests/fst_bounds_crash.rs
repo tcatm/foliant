@@ -1,6 +1,6 @@
 use foliant::payload_store::PAYLOAD_STORE_VERSION_V3;
 use foliant::{Database, DatabaseBuilder, Entry, TagMode};
-use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, TagFilterBitmap, ShardBitmapFilter};
+use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, LazyTagFilter};
 use foliant::Streamer;
 use serde_cbor::Value;
 use std::error::Error;
@@ -89,12 +89,12 @@ fn fst_bounds_crash_with_tag_filtering() -> Result<(), Box<dyn Error>> {
         mode: TagMode::And,
     };
     
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let filter = LazyTagFilter::from_config(&tag_config);
     let mut stream = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         "s3://rafagalante/".as_bytes().to_vec(),
         None,
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     
     // Try to iterate through results - this should crash with FST bounds error
@@ -161,12 +161,12 @@ fn fst_bounds_simple_case() -> Result<(), Box<dyn Error>> {
         mode: TagMode::And,
     };
     
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let filter = LazyTagFilter::from_config(&tag_config);
     let mut stream = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         "prefix/".as_bytes().to_vec(),
         None,
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     
     // Iterate and check for crash
@@ -250,12 +250,12 @@ fn fst_bounds_crash_with_cursor_seek() -> Result<(), Box<dyn Error>> {
         mode: TagMode::And,
     };
     
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let filter = LazyTagFilter::from_config(&tag_config);
     let mut stream = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         "prefix/deep/".as_bytes().to_vec(),
         None,
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     
     // Get first few results to populate transition cache
@@ -272,12 +272,12 @@ fn fst_bounds_crash_with_cursor_seek() -> Result<(), Box<dyn Error>> {
     let cursor = stream.cursor();
     
     // Create a new stream and seek to the cursor position
-    let filter2 = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let filter2 = LazyTagFilter::from_config(&tag_config);
     let mut stream2 = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         "prefix/deep/".as_bytes().to_vec(), 
         None,
-        Some(filter2),
+        Some(Box::new(filter2)),
     )?;
     
     // Seek to cursor position - this might trigger the crash
@@ -411,12 +411,12 @@ fn fst_bounds_real_world_simulation() -> Result<(), Box<dyn Error>> {
         mode: TagMode::And,
     };
     
-    let filter = TagFilterBitmap::new(&db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let filter = LazyTagFilter::from_config(&tag_config);
     let mut stream = MultiShardListStreamer::new_with_filter(
         &db.shards(),
         "s3://rafagalante/".as_bytes().to_vec(),
         None,
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     
     // Iterate like the original command (with limit of 200)
@@ -509,23 +509,33 @@ fn fst_bounds_direct_simulation() -> Result<(), Box<dyn Error>> {
         exclude_tags: vec![],
         mode: TagMode::And,
     };
-    let filter = TagFilterBitmap::new(db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
-    let bitmaps = filter.build_shard_bitmaps(db.shards())?;
+    // Create new filtered streamer instead of using old bitmap methods
+    let filter = LazyTagFilter::from_config(&tag_config);
+    let mut filtered_streamer = MultiShardListStreamer::new_with_filter(
+        db.shards(),
+        Vec::new(),
+        None,
+        Some(Box::new(filter)),
+    )?;
     
-    // This should remap shard indices but transition cache still has old indices
-    streamer.apply_shard_bitmaps(db.shards(), bitmaps);
-    
-    // Now try to continue iteration - this might trigger FST bounds error
-    // because transitions cache has references to old shard 2, but new FST array only has 2 elements
-    eprintln!("DEBUG: About to continue iteration after shard bitmap applied");
+    eprintln!("DEBUG: Testing new lazy filtering approach");
     let mut remaining_results = Vec::new();
     for i in 0..10 {
         eprintln!("DEBUG: Calling next() iteration {}", i);
-        if let Some(entry) = streamer.next() {
-            eprintln!("DEBUG: Got entry: {}", entry.as_str());
+        if let Some(entry) = filtered_streamer.next() {
+            eprintln!("DEBUG: Got filtered entry: {}", entry.as_str());
             remaining_results.push(entry);
         } else {
-            eprintln!("DEBUG: No more entries");
+            eprintln!("DEBUG: No more filtered entries");
+            break;
+        }
+    }
+    
+    // Also continue with original streamer
+    for _i in 0..5 {
+        if let Some(entry) = streamer.next() {
+            eprintln!("DEBUG: Got original entry: {}", entry.as_str());
+        } else {
             break;
         }
     }
@@ -631,28 +641,26 @@ fn fst_bounds_crash_minimal_repro() -> Result<(), Box<dyn Error>> {
         exclude_tags: vec![],
         mode: TagMode::And,
     };
-    let filter = TagFilterBitmap::new(db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
-    let bitmaps = filter.build_shard_bitmaps(db.shards())?;
+    // Create new filtered streamer instead of using old bitmap methods  
+    let filter = LazyTagFilter::from_config(&tag_config);
+    let mut filtered_streamer = MultiShardListStreamer::new_with_filter(
+        db.shards(),
+        b"prefix/alpha/".to_vec(),
+        None,
+        Some(Box::new(filter)),
+    )?;
     
-    let remaining_shards = bitmaps.iter().filter(|bm| bm.is_some()).count();
-    eprintln!("Tag filtering keeps {} out of {} shards", remaining_shards, NUM_SHARDS);
+    eprintln!("Testing new lazy filtering approach instead of old bitmap methods");
     
-    // Apply the filtering - this should remap shard indices
-    // Transition cache still has references to original indices 0-19
-    // But self.fsts now only has `remaining_shards` elements
-    streamer.apply_shard_bitmaps(db.shards(), bitmaps);
-    
-    eprintln!("Continuing iteration after filtering - this may trigger FST bounds crash...");
-    
-    let mut count = 2; // Already got 2 items
-    while let Some(entry) = streamer.next() {
+    let mut count = 0;
+    while let Some(entry) = filtered_streamer.next() {
         match entry {
             Entry::Key(key, lut_id, _) => {
-                eprintln!("Entry {}: {} #{}", count + 1, key, lut_id);
+                eprintln!("Filtered entry {}: {} #{}", count + 1, key, lut_id);
                 assert!(key.starts_with("prefix/alpha/"));
             },
             Entry::CommonPrefix(prefix, child_count) => {
-                eprintln!("Prefix {}: {} ({})", count + 1, prefix, child_count.unwrap_or(0));
+                eprintln!("Filtered prefix {}: {} ({})", count + 1, prefix, child_count.unwrap_or(0));
             }
         }
         count += 1;
@@ -661,6 +669,19 @@ fn fst_bounds_crash_minimal_repro() -> Result<(), Box<dyn Error>> {
             break; // Safety limit
         }
     }
+    
+    // Also continue with the original streamer for comparison
+    let mut original_count = 2; // Already got 2 items
+    while let Some(entry) = streamer.next() {
+        eprintln!("Original entry {}: {}", original_count + 1, entry.as_str());
+        original_count += 1;
+        
+        if original_count >= 10 {
+            break; // Safety limit for original
+        }
+    }
+    
+    count += original_count;
     
     eprintln!("Test completed successfully with {} entries", count);
     
@@ -717,14 +738,14 @@ fn fst_bounds_crash_shell_direct_approach() -> Result<(), Box<dyn Error>> {
         mode: TagMode::And,
     };
     
-    let filter = TagFilterBitmap::new(db.shards(), &tag_config.include_tags, &tag_config.exclude_tags, tag_config.mode)?;
+    let filter = LazyTagFilter::from_config(&tag_config);
     
     eprintln!("Creating filtered streamer directly like shell does...");
     let mut stream = MultiShardListStreamer::new_with_filter(
         db.shards(),
         "prefix/alpha/".as_bytes().to_vec(),
         None,
-        Some(filter),
+        Some(Box::new(filter)),
     )?;
     
     let mut results = Vec::new();
