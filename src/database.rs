@@ -20,37 +20,6 @@ use crate::streamer::{PrefixStream, Streamer as DbStreamer};
 use self::prefix_index::PrefixIndex;
 
 
-/// Filter shards to only those that contain the given prefix
-fn shards_with_prefix<'a, V, C>(
-    database: &'a Database<V, C>, 
-    prefix: &[u8]
-) -> Vec<&'a Shard<V, C>>
-where
-    V: DeserializeOwned,
-    C: PayloadCodec,
-{
-    // Get candidate shard indices from prefix index
-    let candidate_bitmap = database.prefix_index.find_candidate_shards(prefix);
-    
-    // Now verify each candidate by walking its FST
-    candidate_bitmap
-        .iter()
-        .filter_map(|idx| {
-            let shard = &database.shards[idx as usize];
-            let fst = shard.fst.as_fst();
-            let mut node = fst.root();
-            for &byte in prefix {
-                if let Some(idx) = node.find_input(byte) {
-                    let tr = node.transition(idx);
-                    node = fst.node(tr.addr);
-                } else {
-                    return None;
-                }
-            }
-            Some(shard)
-        })
-        .collect()
-}
 
 /// Generic wrapper to turn any Iterator into a DbStreamer
 pub struct IterStreamer<I>(pub I);
@@ -180,19 +149,33 @@ where
         })
     }
 
-    /// Fuzzy substring search using shard-local Tantivy search indexes,
+    /// Substring search using shard-local n-gram search indexes,
     /// optionally restricted to keys starting with `prefix`.
     pub fn search<'a>(
         &'a self,
         prefix: Option<&'a str>,
         query: &str,
     ) -> Result<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>> {
-        // Pre-walk prefix across shards to skip those without matching keys
+        // Pre-filter shards by prefix if specified
         let shards_to_query: Vec<&Shard<V, C>> = if let Some(pref) = prefix {
-            shards_with_prefix(self, pref.as_bytes())
+            // Get candidate shard indices from prefix index
+            let candidate_bitmap = self.prefix_index.find_candidate_shards(pref.as_bytes());
+            candidate_bitmap
+                .iter()
+                .filter_map(|idx| {
+                    let shard = &self.shards[idx as usize];
+                    // Further verify the shard has the prefix
+                    if shard.has_prefix(pref) {
+                        Some(shard)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         } else {
             self.shards.iter().collect()
         };
+        
         let mut streams: Vec<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>> =
             Vec::new();
         for shard in shards_to_query {
@@ -200,6 +183,7 @@ where
                 streams.push(shard.stream_by_search(query, prefix)?);
             }
         }
+        
         struct ChainStreamer<'a, V>
         where
             V: DeserializeOwned,
@@ -215,11 +199,14 @@ where
             type Cursor = Vec<u8>;
 
             fn cursor(&self) -> Self::Cursor {
-                unimplemented!("cursor not implemented");
+                // Simple cursor: current stream index
+                vec![self.idx as u8]
             }
 
-            fn seek(&mut self, _cursor: Self::Cursor) {
-                unimplemented!("seek not implemented");
+            fn seek(&mut self, cursor: Self::Cursor) {
+                if !cursor.is_empty() {
+                    self.idx = cursor[0] as usize;
+                }
             }
 
             fn next(&mut self) -> Option<Self::Item> {

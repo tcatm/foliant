@@ -12,6 +12,7 @@ pub mod shard_provider;
 mod streamer;
 mod tag_index;
 mod tag_list;
+mod search_index;
 
 pub use builder::DatabaseBuilder;
 pub use builder::SegmentInfo;
@@ -24,8 +25,7 @@ pub use shard::Shard;
 pub use streamer::{PrefixStream, Streamer};
 pub use tag_index::{TagIndex, TagIndexBuilder};
 pub use tag_list::TagStreamer;
-mod tantivy_index;
-pub use tantivy_index::{TantivyIndex, TantivyIndexBuilder};
+pub use search_index::{SearchIndex, SearchIndexBuilder};
 
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::de::DeserializeOwned;

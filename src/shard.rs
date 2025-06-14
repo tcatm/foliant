@@ -26,13 +26,13 @@ use crate::error::{IndexError, Result};
 use crate::lookup_table_store::LookupTableStore;
 use crate::payload_store::{CborPayloadCodec, PayloadCodec, PayloadStore};
 use crate::tag_index::TagIndex;
-use crate::tantivy_index::TantivyIndex;
+use crate::search_index::{SearchIndex, normalize_text_unicode, strip_diacritics, GRAM_SIZE};
+use unicode_segmentation::UnicodeSegmentation;
 use fst::automaton::Str;
 use fst::raw::Fst as RawFst;
 use fst::Automaton;
 use fst::IntoStreamer;
 use fst::Streamer as FstStreamer;
-use std::marker::PhantomData;
 /// One shard of a database: a memory-mapped FST map and its payload store.
 pub struct Shard<V, C: PayloadCodec = CborPayloadCodec>
 where
@@ -50,8 +50,8 @@ where
     pub(crate) payload: PayloadStore<V, C>,
     /// Optional tag index for this shard (variant-C .tags file)
     pub(crate) tags: Option<TagIndex>,
-    /// Optional search index for this shard (Tantivy .search/ folder)
-    pub(crate) search: Option<TantivyIndex>,
+    /// Optional search index for this shard (.search/ folder)
+    pub(crate) search: Option<SearchIndex>,
 }
 
 impl<V, C> Shard<V, C>
@@ -101,8 +101,8 @@ where
             Ok(idx) => Some(idx),
             Err(IndexError::Io(_)) | Err(IndexError::InvalidFormat(_)) => None,
         };
-        // Try loading a Tantivy search index if present
-        let search = match TantivyIndex::open(idx_path) {
+        // Try loading a search index if present
+        let search = match SearchIndex::open(idx_path) {
             Ok(idx) => Some(idx),
             Err(IndexError::Io(_)) | Err(IndexError::InvalidFormat(_)) => None,
         };
@@ -187,29 +187,94 @@ where
     }
 
 
-    /// Stream entries matching the given query via the shard's Tantivy search index,
-    /// optionally restricted to those whose key starts with `prefix`.
     /// Get access to the underlying FST for debugging purposes
     pub fn get_fst(&self) -> &Map<SharedMmap> {
         &self.fst
     }
 
+    /// Get a reference to the tag index if it exists.
+    pub fn tag_index(&self) -> Option<&TagIndex> {
+        self.tags.as_ref()
+    }
+    
+    /// Stream entries matching the given substring query via the shard's search index,
+    /// optionally restricted to those whose key starts with `prefix`.
     pub fn stream_by_search<'a>(
         &'a self,
         query: &str,
         prefix: Option<&'a str>,
     ) -> Result<Box<dyn crate::Streamer<Item = crate::Entry<V>, Cursor = Vec<u8>> + 'a>> {
         if let Some(idx) = &self.search {
-            let ids = idx.search_stream(query, self.len())?;
+            let candidate_ids = idx.search(query)?;
+            let normalized_query = normalize_text_unicode(query);
+            let cluster_count = normalized_query.graphemes(true).count();
+            if candidate_ids.is_empty() && !normalized_query.is_empty() && cluster_count < GRAM_SIZE {
+                struct RawSearchStreamer<'a, V, C>
+                where
+                    V: DeserializeOwned,
+                    C: PayloadCodec,
+                {
+                    shard: &'a Shard<V, C>,
+                    prefix: Option<&'a str>,
+                    query: String,
+                    stream: fst::map::Stream<'a>,
+                }
+
+                impl<'a, V, C> crate::Streamer for RawSearchStreamer<'a, V, C>
+                where
+                    V: DeserializeOwned,
+                    C: PayloadCodec,
+                {
+                    type Item = crate::Entry<V>;
+                    type Cursor = Vec<u8>;
+
+                    fn cursor(&self) -> Self::Cursor {
+                        Vec::new()
+                    }
+
+                    fn seek(&mut self, _cursor: Self::Cursor) {}
+
+                    fn next(&mut self) -> Option<Self::Item> {
+                        while let Some((key_bytes, doc_id)) = self.stream.next() {
+                            if let Ok(Some(entry)) = self.shard.get_entry(doc_id) {
+                                if let crate::Entry::Key(ref k, _, _) = entry {
+                                    if let Some(pref) = self.prefix {
+                                        if !k.starts_with(pref) {
+                                            continue;
+                                        }
+                                    }
+                                    let key_norm = strip_diacritics(&normalize_text_unicode(k));
+                                    let query_norm = strip_diacritics(&normalize_text_unicode(&self.query));
+                                    if key_norm.contains(&query_norm) {
+                                        return Some(entry);
+                                    }
+                                }
+                            }
+                        }
+                        None
+                    }
+                }
+
+                return Ok(Box::new(RawSearchStreamer {
+                    shard: self,
+                    prefix,
+                    query: query.to_string(),
+                    stream: self.fst.stream(),
+                }));
+            }
+            
             struct SearchStreamer<'a, V, C>
             where
                 V: DeserializeOwned,
                 C: PayloadCodec,
             {
                 shard: &'a Shard<V, C>,
-                ids: Box<dyn Iterator<Item = u64> + 'a>,
+                candidate_ids: Vec<u64>,
                 prefix: Option<&'a str>,
+                query: String,
+                idx: usize,
             }
+            
             impl<'a, V, C> crate::Streamer for SearchStreamer<'a, V, C>
             where
                 V: DeserializeOwned,
@@ -219,68 +284,71 @@ where
                 type Cursor = Vec<u8>;
 
                 fn cursor(&self) -> Self::Cursor {
-                    unimplemented!("cursor not implemented");
+                    // Simple cursor: current index as bytes
+                    (self.idx as u64).to_le_bytes().to_vec()
                 }
 
-                fn seek(&mut self, _cursor: Self::Cursor) {
-                    unimplemented!("seek not implemented");
+                fn seek(&mut self, cursor: Self::Cursor) {
+                    if cursor.len() >= 8 {
+                        let idx_bytes: [u8; 8] = cursor[..8].try_into().unwrap_or([0; 8]);
+                        self.idx = u64::from_le_bytes(idx_bytes) as usize;
+                    }
                 }
 
                 fn next(&mut self) -> Option<Self::Item> {
-                    while let Some(id) = self.ids.next() {
+                    while self.idx < self.candidate_ids.len() {
+                        let id = self.candidate_ids[self.idx];
+                        self.idx += 1;
+                        
                         if let Ok(Some(entry)) = self.shard.get_entry(id) {
-                            if let Some(pref) = self.prefix {
-                                if let crate::Entry::Key(ref k, _, _) = entry {
+                            if let crate::Entry::Key(ref k, _, _) = entry {
+                                // Apply prefix filter if specified
+                                if let Some(pref) = self.prefix {
                                     if !k.starts_with(pref) {
                                         continue;
                                     }
                                 }
+                                let key_norm = strip_diacritics(&normalize_text_unicode(k));
+                                let query_norm = strip_diacritics(&normalize_text_unicode(&self.query));
+                                if key_norm.contains(&query_norm) {
+                                    return Some(entry);
+                                }
                             }
-                            return Some(entry);
                         }
                     }
                     None
                 }
             }
-            return Ok(Box::new(SearchStreamer {
+            
+            Ok(Box::new(SearchStreamer {
                 shard: self,
-                ids: Box::new(ids),
+                candidate_ids,
                 prefix,
-            })
-                as Box<
-                    dyn crate::Streamer<Item = crate::Entry<V>, Cursor = Vec<u8>> + 'a,
-                >);
+                query: query.to_string(),
+                idx: 0,
+            }))
+        } else {
+            // No search index: return empty stream
+            struct EmptyStreamer<V, C>(std::marker::PhantomData<(V, C)>);
+            impl<V, C> crate::Streamer for EmptyStreamer<V, C>
+            where
+                V: DeserializeOwned,
+                C: PayloadCodec,
+            {
+                type Item = crate::Entry<V>;
+                type Cursor = Vec<u8>;
+
+                fn cursor(&self) -> Self::Cursor {
+                    Vec::new()
+                }
+
+                fn seek(&mut self, _cursor: Self::Cursor) {}
+
+                fn next(&mut self) -> Option<Self::Item> {
+                    None
+                }
+            }
+            Ok(Box::new(EmptyStreamer::<V, C>(std::marker::PhantomData)))
         }
-        // no search index: empty stream
-        struct EmptyStreamer<V, C>(PhantomData<(V, C)>);
-        impl<V, C> crate::Streamer for EmptyStreamer<V, C>
-        where
-            V: DeserializeOwned,
-            C: PayloadCodec,
-        {
-            type Item = crate::Entry<V>;
-            type Cursor = Vec<u8>;
-
-            fn cursor(&self) -> Self::Cursor {
-                unimplemented!("cursor not implemented");
-            }
-
-            fn seek(&mut self, _cursor: Self::Cursor) {
-                unimplemented!("seek not implemented");
-            }
-
-            fn next(&mut self) -> Option<Self::Item> {
-                None
-            }
-        }
-        Ok(Box::new(EmptyStreamer::<V, C>(PhantomData))
-            as Box<
-                dyn crate::Streamer<Item = crate::Entry<V>, Cursor = Vec<u8>> + 'a,
-            >)
-    }
-
-    /// Get a reference to the tag index if it exists.
-    pub fn tag_index(&self) -> Option<&TagIndex> {
-        self.tags.as_ref()
     }
 }

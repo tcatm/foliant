@@ -38,7 +38,7 @@ Available commands:
     !tag     exclude entries with tag
   cd [dir]                        change directory
   find <regex>                    search entries matching regex
-  search <query>                  fuzzy search entries matching substring using search index
+  search <query>                  substring search using n-gram index
   tags                            list all tags with counts
   val <id>                        lookup key by raw pointer ID
   pwd                             print working directory

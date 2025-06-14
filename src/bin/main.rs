@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use foliant::payload_store::PayloadStoreVersion;
 use foliant::{
     convert_v2_to_v3_inplace, Database, DatabaseBuilder, SegmentInfo,
-    TagIndexBuilder, TantivyIndexBuilder,
+    TagIndexBuilder, SearchIndexBuilder,
 };
 use fst::map::Map;
 use indicatif::ProgressBar;
@@ -99,7 +99,7 @@ enum Commands {
         tag_field: String,
     },
     /// Generate or update the search index (.search) for an existing database by scanning keys
-    TantivyIndex {
+    SearchIndex {
         /// Path to the serialized index (file or directory of shards)
         #[arg(short, long, value_name = "INDEX")]
         index: PathBuf,
@@ -157,9 +157,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pb.finish();
         Ok(start.elapsed())
     }
-
-    /// Helper to build a search index (.search) for an existing database, with a progress bar.
-    fn run_tantivy_index(index: &PathBuf) -> Result<Duration, Box<dyn std::error::Error>> {
+    
+    // Helper to build a search index with a progress bar; returns elapsed time
+    fn run_search_index(
+        index: &PathBuf,
+    ) -> Result<Duration, Box<dyn std::error::Error>> {
         let start = Instant::now();
         let idx_path = index.with_extension("idx");
         let idx_file = File::open(&idx_path)?;
@@ -175,10 +177,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         let pb_clone = pb.clone();
         let mut db = Database::<Value>::open(index)?;
-        TantivyIndexBuilder::build_index(&mut db, Some(Arc::new(move |_| pb_clone.inc(1))))?;
+        SearchIndexBuilder::build_index(&mut db, Some(Arc::new(move |count| pb_clone.set_position(count))))?;
         pb.finish();
         Ok(start.elapsed())
     }
+
 
     match cli.command {
         Commands::Index {
@@ -403,8 +406,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 dur.as_secs_f64() * 1000.0
             );
         }
-        Commands::TantivyIndex { index } => {
-            let dur = run_tantivy_index(&index)?;
+        Commands::SearchIndex { index } => {
+            let dur = run_search_index(&index)?;
             eprintln!(
                 "Search index generated in {:.3} ms",
                 dur.as_secs_f64() * 1000.0
