@@ -1,6 +1,7 @@
 //! Integration tests for MultiShardListStreamer cursor/seek functionality.
 use foliant::multi_list::MultiShardListStreamer;
 use foliant::payload_store::{CborPayloadCodec, PayloadStoreVersion};
+use foliant::shard_provider::AllShardsProvider;
 use foliant::{DatabaseBuilder, Streamer};
 use tempfile::tempdir;
 
@@ -35,7 +36,8 @@ fn collect_strs(
 fn single_shard_cursor_seek() {
     let keys = ["a", "b", "c", "d", "e"];
     let shards = make_shards(&keys);
-    let mut st = MultiShardListStreamer::new(&shards, Vec::new(), None);
+    let provider = AllShardsProvider::new(&shards);
+    let mut st = MultiShardListStreamer::new(&provider, Vec::new(), None);
     // page off two
     assert_eq!(st.next().unwrap().as_str(), "a");
     assert_eq!(st.next().unwrap().as_str(), "b");
@@ -55,7 +57,8 @@ fn multi_shard_interleaving_cursor_seek() {
     // Shard A has aa, ac, ad; Shard B has ab, ae, af
     let mut shards = make_shards(&["aa", "ac", "ad"]);
     shards.extend(make_shards(&["ab", "ae", "af"]));
-    let mut st = MultiShardListStreamer::new(&shards, Vec::new(), None);
+    let provider = AllShardsProvider::new(&shards);
+    let mut st = MultiShardListStreamer::new(&provider, Vec::new(), None);
     // first two in lex order: aa, ab
     assert_eq!(st.next().unwrap().as_str(), "aa");
     assert_eq!(st.next().unwrap().as_str(), "ab");
@@ -72,7 +75,8 @@ fn prefix_restricted_cursor_seek() {
     let shards = make_shards(&keys);
     // prefix = "foo"
     let pref = b"foo".to_vec();
-    let mut st = MultiShardListStreamer::new(&shards, pref.clone(), None);
+    let provider = AllShardsProvider::new(&shards);
+    let mut st = MultiShardListStreamer::new(&provider, pref.clone(), None);
     // first emit "foo"
     assert_eq!(st.next().unwrap().as_str(), "foo");
     let c = st.cursor();
@@ -80,7 +84,8 @@ fn prefix_restricted_cursor_seek() {
     // then foobar, foox
     assert_eq!(collect_strs(&mut st), vec!["foobar", "foox"]);
     // prefix not present: "fooa" - should return empty results
-    let mut st2 = MultiShardListStreamer::new(&shards, b"fooa".to_vec(), None);
+    let provider2 = AllShardsProvider::new(&shards);
+    let mut st2 = MultiShardListStreamer::new(&provider2, b"fooa".to_vec(), None);
     assert_eq!(collect_strs(&mut st2), Vec::<String>::new());
 }
 
@@ -89,7 +94,8 @@ fn delimiter_cursor_seek() {
     let keys = ["a/1", "a/2", "b/1", "b/2"];
     let shards = make_shards(&keys);
     // group by '/'
-    let mut st = MultiShardListStreamer::new(&shards, Vec::new(), Some(b'/'));
+    let provider = AllShardsProvider::new(&shards);
+    let mut st = MultiShardListStreamer::new(&provider, Vec::new(), Some(b'/'));
     // first CommonPrefix("a/")
     let e1 = st.next().unwrap();
     assert_eq!(e1.kind(), "CommonPrefix");
@@ -110,7 +116,8 @@ fn edge_cases_cursor_seek() {
     // very long key
     let long = "x".repeat(512);
     let shards = make_shards(&[&long]);
-    let mut st = MultiShardListStreamer::new(&shards, Vec::new(), None);
+    let provider = AllShardsProvider::new(&shards);
+    let mut st = MultiShardListStreamer::new(&provider, Vec::new(), None);
     assert_eq!(st.next().unwrap().as_str(), long.as_str());
     let c = st.cursor();
     // seek shorter than prefix (empty)
@@ -126,7 +133,8 @@ fn edge_cases_cursor_seek() {
 fn repeated_seeks_cursor_seek() {
     let keys = ["1", "2", "3"];
     let shards = make_shards(&keys);
-    let mut st = MultiShardListStreamer::new(&shards, Vec::new(), None);
+    let provider = AllShardsProvider::new(&shards);
+    let mut st = MultiShardListStreamer::new(&provider, Vec::new(), None);
     // next one
     assert_eq!(st.next().unwrap().as_str(), "1");
     let c1 = st.cursor();
@@ -148,7 +156,8 @@ fn resume_initial_seek_equivalence() {
     let keys = ["a", "b", "c", "d"];
     let shards = make_shards(&keys);
     // Consume first two entries using new() + seek()
-    let mut st1 = MultiShardListStreamer::new(&shards, Vec::new(), None);
+    let provider = AllShardsProvider::new(&shards);
+    let mut st1 = MultiShardListStreamer::new(&provider, Vec::new(), None);
     assert_eq!(st1.next().unwrap().as_str(), "a");
     assert_eq!(st1.next().unwrap().as_str(), "b");
     let cursor = st1.cursor();
@@ -156,7 +165,8 @@ fn resume_initial_seek_equivalence() {
     let rest1: Vec<String> = collect_strs(&mut st1);
 
     // Use resume() to start directly after the same cursor
-    let mut st2 = MultiShardListStreamer::resume(&shards, Vec::new(), None, cursor);
+    let provider2 = AllShardsProvider::new(&shards);
+    let mut st2 = MultiShardListStreamer::resume(&provider2, Vec::new(), None, cursor);
     let rest2: Vec<String> = collect_strs(&mut st2);
 
     assert_eq!(rest1, rest2);
@@ -168,18 +178,21 @@ fn resume_delimiter_paging() {
     let keys = ["a/1", "a/2", "b/1", "b/2"];
     let shards = make_shards(&keys);
     // group by '/'
-    let mut st1 = MultiShardListStreamer::new(&shards, Vec::new(), Some(b'/'));
+    let provider = AllShardsProvider::new(&shards);
+    let mut st1 = MultiShardListStreamer::new(&provider, Vec::new(), Some(b'/'));
     // first group
     let first = st1.next().unwrap().as_str().to_string();
     assert_eq!(first, "a/");
     let cursor = st1.cursor();
     // resume directly after that group via resume()
-    let mut st2 = MultiShardListStreamer::resume(&shards, Vec::new(), Some(b'/'), cursor.clone());
+    let provider2 = AllShardsProvider::new(&shards);
+    let mut st2 = MultiShardListStreamer::resume(&provider2, Vec::new(), Some(b'/'), cursor.clone());
     let second = st2.next().unwrap().as_str().to_string();
     assert_eq!(second, "b/");
     let cursor2 = st2.cursor();
     // resume past last group: no more entries
-    let mut st3 = MultiShardListStreamer::resume(&shards, Vec::new(), Some(b'/'), cursor2);
+    let provider3 = AllShardsProvider::new(&shards);
+    let mut st3 = MultiShardListStreamer::resume(&provider3, Vec::new(), Some(b'/'), cursor2);
     assert!(st3.next().is_none());
 }
 
@@ -192,21 +205,25 @@ fn resume_delimiter_with_prefix() {
     let prefix = b"pre/".to_vec();
     let delim = Some(b'/');
     // First group under prefix 'pre/'
-    let mut st1 = MultiShardListStreamer::new(&shards, prefix.clone(), delim);
+    let provider = AllShardsProvider::new(&shards);
+    let mut st1 = MultiShardListStreamer::new(&provider, prefix.clone(), delim);
     let first = st1.next().unwrap().as_str().to_string();
     assert_eq!(first, "pre/a/");
     let cur1 = st1.cursor();
     // Resume directly after that group
-    let mut st2 = MultiShardListStreamer::resume(&shards, prefix.clone(), delim, cur1.clone());
+    let provider2 = AllShardsProvider::new(&shards);
+    let mut st2 = MultiShardListStreamer::resume(&provider2, prefix.clone(), delim, cur1.clone());
     let second = st2.next().unwrap().as_str().to_string();
     assert_eq!(second, "pre/b/");
     let cur2 = st2.cursor();
     // Resume after second group
-    let mut st3 = MultiShardListStreamer::resume(&shards, prefix.clone(), delim, cur2.clone());
+    let provider3 = AllShardsProvider::new(&shards);
+    let mut st3 = MultiShardListStreamer::resume(&provider3, prefix.clone(), delim, cur2.clone());
     let third = st3.next().unwrap().as_str().to_string();
     assert_eq!(third, "pre/c/");
     let cur3 = st3.cursor();
     // Resume after last group: no more entries
-    let mut st4 = MultiShardListStreamer::resume(&shards, prefix, delim, cur3);
+    let provider4 = AllShardsProvider::new(&shards);
+    let mut st4 = MultiShardListStreamer::resume(&provider4, prefix, delim, cur3);
     assert!(st4.next().is_none());
 }

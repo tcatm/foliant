@@ -415,7 +415,7 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
             // Use MultiShardListStreamer with an optional generic bitmap filter
             let mut stream: Box<dyn Streamer<Item = Entry<_>, Cursor = Vec<u8>>> = if tag_filter.is_some() {
                 match MultiShardListStreamer::new_with_filter(
-                    state_ref.db.shards(),
+                    &state_ref.db,
                     list_prefix.as_bytes().to_vec(),
                     list_delim.map(|c| c as u8),
                     tag_filter,

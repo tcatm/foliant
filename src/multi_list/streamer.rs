@@ -1,4 +1,4 @@
-use crate::{Entry, Shard, Streamer};
+use crate::{Entry, Streamer};
 /// Maximum expected key length for reserve hints
 const MAX_KEY_LEN: usize = 256;
 
@@ -9,6 +9,7 @@ use crate::frame::{ShardInfo, build_frame_states, build_frame_transitions_and_bo
 use crate::payload_store::PayloadCodec;
 use serde::de::DeserializeOwned;
 use super::lazy_filter::LazyShardFilter;
+use crate::shard_provider::ShardProvider;
 
 impl<'a, V, C> MultiShardListStreamer<'a, V, C>
 where
@@ -58,13 +59,13 @@ where
 
     /// Build a streamer and immediately fast‑forward so that the first `next()` yields
     /// the first entry > `cursor`.  Avoids a second prefix walk when resuming.
-    pub fn resume(
-        shards: &'a [Shard<V, C>],
+    pub fn resume<P: ShardProvider<V, C>>(
+        provider: &'a P,
         prefix: Vec<u8>,
         delim: Option<u8>,
         cursor: Vec<u8>,
     ) -> Self {
-        Self::resume_with_lazy_filter(shards, prefix, delim, cursor, None).unwrap()
+        Self::resume_with_lazy_filter(provider, prefix, delim, cursor, None).unwrap()
     }
 
     /// Internal helper: replay raw‐FST descent on each byte of `cursor`, advancing the DFS
@@ -129,19 +130,25 @@ where
     /// 
     /// This method performs the prefix walk first, then applies the lazy filter
     /// only to shards that match the prefix, significantly reducing bitmap computations.
-    pub fn new_with_lazy_filter(
-        shards: &'a [Shard<V, C>],
+    pub fn new_with_lazy_filter<P: ShardProvider<V, C>>(
+        provider: &'a P,
         prefix: Vec<u8>,
         delim: Option<u8>,
         filter: Option<Box<dyn LazyShardFilter<V, C>>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let start_prefix = prefix.clone();
-        let mut initial_frame = FrameMulti::with_capacity(shards.len());
+        
+        // Get candidate shards from provider's prefix index
+        let candidate_bitmap = provider.get_shards_for_prefix(&start_prefix);
+        let shards = provider.get_all_shards();
+        
+        let mut initial_frame = FrameMulti::with_capacity(candidate_bitmap.len() as usize);
         initial_frame.prefix_len = start_prefix.len();
         
-        // Build initial shard_infos without any filtering
-        let mut shard_infos = Vec::with_capacity(shards.len());
-        for shard in shards {
+        // Build initial shard_infos only for candidate shards
+        let mut shard_infos = Vec::with_capacity(candidate_bitmap.len() as usize);
+        for idx in candidate_bitmap.iter() {
+            let shard = &shards[idx as usize];
             let fst = shard.fst.as_fst();
             shard_infos.push(ShardInfo { fst, shard, bitmap: None });
         }
@@ -244,14 +251,14 @@ where
     }
     
     /// Resume from cursor with lazy filtering.
-    pub fn resume_with_lazy_filter(
-        shards: &'a [Shard<V, C>],
+    pub fn resume_with_lazy_filter<P: ShardProvider<V, C>>(
+        provider: &'a P,
         prefix: Vec<u8>,
         delim: Option<u8>,
         cursor: Vec<u8>,
         filter: Option<Box<dyn LazyShardFilter<V, C>>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut streamer = Self::new_with_lazy_filter(shards, prefix, delim, filter)?;
+        let mut streamer = Self::new_with_lazy_filter(provider, prefix, delim, filter)?;
         streamer.replay_seek_internal(&cursor);
         streamer.last_bytes = cursor;
         Ok(streamer)
@@ -259,34 +266,34 @@ where
 
 
     /// Create a new multi-shard listing streamer without filtering.
-    pub fn new(
-        shards: &'a [Shard<V, C>],
+    pub fn new<P: ShardProvider<V, C>>(
+        provider: &'a P,
         prefix: Vec<u8>,
         delim: Option<u8>,
     ) -> Self {
-        Self::new_with_lazy_filter(shards, prefix, delim, None).unwrap()
+        Self::new_with_lazy_filter(provider, prefix, delim, None).unwrap()
     }
 
     /// Create a new multi-shard listing streamer with an optional lazy filter.
-    pub fn new_with_filter(
-        shards: &'a [Shard<V, C>],
+    pub fn new_with_filter<P: ShardProvider<V, C>>(
+        provider: &'a P,
         prefix: Vec<u8>,
         delim: Option<u8>,
         filter: Option<Box<dyn LazyShardFilter<V, C>>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_with_lazy_filter(shards, prefix, delim, filter)
+        Self::new_with_lazy_filter(provider, prefix, delim, filter)
     }
 
 
     /// Resume from cursor with an optional lazy filter.
-    pub fn resume_with_filter(
-        shards: &'a [Shard<V, C>],
+    pub fn resume_with_filter<P: ShardProvider<V, C>>(
+        provider: &'a P,
         prefix: Vec<u8>,
         delim: Option<u8>,
         cursor: Vec<u8>,
         filter: Option<Box<dyn LazyShardFilter<V, C>>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::resume_with_lazy_filter(shards, prefix, delim, cursor, filter)
+        Self::resume_with_lazy_filter(provider, prefix, delim, cursor, filter)
     }
 
 }

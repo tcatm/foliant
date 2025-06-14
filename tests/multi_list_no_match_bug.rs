@@ -3,6 +3,7 @@
 
 use foliant::multi_list::MultiShardListStreamer;
 use foliant::payload_store::{CborPayloadCodec, PayloadStoreVersion};
+use foliant::shard_provider::AllShardsProvider;
 use foliant::{DatabaseBuilder, Streamer};
 use tempfile::tempdir;
 
@@ -41,7 +42,8 @@ fn test_no_prefix_match_returns_empty() {
     
     // Search for prefix "aaaaa" which doesn't match any key
     let prefix = b"aaaaa".to_vec();
-    let mut st = MultiShardListStreamer::new(&shards, prefix, None);
+    let provider = AllShardsProvider::new(&shards);
+    let mut st = MultiShardListStreamer::new(&provider, prefix, None);
     
     // Should return empty results, not the next available entry
     let results = collect_strs(&mut st);
@@ -56,7 +58,8 @@ fn test_no_prefix_match_with_delimiter_returns_empty() {
     
     // Search for prefix "zzz" which doesn't match any key
     let prefix = b"zzz".to_vec();
-    let mut st = MultiShardListStreamer::new(&shards, prefix, Some(b'/'));
+    let provider = AllShardsProvider::new(&shards);
+    let mut st = MultiShardListStreamer::new(&provider, prefix, Some(b'/'));
     
     // Should return empty results, not the next available entry
     let results = collect_strs(&mut st);
@@ -69,17 +72,20 @@ fn test_no_prefix_match_edge_cases() {
     let shards = make_shards(&keys);
     
     // Test prefix that would be lexicographically before all keys
-    let mut st1 = MultiShardListStreamer::new(&shards, b"aaa".to_vec(), None);
+    let provider = AllShardsProvider::new(&shards);
+    let mut st1 = MultiShardListStreamer::new(&provider, b"aaa".to_vec(), None);
     let results1 = collect_strs(&mut st1);
     assert!(results1.is_empty(), "Expected empty results for prefix 'aaa', but got: {:?}", results1);
     
     // Test prefix that would be lexicographically after all keys
-    let mut st2 = MultiShardListStreamer::new(&shards, b"zzz".to_vec(), None);
+    let provider2 = AllShardsProvider::new(&shards);
+    let mut st2 = MultiShardListStreamer::new(&provider2, b"zzz".to_vec(), None);
     let results2 = collect_strs(&mut st2);
     assert!(results2.is_empty(), "Expected empty results for prefix 'zzz', but got: {:?}", results2);
     
     // Test prefix that's in the middle range but doesn't match
-    let mut st3 = MultiShardListStreamer::new(&shards, b"bbb".to_vec(), None);
+    let provider3 = AllShardsProvider::new(&shards);
+    let mut st3 = MultiShardListStreamer::new(&provider3, b"bbb".to_vec(), None);
     let results3 = collect_strs(&mut st3);
     assert!(results3.is_empty(), "Expected empty results for prefix 'bbb', but got: {:?}", results3);
 }

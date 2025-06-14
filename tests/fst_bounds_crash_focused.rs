@@ -79,7 +79,7 @@ fn fst_bounds_crash_before_fix() -> Result<(), Box<dyn Error>> {
     db.load_tag_index()?;
 
     // Step 1: Create unfiltered streamer to establish initial state
-    let mut streamer = MultiShardListStreamer::new(db.shards(), b"prefix/".to_vec(), None);
+    let mut streamer = MultiShardListStreamer::new(&db, b"prefix/".to_vec(), None);
     
     // Step 2: Start iteration to populate transition cache with 3-shard references
     let first_entry = streamer.next().expect("Should get first entry");
@@ -97,7 +97,7 @@ fn fst_bounds_crash_before_fix() -> Result<(), Box<dyn Error>> {
     
     // Create new filtered streamer to test the lazy filtering approach
     let mut filtered_streamer = MultiShardListStreamer::new_with_filter(
-        db.shards(),
+        &db,
         b"prefix/".to_vec(),
         None,
         Some(Box::new(filter)),
@@ -188,7 +188,7 @@ fn fst_bounds_new_with_filter_test() -> Result<(), Box<dyn Error>> {
     
     let filter = LazyTagFilter::from_config(&tag_config);
     let mut stream = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         b"test/".to_vec(),
         None,
         Some(Box::new(filter)),

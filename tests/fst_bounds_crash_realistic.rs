@@ -111,7 +111,7 @@ fn fst_bounds_crash_realistic_new_with_filter() -> Result<(), Box<dyn Error>> {
     // 1. new_with_filter() -> new() -> walk_prefix() [creates frame states with ALL shards]
     // 2. new_with_filter() -> apply_shard_bitmaps() [replaces FST array, frame states now invalid]
     let mut stream = MultiShardListStreamer::new_with_filter(
-        db.shards(),
+        &db,
         "s3://rafagalante/".as_bytes().to_vec(),
         None, // No delimiter like shell default
         Some(Box::new(filter)),
@@ -177,7 +177,7 @@ fn fst_bounds_crash_walk_prefix_then_filter() -> Result<(), Box<dyn Error>> {
     
     // Demonstrate the exact issue:
     eprintln!("Step 1: Create unfiltered streamer (calls walk_prefix with all {} shards)", NUM_SHARDS);
-    let mut streamer = MultiShardListStreamer::new(db.shards(), b"target/".to_vec(), None);
+    let mut streamer = MultiShardListStreamer::new(&db, b"target/".to_vec(), None);
     
     eprintln!("Step 2: Apply filtering (changes FST array, but frame states still reference old FSTs)");
     let tag_config = TagFilterConfig {
@@ -188,7 +188,7 @@ fn fst_bounds_crash_walk_prefix_then_filter() -> Result<(), Box<dyn Error>> {
     // Create new filtered streamer instead of using old bitmap methods
     let filter = LazyTagFilter::from_config(&tag_config);
     let mut filtered_streamer = MultiShardListStreamer::new_with_filter(
-        db.shards(),
+        &db,
         b"target/".to_vec(),
         None,
         Some(Box::new(filter)),

@@ -66,7 +66,7 @@ fn multi_shard_tag_filter_resume_with_filtering() -> Result<(), Box<dyn Error>> 
 
     // Get first 2 filtered items
     let mut stream1 = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         Vec::new(),
         None,
         Some(Box::new(LazyTagFilter::from_config(&tag_config))),
@@ -82,7 +82,7 @@ fn multi_shard_tag_filter_resume_with_filtering() -> Result<(), Box<dyn Error>> 
 
     // Resume from cursor with the same filter (create a new instance)
     let mut stream2 = MultiShardListStreamer::resume_with_filter(
-        &db.shards(),
+        &db,
         Vec::new(),
         None,
         cursor,
@@ -158,7 +158,7 @@ fn multi_shard_tag_filter_resume_with_prefix() -> Result<(), Box<dyn Error>> {
 
     // Get first item from docs/ with important tag
     let mut stream1 = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         "docs/".as_bytes().to_vec(),
         None,
         Some(Box::new(LazyTagFilter::from_config(&tag_config))),
@@ -172,7 +172,7 @@ fn multi_shard_tag_filter_resume_with_prefix() -> Result<(), Box<dyn Error>> {
 
     // Resume from cursor with same filter and prefix (create new instance)
     let mut stream2 = MultiShardListStreamer::resume_with_filter(
-        &db.shards(),
+        &db,
         "docs/".as_bytes().to_vec(),
         None,
         cursor,
@@ -246,7 +246,7 @@ fn multi_shard_tag_filter_resume_with_delimiter() -> Result<(), Box<dyn Error>> 
 
     // Get first prefix group with important items
     let mut stream1 = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         Vec::new(),
         Some(b'/'),
         Some(Box::new(LazyTagFilter::from_config(&tag_config))),
@@ -266,7 +266,7 @@ fn multi_shard_tag_filter_resume_with_delimiter() -> Result<(), Box<dyn Error>> 
 
     // Resume from cursor with same filter (create new instance)
     let mut stream2 = MultiShardListStreamer::resume_with_filter(
-        &db.shards(),
+        &db,
         Vec::new(),
         Some(b'/'),
         cursor,
@@ -350,7 +350,7 @@ fn multi_shard_tag_filter_resume_with_exclusion() -> Result<(), Box<dyn Error>> 
 
     // Get first 2 non-deprecated published items
     let mut stream1 = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         Vec::new(),
         None,
         Some(Box::new(LazyTagFilter::from_config(&tag_config))),
@@ -366,7 +366,7 @@ fn multi_shard_tag_filter_resume_with_exclusion() -> Result<(), Box<dyn Error>> 
 
     // Resume from cursor with same exclusion filter (create new instance)
     let mut stream2 = MultiShardListStreamer::resume_with_filter(
-        &db.shards(),
+        &db,
         Vec::new(),
         None,
         cursor,

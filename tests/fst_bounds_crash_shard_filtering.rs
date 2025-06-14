@@ -59,7 +59,7 @@ fn fst_bounds_crash_early_shard_filtering() -> Result<(), Box<dyn Error>> {
     
     // Start with unfiltered streamer to populate transition cache
     let mut streamer = MultiShardListStreamer::new(
-        db.shards(),
+        &db,
         b"s3://bucket/".to_vec(),
         None
     );
@@ -82,7 +82,7 @@ fn fst_bounds_crash_early_shard_filtering() -> Result<(), Box<dyn Error>> {
     // Create a new filtered streamer instead of trying to use old bitmap methods
     let filter = LazyTagFilter::from_config(&tag_config);
     let mut filtered_streamer = MultiShardListStreamer::new_with_filter(
-        db.shards(),
+        &db,
         b"s3://bucket/".to_vec(),
         None,
         Some(Box::new(filter)),
@@ -152,7 +152,7 @@ fn fst_bounds_crash_index_remapping() -> Result<(), Box<dyn Error>> {
     db.load_tag_index()?;
     
     // Start unfiltered to cache transitions with all shard indices 0-7
-    let mut streamer = MultiShardListStreamer::new(db.shards(), Vec::new(), None);
+    let mut streamer = MultiShardListStreamer::new(&db, Vec::new(), None);
     let _first = streamer.next(); // Populate transition cache
     
     eprintln!("Transition cache populated with shard indices 0-7");
@@ -167,7 +167,7 @@ fn fst_bounds_crash_index_remapping() -> Result<(), Box<dyn Error>> {
     // Create new filtered streamer instead of using old bitmap methods
     let filter = LazyTagFilter::from_config(&tag_config);
     let mut filtered_streamer = MultiShardListStreamer::new_with_filter(
-        db.shards(),
+        &db,
         Vec::new(),
         None,
         Some(Box::new(filter)),

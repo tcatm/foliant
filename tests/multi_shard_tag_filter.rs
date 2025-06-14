@@ -106,7 +106,7 @@ fn multi_shard_tag_filter_basic() -> Result<(), Box<dyn Error>> {
     let filter = LazyTagFilter::from_config(&tag_config);
     
     let stream = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         Vec::new(),
         None,
         Some(Box::new(filter)),
@@ -129,7 +129,7 @@ fn multi_shard_tag_filter_basic() -> Result<(), Box<dyn Error>> {
     
     let filter = LazyTagFilter::from_config(&tag_config);
     let stream = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         Vec::new(),
         None,
         Some(Box::new(filter)),
@@ -185,7 +185,7 @@ fn multi_shard_tag_filter_synthetic_generic_document_filter() -> Result<(), Box<
     };
     let filter = LazyTagFilter::from_config(&tag_config);
     let stream = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         Vec::new(),
         None,
         Some(Box::new(filter)),
@@ -276,7 +276,7 @@ fn multi_shard_tag_filter_with_delimiter() -> Result<(), Box<dyn Error>> {
     };
     let filter = LazyTagFilter::from_config(&tag_config);
     let stream = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         Vec::new(),
         Some(b'/'),
         Some(Box::new(filter)),
@@ -361,7 +361,7 @@ fn multi_shard_tag_filter_complex_hierarchy() -> Result<(), Box<dyn Error>> {
     };
     let filter = LazyTagFilter::from_config(&tag_config);
     let stream = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         Vec::new(),
         None,
         Some(Box::new(filter)),
@@ -387,7 +387,7 @@ fn multi_shard_tag_filter_complex_hierarchy() -> Result<(), Box<dyn Error>> {
     // Scenario 2: first-level grouping only (show_empty_prefixes=false)
     let filter = LazyTagFilter::from_config(&tag_config);
     let stream = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         Vec::new(),
         Some(b'/'),
         Some(Box::new(filter)),
@@ -410,7 +410,7 @@ fn multi_shard_tag_filter_complex_hierarchy() -> Result<(), Box<dyn Error>> {
     // Scenario 4: prefix-restricted key-only query under "root/beta/"
     let filter = LazyTagFilter::from_config(&tag_config);
     let stream = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         "root/beta/".as_bytes().to_vec(),
         None,
         Some(Box::new(filter)),
@@ -471,7 +471,7 @@ fn multi_shard_tag_filter_or_mode() -> Result<(), Box<dyn Error>> {
     };
     let filter = LazyTagFilter::from_config(&tag_config);
     let stream = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         Vec::new(),
         None,
         Some(Box::new(filter)),
@@ -525,7 +525,7 @@ fn multi_shard_tag_filter_with_prefix() -> Result<(), Box<dyn Error>> {
     
     let filter = LazyTagFilter::from_config(&tag_config);
     let stream = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         "docs".as_bytes().to_vec(),
         None,
         Some(Box::new(filter)),
@@ -579,7 +579,7 @@ fn multi_shard_tag_filter_cursor_resume() -> Result<(), Box<dyn Error>> {
     // Get first 2 items
     let filter1 = LazyTagFilter::from_config(&tag_config);
     let mut stream1 = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         Vec::new(),
         None,
         Some(Box::new(filter1)),
@@ -594,7 +594,7 @@ fn multi_shard_tag_filter_cursor_resume() -> Result<(), Box<dyn Error>> {
 
     // Resume from cursor and get remaining items
     let mut stream2 = MultiShardListStreamer::resume_with_filter(
-        &db.shards(),
+        &db,
         Vec::new(),
         None,
         cursor,
@@ -653,7 +653,7 @@ fn multi_shard_tag_filter_complex_exclusion() -> Result<(), Box<dyn Error>> {
     };
     let filter = LazyTagFilter::from_config(&tag_config);
     let stream = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         Vec::new(),
         None,
         Some(Box::new(filter)),

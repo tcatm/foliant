@@ -37,7 +37,7 @@ fn test_case_insensitive_tag_operations() -> Result<(), Box<dyn std::error::Erro
             };
             let filter = LazyTagFilter::from_config(&config);
             let stream = MultiShardListStreamer::new_with_filter(
-                &db.shards(),
+                &db,
                 Vec::new(),
                 None,
                 Some(Box::new(filter)),
@@ -165,7 +165,7 @@ fn test_tag_filtering_with_mixed_case() -> Result<(), Box<dyn std::error::Error>
             };
             let filter = LazyTagFilter::from_config(&config);
             let stream = MultiShardListStreamer::new_with_filter(
-                &db.shards(),
+                &db,
                 Vec::new(),
                 None,
                 Some(Box::new(filter)),
@@ -236,7 +236,7 @@ fn test_duplicate_tags_different_cases() -> Result<(), Box<dyn std::error::Error
         };
         let filter = LazyTagFilter::from_config(&config);
         let stream = MultiShardListStreamer::new_with_filter(
-            &db.shards(),
+            &db,
             Vec::new(),
             None,
             Some(Box::new(filter)),

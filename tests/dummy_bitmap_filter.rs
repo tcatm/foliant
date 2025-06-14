@@ -54,7 +54,7 @@ fn dummy_bitmap_filter_prunes_unmatched_keys() -> Result<(), Box<dyn Error>> {
 
     // Apply the dummy filter: only 'bb' should pass
     let stream = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         Vec::new(),
         None,
         Some(Box::new(filter)),
@@ -133,7 +133,7 @@ fn complex_bitmap_filter_irregular_depths() -> Result<(), Box<dyn Error>> {
 
     // Apply the dummy filter: only filtered_keys should pass
     let stream = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         Vec::new(),
         None,
         Some(Box::new(filter)),
@@ -219,7 +219,7 @@ fn complex_bitmap_filter_with_delimiter() -> Result<(), Box<dyn Error>> {
 
     // Apply the dummy filter with '/' delimiter: expect grouping at first slash
     let stream = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         Vec::new(),
         Some(b'/'),
         Some(Box::new(filter)),

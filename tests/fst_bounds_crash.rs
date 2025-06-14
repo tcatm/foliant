@@ -91,7 +91,7 @@ fn fst_bounds_crash_with_tag_filtering() -> Result<(), Box<dyn Error>> {
     
     let filter = LazyTagFilter::from_config(&tag_config);
     let mut stream = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         "s3://rafagalante/".as_bytes().to_vec(),
         None,
         Some(Box::new(filter)),
@@ -163,7 +163,7 @@ fn fst_bounds_simple_case() -> Result<(), Box<dyn Error>> {
     
     let filter = LazyTagFilter::from_config(&tag_config);
     let mut stream = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         "prefix/".as_bytes().to_vec(),
         None,
         Some(Box::new(filter)),
@@ -252,7 +252,7 @@ fn fst_bounds_crash_with_cursor_seek() -> Result<(), Box<dyn Error>> {
     
     let filter = LazyTagFilter::from_config(&tag_config);
     let mut stream = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         "prefix/deep/".as_bytes().to_vec(),
         None,
         Some(Box::new(filter)),
@@ -274,7 +274,7 @@ fn fst_bounds_crash_with_cursor_seek() -> Result<(), Box<dyn Error>> {
     // Create a new stream and seek to the cursor position
     let filter2 = LazyTagFilter::from_config(&tag_config);
     let mut stream2 = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         "prefix/deep/".as_bytes().to_vec(), 
         None,
         Some(Box::new(filter2)),
@@ -413,7 +413,7 @@ fn fst_bounds_real_world_simulation() -> Result<(), Box<dyn Error>> {
     
     let filter = LazyTagFilter::from_config(&tag_config);
     let mut stream = MultiShardListStreamer::new_with_filter(
-        &db.shards(),
+        &db,
         "s3://rafagalante/".as_bytes().to_vec(),
         None,
         Some(Box::new(filter)),
@@ -498,7 +498,7 @@ fn fst_bounds_direct_simulation() -> Result<(), Box<dyn Error>> {
     db.load_tag_index()?;
 
     // First, create a streamer WITHOUT filtering to establish transitions with all 3 shards
-    let mut streamer = MultiShardListStreamer::new(db.shards(), Vec::new(), None);
+    let mut streamer = MultiShardListStreamer::new(&db, Vec::new(), None);
     
     // Get some results to populate the transition cache with all 3 shards
     let _first = streamer.next();  // This should populate frame.trans with 3 shards (0, 1, 2)
@@ -512,7 +512,7 @@ fn fst_bounds_direct_simulation() -> Result<(), Box<dyn Error>> {
     // Create new filtered streamer instead of using old bitmap methods
     let filter = LazyTagFilter::from_config(&tag_config);
     let mut filtered_streamer = MultiShardListStreamer::new_with_filter(
-        db.shards(),
+        &db,
         Vec::new(),
         None,
         Some(Box::new(filter)),
@@ -624,7 +624,7 @@ fn fst_bounds_crash_minimal_repro() -> Result<(), Box<dyn Error>> {
     
     // First, start an unfiltered streamer to populate transition cache with all shard indices
     let mut streamer = MultiShardListStreamer::new(
-        db.shards(),
+        &db,
         b"prefix/alpha/".to_vec(),
         None
     );
@@ -644,7 +644,7 @@ fn fst_bounds_crash_minimal_repro() -> Result<(), Box<dyn Error>> {
     // Create new filtered streamer instead of using old bitmap methods  
     let filter = LazyTagFilter::from_config(&tag_config);
     let mut filtered_streamer = MultiShardListStreamer::new_with_filter(
-        db.shards(),
+        &db,
         b"prefix/alpha/".to_vec(),
         None,
         Some(Box::new(filter)),
@@ -742,7 +742,7 @@ fn fst_bounds_crash_shell_direct_approach() -> Result<(), Box<dyn Error>> {
     
     eprintln!("Creating filtered streamer directly like shell does...");
     let mut stream = MultiShardListStreamer::new_with_filter(
-        db.shards(),
+        &db,
         "prefix/alpha/".as_bytes().to_vec(),
         None,
         Some(Box::new(filter)),

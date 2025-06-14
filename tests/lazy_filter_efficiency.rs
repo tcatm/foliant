@@ -4,6 +4,7 @@ use foliant::multi_list::{
     MultiShardListStreamer, LazyTagFilter, TagFilterConfig, FilterComposition
 };
 use foliant::payload_store::{CborPayloadCodec, PayloadStoreVersion};
+use foliant::shard_provider::AllShardsProvider;
 use foliant::{DatabaseBuilder, TagMode, Streamer};
 use tempfile::tempdir;
 use std::time::Instant;
@@ -79,8 +80,9 @@ fn test_lazy_vs_eager_filter_efficiency() {
     let eager_filter = LazyTagFilter::from_config(&tag_config);
     let eager_filter_time = start_eager.elapsed();
     
+    let provider = AllShardsProvider::new(&shards);
     let mut eager_streamer = MultiShardListStreamer::new_with_filter(
-        &shards,
+        &provider,
         prefix.clone(),
         None,
         Some(Box::new(eager_filter)),
@@ -96,8 +98,9 @@ fn test_lazy_vs_eager_filter_efficiency() {
     let start_lazy = Instant::now();
     let lazy_filter = LazyTagFilter::from_config(&tag_config);
     
+    let provider2 = AllShardsProvider::new(&shards);
     let mut lazy_streamer = MultiShardListStreamer::new_with_lazy_filter(
-        &shards,
+        &provider2,
         prefix.clone(),
         None,
         Some(Box::new(lazy_filter)),
@@ -143,8 +146,9 @@ fn test_composed_lazy_filters() {
     // Compose filters using monoid-like operation
     let composed = tag_filter1.and_then(tag_filter2);
     
+    let provider = AllShardsProvider::new(&shards);
     let mut streamer = MultiShardListStreamer::new_with_lazy_filter(
-        &shards,
+        &provider,
         b"users/".to_vec(),
         None,
         Some(Box::new(composed)),
@@ -171,8 +175,9 @@ fn test_lazy_filter_with_non_matching_prefix() {
         TagMode::And,
     );
     
+    let provider = AllShardsProvider::new(&shards);
     let mut streamer = MultiShardListStreamer::new_with_lazy_filter(
-        &shards,
+        &provider,
         b"nonexistent/".to_vec(),
         None,
         Some(Box::new(lazy_filter)),

@@ -8,8 +8,10 @@ pub mod multi_list;
 pub mod payload_store;
 pub use payload_store::{convert_v2_to_v3_inplace, PayloadStoreBuilderV2, PayloadStoreV2};
 mod shard;
+pub mod shard_provider;
 mod streamer;
 mod tag_index;
+mod tag_list;
 
 pub use builder::DatabaseBuilder;
 pub use builder::SegmentInfo;
@@ -21,6 +23,7 @@ pub use error::{IndexError, Result};
 pub use shard::Shard;
 pub use streamer::{PrefixStream, Streamer};
 pub use tag_index::{TagIndex, TagIndexBuilder};
+pub use tag_list::TagStreamer;
 mod tantivy_index;
 pub use tantivy_index::{TantivyIndex, TantivyIndexBuilder};
 

@@ -171,7 +171,7 @@ async fn list_keys(
                     Box::new(LazyTagFilter::from_config(&cfg))
                 });
                 MultiShardListStreamer::resume_with_filter(
-                    state.db.shards(),
+                    &*state.db,
                     prefix_bytes.clone(),
                     delim.map(|c| c as u8),
                     bytes,
@@ -192,7 +192,7 @@ async fn list_keys(
             Box::new(LazyTagFilter::from_config(&cfg))
         });
         MultiShardListStreamer::new_with_filter(
-            state.db.shards(),
+            &*state.db,
             prefix_bytes.clone(),
             delim.map(|c| c as u8),
             tag_filter,

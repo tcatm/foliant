@@ -45,7 +45,7 @@ fn test_frame_rebuild_optimization() {
     ));
     
     let mut streamer = MultiShardListStreamer::new_with_filter(
-        db.shards(),
+        &db,
         prefix.as_bytes().to_vec(),
         Some(b'/'),
         Some(filter),
@@ -68,7 +68,7 @@ fn test_frame_rebuild_optimization() {
     // Compare with no filter
     let start = Instant::now();
     let _streamer_no_filter = MultiShardListStreamer::new(
-        db.shards(),
+        &db,
         prefix.as_bytes().to_vec(),
         Some(b'/'),
     );

@@ -1,4 +1,5 @@
 mod tags;
+mod prefix_index;
 
 use std::io;
 use std::path::Path;
@@ -12,20 +13,30 @@ use serde::de::DeserializeOwned;
 use crate::entry::Entry;
 use crate::error::{IndexError, Result};
 use crate::multi_list::MultiShardListStreamer;
+use crate::shard_provider::ShardProvider;
 use crate::payload_store::{CborPayloadCodec, PayloadCodec};
 use crate::shard::Shard;
 use crate::streamer::{PrefixStream, Streamer as DbStreamer};
+use self::prefix_index::PrefixIndex;
 
 
 /// Filter shards to only those that contain the given prefix
-fn shards_with_prefix<'a, V, C>(shards: &'a [Shard<V, C>], prefix: &[u8]) -> Vec<&'a Shard<V, C>>
+fn shards_with_prefix<'a, V, C>(
+    database: &'a Database<V, C>, 
+    prefix: &[u8]
+) -> Vec<&'a Shard<V, C>>
 where
     V: DeserializeOwned,
     C: PayloadCodec,
 {
-    shards
+    // Get candidate shard indices from prefix index
+    let candidate_bitmap = database.prefix_index.find_candidate_shards(prefix);
+    
+    // Now verify each candidate by walking its FST
+    candidate_bitmap
         .iter()
-        .filter(|shard| {
+        .filter_map(|idx| {
+            let shard = &database.shards[idx as usize];
             let fst = shard.fst.as_fst();
             let mut node = fst.root();
             for &byte in prefix {
@@ -33,10 +44,10 @@ where
                     let tr = node.transition(idx);
                     node = fst.node(tr.addr);
                 } else {
-                    return false;
+                    return None;
                 }
             }
-            true
+            Some(shard)
         })
         .collect()
 }
@@ -73,6 +84,7 @@ where
     C: PayloadCodec,
 {
     shards: Vec<Shard<V, C>>,
+    prefix_index: PrefixIndex,
 }
 
 /// Mode for combining multiple tags in `list_by_tags`.
@@ -91,12 +103,17 @@ where
 {
     /// Create an empty database (no shards).
     pub fn new() -> Self {
-        Database { shards: Vec::new() }
+        Database { 
+            shards: Vec::new(),
+            prefix_index: PrefixIndex::new(),
+        }
     }
 
     /// Add one shard by specifying the full `.idx` file path and corresponding `.payload` file.
     pub fn add_shard<P: AsRef<Path>>(&mut self, idx_path: P) -> Result<()> {
         let shard = Shard::<V, C>::open(idx_path.as_ref())?;
+        let shard_idx = self.shards.len();
+        self.prefix_index.add_shard(&shard, shard_idx);
         self.shards.push(shard);
         Ok(())
     }
@@ -119,7 +136,9 @@ where
     ) -> Result<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>> {
         let delim_u8 = delimiter.map(|c| c as u8);
         let prefix_buf = prefix.as_bytes().to_vec();
-        let ms = MultiShardListStreamer::new(&self.shards, prefix_buf.clone(), delim_u8);
+        
+        // MultiShardListStreamer will use the prefix index to filter shards
+        let ms = MultiShardListStreamer::new(self, prefix_buf.clone(), delim_u8);
         Ok(Box::new(ms)
             as Box<
                 dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a,
@@ -170,7 +189,7 @@ where
     ) -> Result<Box<dyn DbStreamer<Item = Entry<V>, Cursor = Vec<u8>> + 'a>> {
         // Pre-walk prefix across shards to skip those without matching keys
         let shards_to_query: Vec<&Shard<V, C>> = if let Some(pref) = prefix {
-            shards_with_prefix(&self.shards, pref.as_bytes())
+            shards_with_prefix(self, pref.as_bytes())
         } else {
             self.shards.iter().collect()
         };
@@ -252,5 +271,29 @@ where
     /// Mutable access to shards for attaching tag indices.
     pub fn shards_mut(&mut self) -> &mut [Shard<V, C>] {
         &mut self.shards
+    }
+    
+    /// Get a reference to the prefix index
+    pub fn prefix_index(&self) -> &PrefixIndex {
+        &self.prefix_index
+    }
+    
+    /// Get candidate shards for a given prefix using the prefix index
+    pub fn get_candidate_shards_for_prefix(&self, prefix: &[u8]) -> roaring::RoaringBitmap {
+        self.prefix_index.find_candidate_shards(prefix)
+    }
+}
+
+impl<V, C> ShardProvider<V, C> for Database<V, C>
+where
+    V: DeserializeOwned,
+    C: PayloadCodec,
+{
+    fn get_all_shards(&self) -> &[Shard<V, C>] {
+        &self.shards
+    }
+    
+    fn get_shards_for_prefix(&self, prefix: &[u8]) -> roaring::RoaringBitmap {
+        self.get_candidate_shards_for_prefix(prefix)
     }
 }
