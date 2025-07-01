@@ -10,7 +10,7 @@ use foliant::Streamer;
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
-use foliant::multi_list::{MultiShardListStreamer, LazyTagFilter};
+use foliant::multi_list::{MultiShardListStreamer, LazyTagFilter, LazySearchFilter, ComposedFilter};
 use foliant::{load_db, Database, Entry, TagMode, TagFilterConfig};
 
 /// Command-line options for the HTTP server.
@@ -85,6 +85,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load the database (single shard or directory), then attach any .tags indexes
     let mut db = load_db::<serde_json::Value, _>(&cfg.index, None)?;
     db.load_tag_index()?;
+    
+    // Check if search indexes are available
+    let has_search_index = db.shards().iter().any(|shard| shard.has_search_index());
+    if !has_search_index {
+        tracing::info!("No search indexes found. Search functionality will be disabled.");
+    } else {
+        tracing::info!("Search indexes loaded successfully.");
+    }
 
     let state = AppState {
         db: Arc::new(db),
@@ -118,6 +126,10 @@ struct KeysParams {
     exclude_tags: Option<String>,
     /// Tag combination mode: "and" or "or" (default: "and")
     mode: Option<String>,
+    /// Comma-separated list of search terms to include (AND mode)
+    search: Option<String>,
+    /// Comma-separated list of search terms to exclude
+    exclude_search: Option<String>,
 }
 
 async fn list_keys(
@@ -163,19 +175,60 @@ async fn list_keys(
         None
     };
     
+    // Parse search filtering parameters
+    let search_config = if params.search.is_some() || params.exclude_search.is_some() {
+        let include_terms: Vec<String> = params
+            .search
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.trim().to_string())
+            .collect();
+        
+        let exclude_terms: Vec<String> = params
+            .exclude_search
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.trim().to_string())
+            .collect();
+        
+        Some((include_terms, exclude_terms))
+    } else {
+        None
+    };
+    
+    // Build combined filter if needed
+    let combined_filter: Option<Box<dyn foliant::multi_list::LazyShardFilter<_, _>>> = 
+        match (tag_config, search_config) {
+            (Some(tag_cfg), Some((include_terms, exclude_terms))) => {
+                // Both tag and search filters
+                let mut filters: Vec<Box<dyn foliant::multi_list::LazyShardFilter<_, _>>> = vec![];
+                filters.push(Box::new(LazyTagFilter::from_config(&tag_cfg)));
+                filters.push(Box::new(LazySearchFilter::with_terms(include_terms, exclude_terms)));
+                Some(Box::new(ComposedFilter::new(filters)))
+            },
+            (Some(tag_cfg), None) => {
+                // Only tag filter
+                Some(Box::new(LazyTagFilter::from_config(&tag_cfg)))
+            },
+            (None, Some((include_terms, exclude_terms))) => {
+                // Only search filter
+                Some(Box::new(LazySearchFilter::with_terms(include_terms, exclude_terms)))
+            },
+            (None, None) => None,
+        };
+    
     // Initialize streamer - use MultiShardListStreamer with optional bitmap filter
     let stream = if let Some(cur) = params.cursor {
         match general_purpose::STANDARD.decode(cur) {
             Ok(bytes) => {
-                let tag_filter = tag_config.clone().map(|cfg| -> Box<dyn foliant::multi_list::LazyShardFilter<_, _>> {
-                    Box::new(LazyTagFilter::from_config(&cfg))
-                });
                 MultiShardListStreamer::resume_with_filter(
                     &*state.db,
                     prefix_bytes.clone(),
                     delim.map(|c| c as u8),
                     bytes,
-                    tag_filter,
+                    combined_filter,
                 )
             },
             Err(e) => {
@@ -188,14 +241,11 @@ async fn list_keys(
             }
         }
     } else {
-        let tag_filter = tag_config.clone().map(|cfg| -> Box<dyn foliant::multi_list::LazyShardFilter<_, _>> {
-            Box::new(LazyTagFilter::from_config(&cfg))
-        });
         MultiShardListStreamer::new_with_filter(
             &*state.db,
             prefix_bytes.clone(),
             delim.map(|c| c as u8),
-            tag_filter,
+            combined_filter,
         )
     };
     

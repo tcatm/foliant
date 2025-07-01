@@ -92,6 +92,27 @@ impl SearchIndex {
             return Ok(Vec::new());
         }
         
+        // For short queries, we need to search for the query as a substring
+        if grams.len() == 1 && grams[0].contains('\0') {
+            // Get the unpadded query
+            let unpadded = grams[0].trim_end_matches('\0');
+            
+            // For short queries, we need to find all documents containing the query
+            // This includes:
+            // 1. Exact matches of short keys (padded gram matches)
+            // 2. Substring matches within longer keys
+            let mut union_bitmap = RoaringBitmap::new();
+            
+            // Check for exact match of the padded gram (for short keys like "世界")
+            if let Some(offset) = self.grams_fst.get(grams[0].as_bytes()) {
+                let bitmap = self.read_posting_list(offset as usize)?;
+                union_bitmap |= bitmap;
+            }
+            
+            // Find all grams that contain the query as a substring
+            return self.search_substring(unpadded, union_bitmap);
+        }
+        
         // Get posting lists for each gram
         let mut posting_lists = Vec::new();
         
@@ -117,6 +138,32 @@ impl SearchIndex {
         
         // Convert to doc IDs
         Ok(result.iter().map(|id| id as u64).collect())
+    }
+    
+    /// Search for documents containing a substring by checking all grams
+    fn search_substring(&self, query: &str, mut union_bitmap: RoaringBitmap) -> Result<Vec<u64>> {
+        use fst::Streamer;
+        
+        // We need to find all grams that contain our query as a substring
+        // Since FST doesn't support substring search, we'll iterate through all grams
+        // and check if they contain our query
+        let mut stream = self.grams_fst.stream();
+        
+        while let Some((gram_bytes, offset)) = stream.next() {
+            if let Ok(gram_str) = std::str::from_utf8(gram_bytes) {
+                // Skip null-padded grams
+                let gram_trimmed = gram_str.trim_end_matches('\0');
+                
+                // Check if this gram contains our query
+                if gram_trimmed.contains(query) {
+                    let bitmap = self.read_posting_list(offset as usize)?;
+                    union_bitmap |= bitmap;
+                }
+            }
+        }
+        
+        // Convert to doc IDs
+        Ok(union_bitmap.iter().map(|id| id as u64).collect())
     }
     
     /// Read a posting list from the given offset in the postings file.
@@ -158,21 +205,32 @@ pub(crate) fn normalize_text_unicode(text: &str) -> String {
 fn extract_ngrams_unicode(text: &str, n: usize) -> Vec<String> {
     let graphemes: Vec<&str> = text.graphemes(true).collect();
     
-    if graphemes.len() < n {
+    if graphemes.is_empty() {
         return Vec::new();
     }
     
     let mut grams = Vec::new();
     let mut seen = HashMap::new();
     
-    for window in graphemes.windows(n) {
-        let gram = window.join("");
-        // Deduplicate
-        let count = seen.entry(gram.clone()).or_insert(0);
-        if *count == 0 {
-            grams.push(gram);
+    // If text is shorter than n, pad with null bytes to create one n-gram
+    if graphemes.len() < n {
+        let mut padded_gram = graphemes.join("");
+        // Pad with null bytes to reach n graphemes
+        for _ in graphemes.len()..n {
+            padded_gram.push('\0');
         }
-        *count += 1;
+        grams.push(padded_gram);
+    } else {
+        // Normal n-gram extraction for longer texts
+        for window in graphemes.windows(n) {
+            let gram = window.join("");
+            // Deduplicate
+            let count = seen.entry(gram.clone()).or_insert(0);
+            if *count == 0 {
+                grams.push(gram);
+            }
+            *count += 1;
+        }
     }
     
     grams
@@ -571,9 +629,9 @@ mod tests {
         let grams = extract_ngrams_unicode("aaaa", 3);
         assert_eq!(grams, vec!["aaa"]);
         
-        // Too short
+        // Too short - should return padded gram
         let grams = extract_ngrams_unicode("ab", 3);
-        assert!(grams.is_empty());
+        assert_eq!(grams, vec!["ab\0"]);
     }
     
     #[test]
@@ -583,7 +641,7 @@ mod tests {
         let normalized = normalize_text_unicode(text);
         assert_eq!(normalized, "👨‍💻");
         let grams = extract_ngrams_unicode(&normalized, 2);
-        assert!(grams.is_empty()); // Only 1 grapheme cluster
+        assert_eq!(grams, vec!["👨‍💻\0"]); // Padded to 2 graphemes
         
         // Skin tone modifiers
         let text = "👋🏽"; // Waving hand with skin tone

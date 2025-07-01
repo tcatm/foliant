@@ -303,7 +303,7 @@ fn get_key_basic() -> Result<(), Box<dyn Error>> {
         let ptr = entry.ptr().expect("entry should have a ptr");
         eprintln!("Checking entry: {:?} with ptr {}", entry, ptr);
         // Check that get_key maps the pointer back to the correct key
-        let got = db.get_key(ptr)?;
+        let got = db.get_key_from_shard(0, ptr)?;
         assert_eq!(
             got,
             Some(entry.clone()),
@@ -333,7 +333,7 @@ fn get_key_with_new_fst_segment() -> Result<(), Box<dyn Error>> {
     for entry in &entries {
         let ptr = entry.ptr().expect("entry should have a ptr");
         // Check that get_key maps the pointer back to the correct key, even across segments
-        let got = db.get_key(ptr)?;
+        let got = db.get_key_from_shard(0, ptr)?;
         assert_eq!(
             got,
             Some(entry.clone()),
@@ -375,7 +375,7 @@ fn get_key_multiple_fst_segments() -> Result<(), Box<dyn Error>> {
     let entries: Vec<Entry> = db.list("", None).unwrap().collect();
     for entry in &entries {
         let ptr = entry.ptr().expect("entry should have a ptr");
-        let got = db.get_key(ptr)?;
+        let got = db.get_key_from_shard(0, ptr)?;
         assert_eq!(
             got,
             Some(entry.clone()),

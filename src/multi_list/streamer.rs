@@ -118,6 +118,8 @@ where
     stack: Vec<FrameMulti<'a>>,
     /// Pool of spare frames for reuse to avoid allocations
     frame_pool: Vec<FrameMulti<'a>>,
+    /// Optional filter for lazy verification
+    filter: Option<Box<dyn LazyShardFilter<V, C>>>,
 }
 
 /// Walks each shard’s FST by `prefix`, keeping only those that match.
@@ -167,11 +169,12 @@ where
                 last_bytes: Vec::new(),
                 stack: Vec::new(),
                 frame_pool: Vec::new(),
+                filter: None,
             });
         }
         
         // Apply lazy filtering if provided
-        if let Some(flt) = filter {
+        if let Some(ref flt) = filter {
             // Build a mapping from old shard index to new shard index (or None if filtered out)
             let mut shard_index_map: Vec<Option<usize>> = vec![None; shard_infos.len()];
             let mut filtered_shard_infos = Vec::new();
@@ -209,6 +212,7 @@ where
                     last_bytes: Vec::new(),
                     stack: Vec::new(),
                     frame_pool: Vec::new(),
+                    filter: None,
                 });
             }
             
@@ -240,6 +244,7 @@ where
             last_bytes: Vec::new(),
             stack: vec![initial_frame],
             frame_pool: Vec::new(),
+            filter,
         };
         
         // Pre-reserve buffers
@@ -363,7 +368,15 @@ where
                         }
                     }
                     
-                    return Some(Entry::Key(key, lut_id, val));
+                    // Build entry and apply verifier if present
+                    let entry = Entry::Key(key, lut_id, val);
+                    if let Some(ref flt) = self.filter {
+                        if !flt.verify_entry(&entry) {
+                            continue;
+                        }
+                    }
+                    
+                    return Some(entry);
                 }
             }
             // 2) Build grouped transitions once, using optimized algorithm

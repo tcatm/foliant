@@ -7,7 +7,9 @@ Supported features:
 - Optional CBOR-encoded payloads extracted from JSON lines
 - Memory-mapped FST index for zero-copy, zero-allocation prefix listing
 - Grouped listings by custom delimiters
-- CLI tool with `index`, `list`, and `shell` commands
+- Substring search with n-gram indexing (supports 1-2 character queries, Unicode, case-insensitive)
+- Tag-based filtering with AND/OR modes
+- CLI tool with `index`, `list`, `shell`, and `server` commands
 
 # Table of Contents
 1. [Build & Test](#build--test)
@@ -75,6 +77,11 @@ foliant shell -i shards_dir
 ```bash
 # Once inside the shell:
 > search <query>
+
+# You can also use search filters with the ls command:
+> ls -q term1 -q term2    # Find entries containing both term1 AND term2
+> ls -q jpg -! png        # Find entries with "jpg" but not "png"
+> ls prefix/ -q search    # Combine prefix and search
 ```
 
 ### Generate a tag index for an existing database
@@ -84,8 +91,30 @@ foliant tag-index -i data.idx --tag-field tags
 
 ### Generate a search index for an existing database
 ```bash
-foliant tantivy-index -i data.idx
+foliant search-index -i data.idx
 ```
+
+The search index enables substring search functionality, including support for:
+- Single and two-character queries (e.g., searching for "a" or "pg")  
+- Unicode support (emojis, Chinese characters, etc.)
+- Case-insensitive and accent-insensitive search
+
+### Run the HTTP server
+```bash
+foliant server -i data.idx --addr 127.0.0.1:3000
+```
+
+The server provides a REST API with the following endpoints:
+- `GET /keys` - List keys with optional filters
+  - `?prefix=foo/` - Filter by prefix
+  - `?delim=/` - Group by delimiter
+  - `?search=term1,term2` - Search for entries containing all terms
+  - `?exclude_search=term3` - Exclude entries containing terms
+  - `?include_tags=tag1,tag2` - Filter by tags
+  - `?limit=100` - Limit results
+  - `?cursor=...` - Pagination cursor
+- `GET /tags` - List all tags
+- `GET /tags/counts` - List tags with counts
 
 When values are present, they are shown after the key in dim ANSI color, serialized as one-line JSON.
 

@@ -8,6 +8,7 @@
 use roaring::RoaringBitmap;
 use serde::de::DeserializeOwned;
 use crate::shard::Shard;
+use crate::Entry;
 use crate::payload_store::PayloadCodec;
 use std::error::Error;
 
@@ -27,6 +28,16 @@ where
     /// - `Ok(None)` - Shard has no matches, can be excluded
     /// - `Err(_)` - Error computing bitmap
     fn compute_bitmap(&self, shard: &Shard<V, C>) -> Result<Option<RoaringBitmap>, Box<dyn Error>>;
+    
+    /// Verify if an entry passes this filter's criteria.
+    /// 
+    /// This is called after bitmap filtering for filters that need
+    /// to inspect entry contents (e.g., substring search).
+    /// 
+    /// Default implementation returns true (no additional verification needed).
+    fn verify_entry(&self, _entry: &Entry<V>) -> bool {
+        true
+    }
     
     /// Get a debug representation of this filter for logging
     fn debug_name(&self) -> &str;
@@ -124,6 +135,11 @@ where
         }
         
         Ok(result)
+    }
+    
+    fn verify_entry(&self, entry: &Entry<V>) -> bool {
+        // All filters must pass verification
+        self.filters.iter().all(|filter| filter.verify_entry(entry))
     }
     
     fn debug_name(&self) -> &str {

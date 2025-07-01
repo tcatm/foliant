@@ -18,7 +18,7 @@ use std::rc::Rc;
 
 use ctrlc;
 use foliant::{Database, Entry, Streamer, TagMode};
-use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, LazyTagFilter};
+use foliant::multi_list::{MultiShardListStreamer, TagFilterConfig, LazyTagFilter, LazySearchFilter, ComposedFilter};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     mpsc::{channel, Receiver},
@@ -29,18 +29,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Help text for interactive shell commands and Ctrl-C behavior.
 const HELP_TEXT: &str = "\
 Available commands:
-  ls [-rck] [-d DELIM] [prefix] [#tag1 #tag2 !exclude1 ...]   list entries
+  ls [-rck] [-d DELIM] [prefix] [#tag1 !tag2 ...] [-q term1 -q term2 -! excl1 ...]
     -r       recursive (no delimiter grouping)
     -c       only directories (common prefixes)
     -k       only keys
     -d <c>   one-off custom delimiter character
-    #tag     include entries with tag (AND mode by default)
+    #tag     include entries with tag (AND mode)
     !tag     exclude entries with tag
+    -q <str> include entries containing substring (AND mode)
+    -! <str> exclude entries containing substring
   cd [dir]                        change directory
-  find <regex>                    search entries matching regex
   search <query>                  substring search using n-gram index
   tags                            list all tags with counts
-  val <id>                        lookup key by raw pointer ID
+  val <id> [shard]                lookup key by raw pointer ID
+  val <shard>:<id>                (use shard index when multiple shards)
   pwd                             print working directory
   exit, quit                      exit shell
   help                            show this help
@@ -123,20 +125,20 @@ fn handle_print_result(res: Result<PrintResult, Box<dyn std::error::Error>>) {
     }
 }
 
-struct ShellState<V: DeserializeOwned> {
+struct ShellState<V: DeserializeOwned + 'static> {
     db: Database<V>,
     delim: char,
     cwd: String,
     debug: bool,
 }
 
-struct ShellHelper<V: DeserializeOwned> {
+struct ShellHelper<V: DeserializeOwned + 'static> {
     state: Rc<RefCell<ShellState<V>>>,
 }
 
-impl<V: DeserializeOwned> Helper for ShellHelper<V> {}
+impl<V: DeserializeOwned + 'static> Helper for ShellHelper<V> {}
 
-impl<V: DeserializeOwned> Completer for ShellHelper<V> {
+impl<V: DeserializeOwned + 'static> Completer for ShellHelper<V> {
     type Candidate = Pair;
     fn complete(
         &self,
@@ -150,14 +152,14 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
         let mut candidates = Vec::new();
         if start == 0 {
             let cmds = [
-                "cd", "ls", "find", "search", "pwd", "val", "tags", "shards", "exit", "quit",
+                "cd", "ls", "search", "pwd", "val", "tags", "shards", "exit", "quit",
                 "help",
             ];
             for &cmd in &cmds {
                 if cmd.starts_with(word) {
                     // Commands that take an argument get a trailing space
                     let replacement =
-                        if ["cd", "ls", "find", "search", "val"].contains(&cmd) {
+                        if ["cd", "ls", "search", "val"].contains(&cmd) {
                             format!("{} ", cmd)
                         } else {
                             cmd.to_string()
@@ -281,17 +283,17 @@ impl<V: DeserializeOwned> Completer for ShellHelper<V> {
 }
 
 // Disable inline hinting to avoid blocking on large trees
-impl<V: DeserializeOwned> Hinter for ShellHelper<V> {
+impl<V: DeserializeOwned + 'static> Hinter for ShellHelper<V> {
     // No inline hints
     type Hint = String;
 }
 // Use default highlighter (no-op)
-impl<V: DeserializeOwned> Highlighter for ShellHelper<V> {}
+impl<V: DeserializeOwned + 'static> Highlighter for ShellHelper<V> {}
 
-impl<V: DeserializeOwned> Validator for ShellHelper<V> {}
+impl<V: DeserializeOwned + 'static> Validator for ShellHelper<V> {}
 
 /// Internal helper to process one shell command; returns true to exit shell
-fn handle_cmd<V: DeserializeOwned + Serialize>(
+fn handle_cmd<V: DeserializeOwned + Serialize + 'static>(
     state: &Rc<RefCell<ShellState<V>>>,
     help_text: &str,
     abort_rx: Option<&Receiver<()>>,
@@ -321,6 +323,8 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
             let mut prefix_str = String::new();
             let mut include_tags = Vec::new();
             let mut exclude_tags = Vec::new();
+            let mut include_queries = Vec::new();
+            let mut exclude_queries = Vec::new();
             let mut prefix_set = false;
             
             while let Some(tok) = parts.next() {
@@ -333,6 +337,20 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                         }
                     } else {
                         println!("Flag -d requires a delimiter argument");
+                    }
+                    continue;
+                } else if tok == "-q" {
+                    if let Some(query) = parts.next() {
+                        include_queries.push(query.to_string());
+                    } else {
+                        println!("Flag -q requires a query argument");
+                    }
+                    continue;
+                } else if tok == "-!" {
+                    if let Some(query) = parts.next() {
+                        exclude_queries.push(query.to_string());
+                    } else {
+                        println!("Flag -! requires a query argument");
                     }
                     continue;
                 } else if tok.starts_with("-d") {
@@ -405,20 +423,85 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
                 None
             };
             
-            // Build a lazy tag filter if a TagFilterConfig was specified
-            let tag_filter: Option<Box<dyn foliant::multi_list::LazyShardFilter<_, _>>> = if let Some(cfg) = tag_config.clone() {
-                Some(Box::new(LazyTagFilter::from_config(&cfg)))
+            // Try to create composed filter if both search and tag filters are needed
+            let has_search_filter = !include_queries.is_empty() || !exclude_queries.is_empty();
+            let has_tag_filter = tag_config.is_some();
+            
+            let filter: Option<Box<dyn foliant::multi_list::LazyShardFilter<V, _>>> = if has_search_filter && has_tag_filter {
+                // Check if search index exists
+                let has_search_index = state_ref.db.shards().iter().any(|s| s.has_search_index());
+                if !has_search_index && has_search_filter {
+                    println!("Warning: No search index found. Run 'foliant build-search' to enable search.");
+                }
+                
+                // Try to compose both filters
+                let mut filters: Vec<Box<dyn foliant::multi_list::LazyShardFilter<V, _>>> = Vec::new();
+                
+                if has_search_index && has_search_filter {
+                    // Create search filter with multiple included/excluded terms
+                    let search_filter = if include_queries.is_empty() && exclude_queries.len() == 1 {
+                        // Simple exclusion filter
+                        LazySearchFilter::new("".to_string())
+                            .exclude(exclude_queries[0].clone())
+                    } else if include_queries.len() == 1 && exclude_queries.is_empty() {
+                        // Simple inclusion filter
+                        LazySearchFilter::new(include_queries[0].clone())
+                    } else {
+                        // Complex filter with multiple terms
+                        LazySearchFilter::with_terms(include_queries.clone(), exclude_queries.clone())
+                    };
+                    filters.push(Box::new(search_filter) as Box<dyn foliant::multi_list::LazyShardFilter<V, _>>);
+                }
+                
+                if let Some(cfg) = tag_config.clone() {
+                    filters.push(Box::new(LazyTagFilter::from_config(&cfg)) as Box<dyn foliant::multi_list::LazyShardFilter<V, _>>);
+                }
+                
+                // Create the appropriate filter
+                if filters.len() > 1 {
+                    // Use ComposedFilter for multiple filters
+                    Some(Box::new(ComposedFilter::new(filters)) as Box<dyn foliant::multi_list::LazyShardFilter<V, _>>)
+                } else if filters.len() == 1 {
+                    // Use the single filter
+                    filters.into_iter().next()
+                } else {
+                    None
+                }
+            } else if has_search_filter {
+                // Only search filter
+                let has_search_index = state_ref.db.shards().iter().any(|s| s.has_search_index());
+                if !has_search_index {
+                    println!("Warning: No search index found. Run 'foliant build-search' to enable search.");
+                    None
+                } else {
+                    // Create search filter with multiple included/excluded terms
+                    let search_filter = if include_queries.is_empty() && exclude_queries.len() == 1 {
+                        // Simple exclusion filter
+                        LazySearchFilter::new("".to_string())
+                            .exclude(exclude_queries[0].clone())
+                    } else if include_queries.len() == 1 && exclude_queries.is_empty() {
+                        // Simple inclusion filter
+                        LazySearchFilter::new(include_queries[0].clone())
+                    } else {
+                        // Complex filter with multiple terms
+                        LazySearchFilter::with_terms(include_queries, exclude_queries)
+                    };
+                    Some(Box::new(search_filter) as Box<dyn foliant::multi_list::LazyShardFilter<V, _>>)
+                }
+            } else if let Some(cfg) = tag_config {
+                // Only tag filter
+                Some(Box::new(LazyTagFilter::from_config(&cfg)) as Box<dyn foliant::multi_list::LazyShardFilter<V, _>>)
             } else {
                 None
             };
 
-            // Use MultiShardListStreamer with an optional generic bitmap filter
-            let mut stream: Box<dyn Streamer<Item = Entry<_>, Cursor = Vec<u8>>> = if tag_filter.is_some() {
+            // Use MultiShardListStreamer with optional filter
+            let mut stream: Box<dyn Streamer<Item = Entry<_>, Cursor = Vec<u8>>> = if let Some(flt) = filter {
                 match MultiShardListStreamer::new_with_filter(
                     &state_ref.db,
                     list_prefix.as_bytes().to_vec(),
                     list_delim.map(|c| c as u8),
-                    tag_filter,
+                    Some(flt),
                 ) {
                     Ok(s) => Box::new(s),
                     Err(e) => {
@@ -489,37 +572,6 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
             }
             Ok(false)
         }
-        "find" => {
-            let pattern = match parts.next() {
-                Some(p) => p,
-                None => {
-                    println!("Usage: find <regex>");
-                    return Ok(false);
-                }
-            };
-            let state_ref = state.borrow();
-            let cwd_owned = state_ref.cwd.clone();
-            let prefix_opt = if cwd_owned.is_empty() {
-                None
-            } else {
-                Some(cwd_owned.as_str())
-            };
-            let mut stream = match state_ref.db.grep(prefix_opt, pattern) {
-                Ok(s) => s,
-                Err(e) => {
-                    println!("Error running find: {}", e);
-                    return Ok(false);
-                }
-            };
-            handle_print_result(print_entries(
-                cwd_owned.as_str(),
-                &mut stream,
-                false,
-                true,
-                abort_rx,
-            ));
-            Ok(false)
-        }
         "search" => {
             let query = match parts.next() {
                 Some(q) => q,
@@ -530,12 +582,19 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
             };
             let state_ref = state.borrow();
             let cwd_owned = state_ref.cwd.clone();
-            let prefix_opt = if cwd_owned.is_empty() {
-                None
-            } else {
-                Some(cwd_owned.as_str())
-            };
-            let mut stream = match state_ref.db.search(prefix_opt, query) {
+            
+            // Check if search index exists
+            let has_search_index = state_ref.db.shards().iter().any(|s| s.has_search_index());
+            if !has_search_index {
+                println!("Warning: No search index found. Run 'foliant build-search' to enable search.");
+                return Ok(false);
+            }
+            
+            // Create search filter
+            let filter: Box<dyn foliant::multi_list::LazyShardFilter<V, _>> = 
+                Box::new(LazySearchFilter::new(query.to_string()));
+            
+            let mut stream = match state_ref.db.list_with_filter(&cwd_owned, None, filter) {
                 Ok(s) => s,
                 Err(e) => {
                     println!("Error running search: {}", e);
@@ -555,26 +614,93 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
             let id_str = match parts.next() {
                 Some(i) => i,
                 None => {
-                    println!("Usage: val <numeric_id>");
+                    let shard_count = state.borrow().db.shards().len();
+                    if shard_count > 1 {
+                        println!("Usage: val <numeric_id> [shard_index]");
+                        println!("       val <shard_index>:<numeric_id>");
+                        println!("Available shards: 0-{}", shard_count - 1);
+                    } else {
+                        println!("Usage: val <numeric_id>");
+                    }
                     return Ok(false);
                 }
             };
-            match id_str.parse::<u64>() {
-                Ok(id) => match state.borrow().db.get_key(id)? {
-                    Some(Entry::Key(key, ptr, val_opt)) => {
-                        if let Some(val) = val_opt {
-                            let val_str = serde_json::to_string(&val)?;
-                            println!(
-                                "📄 {} \x1b[90m#{}\x1b[0m \x1b[2m{}\x1b[0m",
-                                key, ptr, val_str
-                            );
-                        } else {
-                            println!("📄 {} \x1b[90m#{}\x1b[0m", key, ptr);
+            
+            let state_ref = state.borrow();
+            let shard_count = state_ref.db.shards().len();
+            
+            // Parse input - could be "id" or "shard:id" or "id shard"
+            let (shard_idx, ptr) = if let Some((shard_str, id_str)) = id_str.split_once(':') {
+                // Format: "shard:id"
+                match (shard_str.parse::<usize>(), id_str.parse::<u64>()) {
+                    (Ok(s), Ok(id)) => (Some(s), id),
+                    _ => {
+                        println!("Invalid format. Use: val <shard>:<id>");
+                        return Ok(false);
+                    }
+                }
+            } else if let Ok(id) = id_str.parse::<u64>() {
+                // Check if there's a second argument for shard
+                if let Some(shard_str) = parts.next() {
+                    match shard_str.parse::<usize>() {
+                        Ok(s) => (Some(s), id),
+                        Err(_) => {
+                            println!("Invalid shard index: {}", shard_str);
+                            return Ok(false);
                         }
                     }
-                    _ => println!("No key found for id {}", id),
-                },
-                Err(_) => println!("Usage: val <numeric_id>"),
+                } else {
+                    (None, id)
+                }
+            } else {
+                println!("Invalid ID format");
+                return Ok(false);
+            };
+            
+            // Get the entry
+            let entry_opt = if let Some(shard) = shard_idx {
+                if shard >= shard_count {
+                    println!("Shard index {} out of range (0-{})", shard, shard_count - 1);
+                    return Ok(false);
+                }
+                state_ref.db.get_key_from_shard(shard, ptr)?
+            } else if shard_count == 1 {
+                // If only one shard, default to shard 0
+                state_ref.db.get_key_from_shard(0, ptr)?
+            } else {
+                // Multiple shards require explicit shard index
+                println!("Multiple shards loaded. Please specify shard index:");
+                println!("  val <id> <shard>");
+                println!("  val <shard>:<id>");
+                println!("Available shards: 0-{}", shard_count - 1);
+                return Ok(false);
+            };
+            
+            match entry_opt {
+                Some(Entry::Key(key, actual_ptr, val_opt)) => {
+                    let shard_info = if let Some(s) = shard_idx {
+                        format!(" \x1b[93m[shard {}]\x1b[0m", s)
+                    } else {
+                        String::new()
+                    };
+                    
+                    if let Some(val) = val_opt {
+                        let val_str = serde_json::to_string(&val)?;
+                        println!(
+                            "📄 {} \x1b[90m#{}\x1b[0m{} \x1b[2m{}\x1b[0m",
+                            key, actual_ptr, shard_info, val_str
+                        );
+                    } else {
+                        println!("📄 {} \x1b[90m#{}\x1b[0m{}", key, actual_ptr, shard_info);
+                    }
+                }
+                _ => {
+                    if let Some(s) = shard_idx {
+                        println!("No key found for id {} in shard {}", ptr, s);
+                    } else {
+                        println!("No key found for id {}", ptr);
+                    }
+                }
             }
             Ok(false)
         }
@@ -627,7 +753,7 @@ fn handle_cmd<V: DeserializeOwned + Serialize>(
     result
 }
 
-pub fn run_shell<V: DeserializeOwned + Serialize>(
+pub fn run_shell<V: DeserializeOwned + Serialize + 'static>(
     db: Database<V>,
     delim: char,
     debug: bool,
@@ -711,7 +837,7 @@ pub fn run_shell<V: DeserializeOwned + Serialize>(
 }
 
 /// Execute a single shell command non-interactively.
-pub fn run_shell_commands<V: DeserializeOwned + Serialize>(
+pub fn run_shell_commands<V: DeserializeOwned + Serialize + 'static>(
     db: Database<V>,
     delim: char,
     debug: bool,

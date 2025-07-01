@@ -1,5 +1,6 @@
 use foliant::payload_store::PAYLOAD_STORE_VERSION_V3;
 use foliant::{Database, DatabaseBuilder, Entry, Streamer, SearchIndexBuilder};
+use foliant::multi_list::{LazySearchFilter, LazyShardFilter};
 use serde_json::Value;
 use std::error::Error;
 use tempfile::tempdir;
@@ -18,21 +19,34 @@ fn test_unicode_search_basic() -> Result<(), Box<dyn Error>> {
     builder.close()?;
     
     // Build search index
-    let mut db = Database::<Value>::open(&base)?;
-    SearchIndexBuilder::build_index(&mut db, None)?;
+    {
+        let mut db = Database::<Value>::open(&base)?;
+        SearchIndexBuilder::build_index(&mut db, None)?;
+    }
+    
+    let db = Database::<Value>::open(&base)?;
     
     // Search for "cafe" should find "café"
-    let results: Vec<Entry<Value>> = db.search(None, "cafe")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("cafe".to_string())
+    );
+    let results: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), "café");
     
     // Search for accented version
-    let results: Vec<Entry<Value>> = db.search(None, "café")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("café".to_string())
+    );
+    let results: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), "café");
     
     // Search for partial match
-    let results: Vec<Entry<Value>> = db.search(None, "résu")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("résu".to_string())
+    );
+    let results: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), "résumé");
     
@@ -53,21 +67,34 @@ fn test_unicode_search_emojis() -> Result<(), Box<dyn Error>> {
     builder.close()?;
     
     // Build search index
-    let mut db = Database::<Value>::open(&base)?;
-    SearchIndexBuilder::build_index(&mut db, None)?;
+    {
+        let mut db = Database::<Value>::open(&base)?;
+        SearchIndexBuilder::build_index(&mut db, None)?;
+    }
+    
+    let db = Database::<Value>::open(&base)?;
     
     // Search for emoji
-    let results: Vec<Entry<Value>> = db.search(None, "👋")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("👋".to_string())
+    );
+    let results: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), "hello👋world");
     
     // Search for text with emoji
-    let results: Vec<Entry<Value>> = db.search(None, "🍕piz")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("🍕piz".to_string())
+    );
+    let results: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), "🍕pizza");
     
     // Search for ZWJ sequence (family emoji)
-    let results: Vec<Entry<Value>> = db.search(None, "👨‍👩‍👧‍👦")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("👨‍👩‍👧‍👦".to_string())
+    );
+    let results: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), "👨‍👩‍👧‍👦family");
     
@@ -89,20 +116,33 @@ fn test_unicode_search_mixed_scripts() -> Result<(), Box<dyn Error>> {
     builder.close()?;
     
     // Build search index
-    let mut db = Database::<Value>::open(&base)?;
-    SearchIndexBuilder::build_index(&mut db, None)?;
+    {
+        let mut db = Database::<Value>::open(&base)?;
+        SearchIndexBuilder::build_index(&mut db, None)?;
+    }
+    
+    let db = Database::<Value>::open(&base)?;
     
     // Search for Chinese characters
-    let results: Vec<Entry<Value>> = db.search(None, "世界")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("世界".to_string())
+    );
+    let results: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
     assert_eq!(results.len(), 2); // Should find both Chinese and Japanese entries
     
     // Search for Russian (case insensitive)
-    let results: Vec<Entry<Value>> = db.search(None, "привет")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("привет".to_string())
+    );
+    let results: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), "Привет мир");
     
     // Search for flags (regional indicators)
-    let results: Vec<Entry<Value>> = db.search(None, "🇺🇸")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("🇺🇸".to_string())
+    );
+    let results: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), "🇺🇸🇯🇵🇩🇪flags");
     
@@ -124,19 +164,32 @@ fn test_unicode_search_normalization() -> Result<(), Box<dyn Error>> {
     builder.close()?;
     
     // Build search index
-    let mut db = Database::<Value>::open(&base)?;
-    SearchIndexBuilder::build_index(&mut db, None)?;
+    {
+        let mut db = Database::<Value>::open(&base)?;
+        SearchIndexBuilder::build_index(&mut db, None)?;
+    }
+    
+    let db = Database::<Value>::open(&base)?;
     
     // Search for "file" should find ligature version
-    let results: Vec<Entry<Value>> = db.search(None, "file")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("file".to_string())
+    );
+    let results: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
     assert_eq!(results.len(), 1);
     
     // Search for "flower" should find ligature version
-    let results: Vec<Entry<Value>> = db.search(None, "flower")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("flower".to_string())
+    );
+    let results: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
     assert_eq!(results.len(), 1);
     
     // Search for "hello" should find full-width version
-    let results: Vec<Entry<Value>> = db.search(None, "hello")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("hello".to_string())
+    );
+    let results: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
     assert_eq!(results.len(), 1);
     
     Ok(())
@@ -162,19 +215,32 @@ fn test_unicode_search_edge_cases() -> Result<(), Box<dyn Error>> {
     builder.close()?;
     
     // Build search index
-    let mut db = Database::<Value>::open(&base)?;
-    SearchIndexBuilder::build_index(&mut db, None)?;
+    {
+        let mut db = Database::<Value>::open(&base)?;
+        SearchIndexBuilder::build_index(&mut db, None)?;
+    }
+    
+    let db = Database::<Value>::open(&base)?;
     
     // Search for emoji with skin tone
-    let results: Vec<Entry<Value>> = db.search(None, "👋🏽")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("👋🏽".to_string())
+    );
+    let results: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
     assert_eq!(results.len(), 1);
     
     // Search for ZWJ sequence
-    let results: Vec<Entry<Value>> = db.search(None, "👨‍💻")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("👨‍💻".to_string())
+    );
+    let results: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
     assert_eq!(results.len(), 1);
     
     // Search for Hebrew
-    let results: Vec<Entry<Value>> = db.search(None, "שלום")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("שלום".to_string())
+    );
+    let results: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
     assert_eq!(results.len(), 1);
     
     Ok(())

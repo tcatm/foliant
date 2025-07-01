@@ -1,5 +1,6 @@
 use foliant::payload_store::PAYLOAD_STORE_VERSION_V3;
 use foliant::{Database, DatabaseBuilder, Entry, Streamer, SearchIndexBuilder};
+use foliant::multi_list::{LazySearchFilter, LazyShardFilter};
 use serde_json::Value;
 use std::error::Error;
 use tempfile::tempdir;
@@ -16,7 +17,13 @@ fn search_without_index_returns_empty() -> Result<(), Box<dyn Error>> {
     builder.close()?;
 
     let db = Database::<Value>::open(&base)?;
-    let results: Vec<Entry<Value>> = db.search(None, "alp")?.collect();
+    
+    // Create search filter
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("alp".to_string())
+    );
+    
+    let results: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
     assert!(
         results.is_empty(),
         "expected no search results before index build"
@@ -43,8 +50,13 @@ fn search_with_index_returns_matches() -> Result<(), Box<dyn Error>> {
     }
 
     let db = Database::<Value>::open(&base)?;
+    
     // Search for substring "alp"
-    let entries: Vec<Entry<Value>> = db.search(None, "alp")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("alp".to_string())
+    );
+    let entries: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
+    
     let mut keys: Vec<String> = entries
         .iter()
         .filter_map(|entry| match entry {
@@ -78,7 +90,10 @@ fn search_with_prefix_filters_results() -> Result<(), Box<dyn Error>> {
     let db = Database::<Value>::open(&base)?;
     
     // Search for "bar" without prefix - should find all
-    let all_entries: Vec<Entry<Value>> = db.search(None, "bar")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("bar".to_string())
+    );
+    let all_entries: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
     let all_keys: Vec<String> = all_entries
         .iter()
         .filter_map(|entry| match entry {
@@ -89,7 +104,10 @@ fn search_with_prefix_filters_results() -> Result<(), Box<dyn Error>> {
     assert_eq!(all_keys.len(), 3); // foo/bar, bar/foo, baz/bar
     
     // Search for "bar" with prefix "foo/" - should only find foo/bar
-    let prefix_entries: Vec<Entry<Value>> = db.search(Some("foo/"), "bar")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("bar".to_string())
+    );
+    let prefix_entries: Vec<Entry<Value>> = db.list_with_filter("foo/", None, filter)?.collect();
     let prefix_keys: Vec<String> = prefix_entries
         .iter()
         .filter_map(|entry| match entry {
@@ -119,12 +137,19 @@ fn search_is_case_insensitive() -> Result<(), Box<dyn Error>> {
     }
 
     let db = Database::<Value>::open(&base)?;
+    
     // Search for "hello" should find all variants
-    let entries: Vec<Entry<Value>> = db.search(None, "hello")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("hello".to_string())
+    );
+    let entries: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
     assert_eq!(entries.len(), 3);
     
     // Search for "WORLD" should also find all variants
-    let entries2: Vec<Entry<Value>> = db.search(None, "WORLD")?.collect();
+    let filter: Box<dyn LazyShardFilter<Value, _>> = Box::new(
+        LazySearchFilter::new("WORLD".to_string())
+    );
+    let entries2: Vec<Entry<Value>> = db.list_with_filter("", None, filter)?.collect();
     assert_eq!(entries2.len(), 3);
     Ok(())
 }

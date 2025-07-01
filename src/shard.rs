@@ -197,6 +197,11 @@ where
         self.tags.as_ref()
     }
     
+    /// Check if this shard has a search index.
+    pub fn has_search_index(&self) -> bool {
+        self.search.is_some()
+    }
+    
     /// Stream entries matching the given substring query via the shard's search index,
     /// optionally restricted to those whose key starts with `prefix`.
     pub fn stream_by_search<'a>(
@@ -235,7 +240,7 @@ where
                     fn seek(&mut self, _cursor: Self::Cursor) {}
 
                     fn next(&mut self) -> Option<Self::Item> {
-                        while let Some((key_bytes, doc_id)) = self.stream.next() {
+                        while let Some((_key_bytes, doc_id)) = self.stream.next() {
                             if let Ok(Some(entry)) = self.shard.get_entry(doc_id) {
                                 if let crate::Entry::Key(ref k, _, _) = entry {
                                     if let Some(pref) = self.prefix {
@@ -350,5 +355,60 @@ where
             }
             Ok(Box::new(EmptyStreamer::<V, C>(std::marker::PhantomData)))
         }
+    }
+    
+    /// Stream entries by a list of document IDs.
+    pub fn stream_by_ids<'a>(
+        &'a self,
+        doc_ids: Vec<u64>,
+    ) -> Result<Box<dyn crate::Streamer<Item = crate::Entry<V>, Cursor = Vec<u8>> + 'a>> {
+        struct IdStreamer<'a, V, C>
+        where
+            V: DeserializeOwned,
+            C: PayloadCodec,
+        {
+            shard: &'a Shard<V, C>,
+            doc_ids: Vec<u64>,
+            idx: usize,
+        }
+
+        impl<'a, V, C> crate::Streamer for IdStreamer<'a, V, C>
+        where
+            V: DeserializeOwned,
+            C: PayloadCodec,
+        {
+            type Item = crate::Entry<V>;
+            type Cursor = Vec<u8>;
+
+            fn cursor(&self) -> Self::Cursor {
+                self.idx.to_le_bytes().to_vec()
+            }
+
+            fn seek(&mut self, cursor: Self::Cursor) {
+                if cursor.len() >= 8 {
+                    let mut bytes = [0u8; 8];
+                    bytes.copy_from_slice(&cursor[..8]);
+                    self.idx = usize::from_le_bytes(bytes);
+                }
+            }
+
+            fn next(&mut self) -> Option<Self::Item> {
+                while self.idx < self.doc_ids.len() {
+                    let doc_id = self.doc_ids[self.idx];
+                    self.idx += 1;
+                    
+                    if let Ok(Some(entry)) = self.shard.get_entry(doc_id) {
+                        return Some(entry);
+                    }
+                }
+                None
+            }
+        }
+        
+        Ok(Box::new(IdStreamer {
+            shard: self,
+            doc_ids,
+            idx: 0,
+        }))
     }
 }
